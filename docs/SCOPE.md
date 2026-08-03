@@ -2,7 +2,7 @@
 
 High-level scope and decision record for an open source rebuild of the nio platform. This document gives full background context for the system being built. It is the input to a more detailed SPEC. Decisions here are settled unless marked **OPEN**.
 
-Working name: `eieio` (candidates floated: `thenio`, `zio`). Placeholder used throughout: **the platform**.
+Name: **eieio** (settled; candidates floated and rejected: `thenio`, `zio`). Identifier prefix throughout the ABI, tooling, and crates: `eio` (§5).
 
 ---
 
@@ -172,15 +172,32 @@ Target capability: a whole service can be built, configured, deployed, started, 
 
 ## 5. Nomenclature
 
-Keep **block** and **signal**. Replace the generic tier names. **OPEN**, current direction:
+Settled. nio's vocabulary is kept except `Instance` → `Node`; the terms earned their keep and renaming them bought nothing.
 
-|nio|Candidate|Note|
-|---|---|---|
-|System|System / Mesh / Fleet||
-|Instance|Node|de facto standard term|
-|Service|Flow / Graph / Service|"Flow" matches Node-RED convention|
+|Term|Meaning|
+|---|---|
+|System|A group of nodes communicating via pub/sub|
+|Node|A single device running eieio (daemon-class or leaf-class, §3.7)|
+|Service|A graph of configured, connected blocks on one node; the unit of deployment|
+|Block|An executable unit: input signal → block logic → optional output signal|
+|Signal|A batch of data (list of dicts) moving through the system|
 
-Constraint: avoid collisions with basic programming terminology.
+### 5.1 Identifier prefix
+
+The project is `eieio`; the identifier prefix is `eio` — short enough for hot-path signatures, unambiguous under grep. Applies uniformly:
+
+|Surface|Form|
+|---|---|
+|WASM guest exports|`eio_configure`, `eio_alloc`, `eio_process_signals`, …|
+|WASM import namespaces|`eio:core`, `eio:state`, `eio:gpio`, …|
+|Module custom section|`eio:manifest`|
+|SDK crate / import path|`eio-sdk` / `eio_sdk`|
+|Cargo subcommand|`cargo eio`|
+|Node data directory|`/etc/eieio/`|
+
+`nio` survives only in historic references (§1) and links to the original project's repos. Any `nio_*` or `nio:*` identifier in code or docs is a leftover and a bug.
+
+**Still open:** the expression language's own name (EXPR-SPEC §13).
 
 ---
 
@@ -196,10 +213,17 @@ Constraint: avoid collisions with basic programming terminology.
 
 ## 7. Sequencing
 
-1. **Block ABI spec** — guest exports, host function set (core + hardware capabilities), CBOR buffer conventions, lifecycle, manifest schema. Everything else builds against this contract.
-2. Daemon skeleton: load/run blocks, service execution, local signal routing.
-3. Pub/sub transport decision + cross-node signals.
-4. Service definition file format + management API.
-5. CLI + agent tooling.
-6. Designer UI.
-7. Leaf runtime + firmware build pipeline.
+**Specification phase — done (Draft 1).** ABI-SPEC (the contract everything builds against), EXPR-SPEC, SDK-SPEC, DAEMON-SPEC, DESIGNER-SPEC.
+
+**Implementation phase.** Bottom-up: the leaf-shareable `no_std` crates first, because they are the most completely specified, carry conformance suites, and unblock everything above them.
+
+1. `signal` — CBOR value, signal, and batch types (ABI §6.3). Small; unblocks `expr`.
+2. `expr` — parser, static analysis, interpreter, budgets, plus the `expr-tests/` vector suite (EXPR §11). Proves the `no_std` discipline and gives the Designer its in-browser linter early.
+3. `manifest` — schema types, parsing, import-section cross-check (ABI §4.3, §11).
+4. `host-core` + `daemon` skeleton — lifecycle driver, executor, router; load and run a block, route signals locally.
+5. `block-sdk` + first golden block, then the conformance harness (ABI §13).
+6. Service file format + management API (DAEMON-SPEC §2, §9).
+7. Pub/sub transport decision + cross-node signals (§3.9 OPEN).
+8. CLI + agent tooling (MCP).
+9. Designer UI.
+10. Leaf runtime + firmware build pipeline.
