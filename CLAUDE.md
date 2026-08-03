@@ -1,0 +1,132 @@
+# CLAUDE.md
+
+Guidance for agents working in this repository.
+
+## What this is
+
+eieio is a distributed stream-processing platform: WASM **blocks** wired into **services** running on **nodes** that form a **System**, targeting everything from servers down to MCUs. `README.md` is the human orientation; this file is how to build here.
+
+**Current state: design stage. There is no code.** The repository is `docs/` plus this file. The first commit of Rust is still ahead (see [Implementation order](#implementation-order)).
+
+## The prime directive: specs are normative
+
+The specifications in `docs/` are not design notes that code may drift from. They are the contract that the daemon, the leaf runtime, the SDK, the registry, and the conformance suites are all written against — the whole architecture depends on two independent host implementations agreeing byte for byte.
+
+1. **Never implement past a spec.** If the spec is silent, ambiguous, or wrong for what you are building: stop, say so, amend the spec, then write the code.
+2. **Spec change and code change land together**, in the same commit. A spec that describes something the code does not do is worse than no spec.
+3. **Decisions are recorded in place** — as edits to `SCOPE.md` or the relevant spec. There is no ADR log; do not start one.
+4. **`OPEN` items live in `SCOPE.md` only.** Specs reference them; they do not re-litigate them. Resolving an open question means editing `SCOPE.md` §3 and removing the marker — never quietly picking an answer in a spec or in code.
+5. **`PROPOSED` markers** in a spec mean drafted-but-unratified. Implementing one is how it gets ratified: remove the marker in the same commit.
+6. **`MUST`/`SHOULD`/`MAY`** in ABI-SPEC and EXPR-SPEC are RFC 2119 and mean exactly that. A `MUST` is not a strong suggestion.
+
+If a spec turns out to be awkward to implement, that is a finding, not an obstacle to route around. ABI-SPEC §14 states the rule explicitly for the SDK: friction in the wrapper means the spec is wrong.
+
+## Which document governs what
+
+|Document|Authoritative for|
+|---|---|
+|`docs/SCOPE.md`|Every settled decision, all `OPEN` items, vocabulary, sequencing. Read first.|
+|`docs/specs/ABI-SPEC.md`|Host↔guest binary contract: exports, imports, memory rules, lifecycle, status codes, manifest schema, versioning. **Everything else builds against this.**|
+|`docs/specs/EXPR-SPEC.md`|The expression language: grammar, data model, evaluation, builtins, errors, budgets.|
+|`docs/specs/SDK-SPEC.md`|The guest-side Rust crate. High-level; expects expansion.|
+|`docs/specs/DAEMON-SPEC.md`|Daemon-class node internals: crates, on-disk layout, executor, router, API. High-level; expects per-subsystem expansion.|
+|`docs/specs/DESIGNER-SPEC.md`|The visual management surface. High-level; expects expansion.|
+
+Each spec has an **expansion list** as its final section — the in-depth work it knows it is missing. Consult it before deciding something is unspecified.
+
+## Naming
+
+The project is **eieio**; the identifier prefix is **`eio`** (SCOPE §5.1).
+
+|Surface|Form|
+|---|---|
+|Guest exports|`eio_configure`, `eio_alloc`, `eio_free`, `eio_process_signals`, `eio_on_timer`, …|
+|Import namespaces|`eio:core`, `eio:state`, `eio:timer`, `eio:gpio`, `eio:i2c`, `eio:http`|
+|Custom section|`eio:manifest`|
+|SDK|crate `eio-sdk`, import path `eio_sdk` (directory `crates/block-sdk`)|
+|Tooling|`cargo eio`|
+|Node data dir|`/etc/eieio/`|
+
+`nio` is the defunct predecessor. It appears legitimately only in historic prose (SCOPE §1) and links to the original repos. **Any `nio_*` or `nio:*` identifier in code or a spec is a leftover — fix it.**
+
+Vocabulary is settled and used precisely: **System** (group of nodes), **Node** (one device), **Service** (block graph on a node), **Block**, **Signal** (a *batch*, not a single record). Do not introduce "flow", "pipeline", "instance", "agent", or "job" as synonyms.
+
+## Repository layout
+
+```
+Cargo.toml            workspace root
+crates/
+  host-core/  expr/  signal/  manifest/     ★ shared with the leaf runtime
+  daemon/  block-sdk/  cargo-eio/  conformance/
+designer/             SvelteKit app, own package.json
+examples/
+  services/           sample service TOMLs
+  blocks/             starter blocks for demos and tests
+docs/
+  SCOPE.md  specs/
+```
+
+★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries. `block-sdk` is `no_std` by necessity: it compiles into guests.
+
+## Implementation order
+
+Bottom-up, most-specified first. Do not start a later item because an earlier one is boring.
+
+1. **`signal`** — CBOR value/signal/batch types (ABI §6.3), minicbor, `no_std`.
+2. **`expr`** — parser → static analysis → interpreter → budgets, plus `expr-tests/` conformance vectors (EXPR §11). The most completely specified component in the repo; it should need no design decisions.
+3. **`manifest`** — schema types, parsing, WASM import-section cross-check (ABI §4.3, §11), `manifest.schema.json`.
+4. **`host-core` + `daemon` skeleton** — lifecycle driver, executor, router; load a block and route a signal.
+5. **`block-sdk`** + first golden block, then the reference harness (ABI §13).
+6. Service file format + management API, then the remaining SCOPE §7 sequence.
+
+## Invariants worth stating twice
+
+These are the decisions most likely to be eroded by a reasonable-seeming local improvement:
+
+- **Core WASM only.** No WASI, no component model, no threads, no reference types beyond MVP. The modules must run under wasm3. Reaching for a component-model convenience deletes the embedded tier (SCOPE §3.2, ABI §1).
+- **Copies, not shared references,** across the boundary. Host never retains a guest pointer past the call (ABI §9).
+- **`emit` enqueues; it does not deliver.** Routing happens after the callback returns. This is what makes reentrancy unconstructible (ABI §6.2).
+- **Traps are death; status codes are life.** A non-zero callback return is logged and counted, never fatal. Only traps, fuel exhaustion, and deadline violations kill an instance (ABI §8).
+- **Expressions are pure and terminating.** No IO, no clock, no RNG, no recursion, no user-defined loops. Sorted map iteration, no NaN/inf escape, pinned canonical rendering. Determinism is the replay and debugging lever — do not trade it for a convenience builtin (EXPR §1, §9).
+- **Missing data is an error, not null.** `$temp` on a signal without `temp` fails that signal. Silent nulls turn config typos into 2 a.m. mysteries (EXPR §6).
+- **Every property is an expression.** There is no static/dynamic property split at the ABI level. Literal-looking fields in the Designer are a UI affordance only (ABI §11).
+- **All `unsafe` lives in `block-sdk`'s audited glue**, each block carrying a `// SAFETY:` comment citing the ABI section that justifies it. Block authors write safe Rust exclusively (SDK §4).
+- **No async/await in guests.** No runtime exists there; the ABI is callback-shaped (SDK §3).
+- **Nodes own their configuration as files.** The Designer's database holds Systems, node addresses, and caches — nothing a node could not be asked for. Persisting service state there is an architecture bug (SCOPE §3.8).
+- **The Designer is a peer client.** Any capability it has that an agent cannot reach through the daemon API or MCP is a bug (SCOPE §4, DESIGNER §8).
+- **System blocks are transport endpoints only.** `publisher`/`subscriber` are host-native because they need credentials and transport internals; that precedent does not extend (DAEMON §6).
+
+## Testing
+
+Conformance is the mechanism that keeps two host implementations honest, so it is not an afterthought:
+
+- **`expr-tests/`** — host-agnostic vectors: expression, optional signal CBOR, expected value or error code. Every builtin, every special form, every error code, budget floors, signal-dependence classification (EXPR §11).
+- **`conformance/`** — reference wasmtime harness plus golden blocks: pure transform, multi-port filter, timer emitter, stateful counter, GPIO echo, and hostile blocks (spinner, allocator-liar, reentrancy-prober, oversize-emitter) (ABI §13).
+- Daemon and leaf runtime must pass the same suites. **Divergence between hosts is a conformance bug by definition** — when they disagree, the fix is not "make the leaf special".
+- New ABI or language surface arrives with its vectors in the same commit.
+
+## Commits
+
+- Emoji-prefixed subject lines. **No trailers, no `Co-Authored-By`, no `Generated with` footers.**
+- Commit directly to `main`. No feature branches unless asked.
+- Group changes by area, one commit per area, each with its own best-fit emoji — not one omnibus commit.
+
+|Emoji|For|
+|---|---|
+|✨|New feature or capability|
+|🐛|Bug fix|
+|♻️|Refactor|
+|📝|Docs, specs, README|
+|💡|Scope, design decisions, planning artifacts|
+|🤖|Agent-facing config: this file, skills, MCP setup|
+|✅|Tests, conformance vectors|
+|🔧|Build config, Cargo/workspace, CI|
+|🙈|`.gitignore`|
+|📄|License, legal|
+|⚡|Performance|
+|🔒|Security, auth|
+|🚚|Renames and moves|
+|🔥|Removing code|
+|⬆️|Dependency bumps|
+
+Pick a better-fitting emoji over a listed one when the list does not cover it.
