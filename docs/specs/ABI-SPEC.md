@@ -16,7 +16,7 @@ These follow from SCOPE §3.2–3.5 and are restated here because every rule bel
 2. **Single-threaded actor model.** One WASM instance per block-instance-in-a-service. The host serializes all calls into an instance. The host MUST NOT call into a guest that is mid-call. Guest→host calls MUST NOT re-enter the guest.
 3. **Copies, not shared references.** Every boundary crossing copies bytes between host memory and guest linear memory. No pointers outlive the call that carries them unless this spec says otherwise.
 4. **CBOR everywhere.** All structured payloads crossing the boundary are CBOR (SCOPE §3.4). Same encoding on the wire and across the ABI.
-5. **The import section is the capability system.** A module's imports are cross-checked against its manifest at load time. A module importing functions outside the `nio:*` namespaces MUST be rejected.
+5. **The import section is the capability system.** A module's imports are cross-checked against its manifest at load time. A module importing functions outside the `eio:*` namespaces MUST be rejected.
 6. **Traps are death.** Any WASM trap invalidates the instance. Recoverable conditions are status codes.
 
 ---
@@ -57,31 +57,31 @@ These follow from SCOPE §3.2–3.5 and are restated here because every rule bel
 |Export|Signature|Purpose|
 |---|---|---|
 |`memory`|linear memory|The instance's memory; host reads/writes payloads here|
-|`nio_abi_version`|`() -> i32`|Packed ABI version (§12)|
-|`nio_alloc`|`(size: i32) -> i32`|Guest allocator; returns ptr or 0 on failure|
-|`nio_free`|`(ptr: i32, size: i32) -> ()`|Releases a `nio_alloc` allocation|
-|`nio_configure`|`(ptr: i32, len: i32) -> i32`|Receives the instance descriptor (§5.2)|
-|`nio_start`|`() -> i32`|Transition to running|
-|`nio_stop`|`() -> i32`|Transition to stopped|
-|`nio_process_signals`|`(input_port: i32, ptr: i32, len: i32) -> i32`|Deliver a batch on an input port|
+|`eio_abi_version`|`() -> i32`|Packed ABI version (§12)|
+|`eio_alloc`|`(size: i32) -> i32`|Guest allocator; returns ptr or 0 on failure|
+|`eio_free`|`(ptr: i32, size: i32) -> ()`|Releases a `eio_alloc` allocation|
+|`eio_configure`|`(ptr: i32, len: i32) -> i32`|Receives the instance descriptor (§5.2)|
+|`eio_start`|`() -> i32`|Transition to running|
+|`eio_stop`|`() -> i32`|Transition to stopped|
+|`eio_process_signals`|`(input_port: i32, ptr: i32, len: i32) -> i32`|Deliver a batch on an input port|
 
 ### 4.2 Optional exports (callbacks)
 
-Present only if the block uses the corresponding capability. The host MUST verify that a module importing `nio:timer` exports `nio_on_timer`, etc., at load time.
+Present only if the block uses the corresponding capability. The host MUST verify that a module importing `eio:timer` exports `eio_on_timer`, etc., at load time.
 
 |Export|Signature|Paired capability|
 |---|---|---|
-|`nio_on_timer`|`(timer_id: i32) -> i32`|`timer`|
-|`nio_on_gpio`|`(watch_id: i32, value: i32) -> i32`|`gpio`|
-|`nio_on_http`|`(req_id: i32, status: i32, ptr: i32, len: i32) -> i32`|`http`|
+|`eio_on_timer`|`(timer_id: i32) -> i32`|`timer`|
+|`eio_on_gpio`|`(watch_id: i32, value: i32) -> i32`|`gpio`|
+|`eio_on_http`|`(req_id: i32, status: i32, ptr: i32, len: i32) -> i32`|`http`|
 
 ### 4.3 Imports
 
-All imports MUST be from `nio:*` namespaces (§7). Anything else fails validation. The set of imported namespaces MUST be a subset of the capabilities declared in the manifest (§11); the import section is authoritative, the manifest is advisory, and a mismatch in either direction where imports exceed manifest MUST be a load-time rejection.
+All imports MUST be from `eio:*` namespaces (§7). Anything else fails validation. The set of imported namespaces MUST be a subset of the capabilities declared in the manifest (§11); the import section is authoritative, the manifest is advisory, and a mismatch in either direction where imports exceed manifest MUST be a load-time rejection.
 
 ### 4.4 Custom section
 
-A module SHOULD embed its manifest as a custom section named `nio:manifest` (UTF-8 JSON, identical to the registry manifest). A `.wasm` file is then self-describing without registry metadata. If both are present the registry manifest and embedded manifest MUST be identical; hosts MAY reject on mismatch.
+A module SHOULD embed its manifest as a custom section named `eio:manifest` (UTF-8 JSON, identical to the registry manifest). A `.wasm` file is then self-describing without registry metadata. If both are present the registry manifest and embedded manifest MUST be identical; hosts MAY reject on mismatch.
 
 ---
 
@@ -97,15 +97,15 @@ trap (any state) → DEAD
 ```
 
 1. **Instantiate.** Host creates the instance, validates exports/imports/ABI version. No guest code runs except start-function-free module init (a module MUST NOT rely on a WASM start function).
-2. **`nio_configure(ptr, len)`.** Host allocates via `nio_alloc`, writes the instance descriptor, calls configure, guest frees. Guest MAY read properties (with `SIGNAL_NONE`), allocate internal state, and validate configuration. Non-zero return = configuration rejection; instance is discarded and the error surfaced to the deployer.
-3. **`nio_start()`.** Guest MAY arm timers, register GPIO watches, emit initial signals. After a zero return, the host begins delivering batches.
+2. **`eio_configure(ptr, len)`.** Host allocates via `eio_alloc`, writes the instance descriptor, calls configure, guest frees. Guest MAY read properties (with `SIGNAL_NONE`), allocate internal state, and validate configuration. Non-zero return = configuration rejection; instance is discarded and the error surfaced to the deployer.
+3. **`eio_start()`.** Guest MAY arm timers, register GPIO watches, emit initial signals. After a zero return, the host begins delivering batches.
 4. **Running.** Host invokes callbacks, serialized, in host-determined order. The host SHOULD deliver batches on one input port in arrival order; ordering across ports and across instances is unspecified (delivery guarantees are OPEN, SCOPE §3.4).
-5. **`nio_stop()`.** Host cancels outstanding timers/watches/requests after stop returns. Guest SHOULD flush state via `nio:state` before returning. A stopped instance is never restarted; service restart creates fresh instances (SCOPE §3.13 hot-reload posture).
-6. **DEAD.** Any trap, fuel exhaustion, or deadline violation. The host discards the instance and applies supervision policy (OPEN, SCOPE §3.13). Re-instantiation implies a fresh `nio_configure`; blocks MUST NOT assume linear-memory continuity across lives. Durable state goes through `nio:state`.
+5. **`eio_stop()`.** Host cancels outstanding timers/watches/requests after stop returns. Guest SHOULD flush state via `eio:state` before returning. A stopped instance is never restarted; service restart creates fresh instances (SCOPE §3.13 hot-reload posture).
+6. **DEAD.** Any trap, fuel exhaustion, or deadline violation. The host discards the instance and applies supervision policy (OPEN, SCOPE §3.13). Re-instantiation implies a fresh `eio_configure`; blocks MUST NOT assume linear-memory continuity across lives. Durable state goes through `eio:state`.
 
 ### 5.2 Instance descriptor
 
-The CBOR document passed to `nio_configure`. Properties are NOT included (they are pulled via `prop`, §7.1). Fields:
+The CBOR document passed to `eio_configure`. Properties are NOT included (they are pulled via `prop`, §7.1). Fields:
 
 ```
 {
@@ -129,7 +129,7 @@ Port and property indices are fixed for the life of the instance. Blocks resolve
 
 ### 6.1 Delivery
 
-Host: `nio_alloc(len)` → write CBOR batch → `nio_process_signals(input_port, ptr, len)` → guest processes → guest returns status → **guest owns the buffer and MUST `nio_free` it** (before or after returning; before the next callback at the latest).
+Host: `eio_alloc(len)` → write CBOR batch → `eio_process_signals(input_port, ptr, len)` → guest processes → guest returns status → **guest owns the buffer and MUST `eio_free` it** (before or after returning; before the next callback at the latest).
 
 ### 6.2 Emission
 
@@ -157,7 +157,7 @@ A batch is a CBOR array of CBOR maps. Keys are text strings. Values are any CBOR
 
 Import namespaces, with signatures. `-> i32` follows the status/size convention of §8 unless stated.
 
-### 7.0 `nio:core` — always available, requires no manifest capability
+### 7.0 `eio:core` — always available, requires no manifest capability
 
 |Import|Signature|Notes|
 |---|---|---|
@@ -175,7 +175,7 @@ Properties are always expressions, evaluated **host-side, per-signal, on demand*
 
 `prop(prop_id, signal_idx, buf, cap) -> i32`
 
-- `signal_idx` identifies a signal **within the batch of the current `nio_process_signals` call**, explicitly — no hidden cursor. Outside `process_signals`, or for signal-independent evaluation, pass `SIGNAL_NONE`.
+- `signal_idx` identifies a signal **within the batch of the current `eio_process_signals` call**, explicitly — no hidden cursor. Outside `process_signals`, or for signal-independent evaluation, pass `SIGNAL_NONE`.
 - Result is the CBOR-encoded evaluated value, written to `(buf, cap)`.
 - Return convention (§8): `0..=cap` bytes written; `> cap` = required size, nothing written, guest grows buffer and retries; `< 0` = error.
 - The host MUST cache evaluation results keyed by `(instance, prop_id, signal_idx)` for the duration of the current callback, so the grow-and-retry path does not re-evaluate.
@@ -185,7 +185,7 @@ Properties are always expressions, evaluated **host-side, per-signal, on demand*
 
 `prop` calls with `signal_idx` outside the current batch (and not `SIGNAL_NONE`) return `ERR_INVALID_ARG`.
 
-### 7.2 `nio:state` — capability `state`
+### 7.2 `eio:state` — capability `state`
 
 Durable KV, scoped to the block instance (namespaced by host: system/service/instance).
 
@@ -197,16 +197,16 @@ Durable KV, scoped to the block instance (namespaced by host: system/service/ins
 
 Durability is host-decided. On leaf hosts, `state_put` MAY return `ERR_THROTTLED` (flash wear budgets); blocks MUST treat persistence as best-effort and not as a message queue.
 
-### 7.3 `nio:timer` — capability `timer`
+### 7.3 `eio:timer` — capability `timer`
 
 |Import|Signature|
 |---|---|
 |`timer_set`|`(delay_ms: i64, repeat: i32) -> i32` (returns `timer_id` ≥ 0 or error)|
 |`timer_cancel`|`(timer_id: i32) -> i32`|
 
-Fires as `nio_on_timer(timer_id)`, serialized with all other callbacks. `repeat != 0` = periodic until cancelled or stop. Timer resolution and drift are host-defined; timers are not real-time guarantees.
+Fires as `eio_on_timer(timer_id)`, serialized with all other callbacks. `repeat != 0` = periodic until cancelled or stop. Timer resolution and drift are host-defined; timers are not real-time guarantees.
 
-### 7.4 `nio:gpio` — capability `gpio`
+### 7.4 `eio:gpio` — capability `gpio`
 
 |Import|Signature|
 |---|---|
@@ -216,9 +216,9 @@ Fires as `nio_on_timer(timer_id)`, serialized with all other callbacks. `repeat 
 |`gpio_watch`|`(pin: i32, edge: i32) -> i32` (1=rising, 2=falling, 3=both; returns `watch_id`)|
 |`gpio_unwatch`|`(watch_id: i32) -> i32`|
 
-Edges fire as `nio_on_gpio(watch_id, value)`. Pin numbering is host/platform-defined and surfaced through node configuration, not the ABI. Hosts without GPIO reject the capability at deploy validation (SCOPE §3.3).
+Edges fire as `eio_on_gpio(watch_id, value)`. Pin numbering is host/platform-defined and surfaced through node configuration, not the ABI. Hosts without GPIO reject the capability at deploy validation (SCOPE §3.3).
 
-### 7.5 `nio:i2c` — capability `i2c`
+### 7.5 `eio:i2c` — capability `i2c`
 
 |Import|Signature|
 |---|---|
@@ -228,13 +228,13 @@ Edges fire as `nio_on_gpio(watch_id, value)`. Pin numbering is host/platform-def
 
 Synchronous by design: I2C transactions are microseconds-to-milliseconds and fall within callback deadlines. (SPI/UART/BLE follow this pattern later; additive, minor version — §12.)
 
-### 7.6 `nio:http` — capability `http`
+### 7.6 `eio:http` — capability `http`
 
 |Import|Signature|
 |---|---|
 |`http_request`|`(ptr: i32, len: i32) -> i32` (returns `req_id`)|
 
-Request is a CBOR map: `{method, url, headers?, body?, timeout_ms?}`. Completion fires `nio_on_http(req_id, status, ptr, len)` where `(ptr, len)` is a host-allocated (via `nio_alloc`) CBOR map `{headers, body}` the guest MUST free. `status` < 0 = transport error; ≥ 0 = HTTP status. Async request-id pattern; the same shape applies to any future async capability.
+Request is a CBOR map: `{method, url, headers?, body?, timeout_ms?}`. Completion fires `eio_on_http(req_id, status, ptr, len)` where `(ptr, len)` is a host-allocated (via `eio_alloc`) CBOR map `{headers, body}` the guest MUST free. `status` < 0 = transport error; ≥ 0 = HTTP status. Async request-id pattern; the same shape applies to any future async capability.
 
 ---
 
@@ -266,12 +266,12 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 
 ## 9. Memory rules (normative summary)
 
-1. `nio_alloc`/`nio_free` are the only allocation channel across the boundary. Host never writes to guest memory it did not just allocate, except into `(buf, cap)` ranges the guest passed in the current call.
-2. **Inbound payloads** (`nio_configure`, `nio_process_signals`, `nio_on_http`): host allocates, guest owns after the call begins, guest MUST free.
+1. `eio_alloc`/`eio_free` are the only allocation channel across the boundary. Host never writes to guest memory it did not just allocate, except into `(buf, cap)` ranges the guest passed in the current call.
+2. **Inbound payloads** (`eio_configure`, `eio_process_signals`, `eio_on_http`): host allocates, guest owns after the call begins, guest MUST free.
 3. **Outbound payloads** (`emit`, `state_put`, `i2c_write`, `http_request`, `log`, `error`): guest allocates, host copies out during the call, guest owns and frees afterward. Host MUST NOT retain guest pointers past the call.
 4. **Guest-supplied out-buffers** (`prop`, `state_get`, `i2c_read`): guest allocates `(buf, cap)`; grow-and-retry per §8.
-5. `nio_alloc` returning 0 = allocation failure; a guest failing to allocate SHOULD return an error status rather than trap where possible.
-6. Alignment: `nio_alloc` MUST return 8-byte-aligned pointers.
+5. `eio_alloc` returning 0 = allocation failure; a guest failing to allocate SHOULD return an error status rather than trap where possible.
+6. Alignment: `eio_alloc` MUST return 8-byte-aligned pointers.
 7. `max_payload` (instance descriptor): host rejects `emit` beyond it with `ERR_LIMIT` and never delivers batches beyond it. Discoverable, so MCU limits are visible to blocks and to deploy-time validation.
 
 ---
@@ -286,7 +286,7 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 
 ## 11. Manifest schema
 
-JSON. Published in the registry alongside the OCI artifact (SCOPE §3.6) and embedded as the `nio:manifest` custom section (§4.4).
+JSON. Published in the registry alongside the OCI artifact (SCOPE §3.6) and embedded as the `eio:manifest` custom section (§4.4).
 
 ```json
 {
@@ -315,7 +315,7 @@ Notes:
 
 - **Every property is an expression** (design discussion §4, option (b)). There is no static/expression kind split. `type` declares what the expression must evaluate to (`bool | int | float | string | bytes | any`); the host type-checks the evaluated value and returns `ERR_EXPR` on mismatch. Constants are trivial expressions; the Designer MAY render simple literals as plain input fields — a UI affordance, not an ABI distinction.
 - `default` is an expression string in the platform's micro-Lisp (SCOPE §3.5; expression language grammar is specified separately).
-- `capabilities` ⊇ imported `nio:*` namespaces minus `nio:core` (§4.3).
+- `capabilities` ⊇ imported `eio:*` namespaces minus `eio:core` (§4.3).
 - Port order in `inputs`/`outputs` defines port indices (§5.2).
 - `aot` lists prebuilt AOT artifacts for leaf targets published alongside the portable module.
 - Property order defines `prop_id` — appending properties is backward compatible, reordering or removing is not; this is the block's (not the ABI's) versioning concern.
@@ -326,7 +326,7 @@ Full JSON Schema for the manifest ships in the repo as `manifest.schema.json`; t
 
 ## 12. ABI versioning
 
-- `nio_abi_version() -> i32` returns `(major << 16) | minor`. This document specifies **1.0**.
+- `eio_abi_version() -> i32` returns `(major << 16) | minor`. This document specifies **1.0**.
 - Host policy: reject `major` mismatch; accept `minor` ≤ host's minor (pure-additive guarantee).
 - Additive changes (new host namespaces/functions, new optional exports, new error codes): minor bump. Old blocks never import the new functions, so nothing breaks.
 - Changes to memory rules, lifecycle, calling conventions, sentinels, or the status convention: major bump.
@@ -363,5 +363,5 @@ This spec deliberately does not decide, and is compatible with any resolution of
 - Pub/sub transport and broker topology — SCOPE §3.9. (Publisher/subscriber blocks are ordinary blocks; transport is a host concern behind `emit`/delivery.)
 - Supervision policy on instance death — SCOPE §3.13. (ABI defines only: trap = death, re-instantiation = fresh configure.)
 - Transport security / node auth — SCOPE §3.11. (No ABI surface.)
-- Metrics — SCOPE §3.12. (Likely additive `nio:core` functions or pure host-side counters; minor version either way.)
+- Metrics — SCOPE §3.12. (Likely additive `eio:core` functions or pure host-side counters; minor version either way.)
 - Expression language grammar — SCOPE §3.5 specifies the constraints (pure, bounded, `no_std`, per-signal); the grammar gets its own spec. This document only fixes the _evaluation protocol_ (§7.1).

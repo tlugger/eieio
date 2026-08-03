@@ -11,14 +11,14 @@
 **PROPOSED** shape — a struct, a derive-style attribute macro, and a trait:
 
 ```rust
-use nio_sdk::prelude::*;
+use eio_sdk::prelude::*;
 
 #[block(
     name = "threshold_filter",
     description = "Route signals by comparing an attribute to a threshold",
     inputs(default),
     outputs(above, below),
-    capabilities()          // none beyond nio:core
+    capabilities()          // none beyond eio:core
 )]
 struct ThresholdFilter {
     #[prop(ty = "float", desc = "Compared per signal", default = "(float $value)")]
@@ -47,10 +47,10 @@ impl Block for ThresholdFilter {
 
 What the macro generates:
 
-- All ABI exports (`nio_configure`, `nio_start`, `nio_stop`, `nio_process_signals`, optional `nio_on_*`, `nio_abi_version`, `nio_alloc`/`nio_free`) wrapping the trait impl. Lifecycle methods (`configure`, `start`, `stop`) have default no-op impls; only `process_signals` is required for transform blocks; timer/gpio/http callbacks are optional trait methods gated by declared capabilities.
+- All ABI exports (`eio_configure`, `eio_start`, `eio_stop`, `eio_process_signals`, optional `eio_on_*`, `eio_abi_version`, `eio_alloc`/`eio_free`) wrapping the trait impl. Lifecycle methods (`configure`, `start`, `stop`) have default no-op impls; only `process_signals` is required for transform blocks; timer/gpio/http callbacks are optional trait methods gated by declared capabilities.
 - Port enums (`In`, `Out`) from the macro attributes — emitting to an undeclared port is a _compile_ error, not a runtime one.
 - `prop_id` mapping from field order, and typed `Prop<T>` handles whose `get(ctx, signal_idx)` wraps the ABI `prop` call: grow-and-retry buffer loop (ABI §7.1), CBOR decode, declared-type check. `get_static(ctx)` = `SIGNAL_NONE` evaluation for use in `configure`/`start`/timers.
-- **The manifest** (ABI §11): properties, ports, capabilities, ABI version are all derived from these same attributes and emitted as both `manifest.json` and the `nio:manifest` custom section at build time. Single source of truth in code; manifest/import mismatches become unrepresentable rather than merely validated.
+- **The manifest** (ABI §11): properties, ports, capabilities, ABI version are all derived from these same attributes and emitted as both `manifest.json` and the `eio:manifest` custom section at build time. Single source of truth in code; manifest/import mismatches become unrepresentable rather than merely validated.
 
 ## 2. Core types
 
@@ -62,7 +62,7 @@ What the macro generates:
 
 ## 3. Capability wrappers
 
-One safe wrapper per `nio:*` namespace, present on `Ctx` only when declared (macro gates them — using `ctx.gpio()` without `capabilities(gpio)` is a compile error):
+One safe wrapper per `eio:*` namespace, present on `Ctx` only when declared (macro gates them — using `ctx.gpio()` without `capabilities(gpio)` is a compile error):
 
 - `ctx.state()` — `get/put/del` over typed CBOR values; grow-and-retry hidden; `ERR_THROTTLED` surfaced as a matchable error, per ABI §7.2's "best-effort, not a queue" posture.
 - `ctx.timers()` — `set(Duration, Repeat) -> TimerId`, `cancel`. Fires `Block::on_timer(&mut self, ctx, TimerId)`.
@@ -71,21 +71,21 @@ One safe wrapper per `nio:*` namespace, present on `Ctx` only when declared (mac
 
 ## 4. Guest internals (the unsafe budget)
 
-- `#![no_std]` + `alloc`; **PROPOSED** allocator: `dlmalloc` (Rust's wasm default) behind `nio_alloc`/`nio_free` with the ABI's 8-byte alignment guarantee.
+- `#![no_std]` + `alloc`; **PROPOSED** allocator: `dlmalloc` (Rust's wasm default) behind `eio_alloc`/`eio_free` with the ABI's 8-byte alignment guarantee.
 - The entire `unsafe` surface, enumerated for audit: allocator export glue, `(ptr,len) ↔ &[u8]` conversions at each export entry and host-fn call site, and the panic handler. Nothing else. Target: every `unsafe` block carries a `// SAFETY:` comment citing the ABI section that justifies it.
 - **Panics abort → trap → instance death** (ABI §6 invariant 6). The SDK's job is making panics rare in safe code (`get_or`, checked ops in examples) — not catching them. `panic = "abort"` enforced via the build tooling.
 
 ## 5. Build and packaging tooling
 
-**PROPOSED:** a `cargo nio` subcommand (separate `cargo-nio` crate):
+**PROPOSED:** a `cargo eio` subcommand (separate `cargo-eio` crate):
 
 ```
-cargo nio new <name>         template block repo (CI included)
-cargo nio build              wasm32-unknown-unknown, panic=abort, opt for size,
-                             embed nio:manifest section, emit manifest.json
-cargo nio test               native tests + harness run (§6)
-cargo nio aot --target esp32s3   WAMR AOT artifact for leaf targets
-cargo nio publish            package OCI artifact (+ AOT variants), push, sign (cosign)
+cargo eio new <name>         template block repo (CI included)
+cargo eio build              wasm32-unknown-unknown, panic=abort, opt for size,
+                             embed eio:manifest section, emit manifest.json
+cargo eio test               native tests + harness run (§6)
+cargo eio aot --target esp32s3   WAMR AOT artifact for leaf targets
+cargo eio publish            package OCI artifact (+ AOT variants), push, sign (cosign)
 ```
 
 The template repo's CI runs build/test/publish on tag — this is the "block repos independently released to the registry" flow from SCOPE §3.6 made concrete.

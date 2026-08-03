@@ -294,6 +294,6 @@ The monorepo carries `expr-tests/`: a host-agnostic vector suite (input expressi
 
 ## 13. OPEN / deferred
 
-- **Language name** — tracked with platform nomenclature, SCOPE §5.
+- **Language name** — OPEN. Platform nomenclature is settled (SCOPE §5); this one is not. Referred to as "the expression language" until it is.
 - **Regex, math extensions, bytes ops, date/time** — deferred per §7.7; all additive (minor version). Expression-language versioning rides the ABI minor version: the builtin table and grammar for ABI 1.0 are exactly this document.
 - **Designer affordances** (rendering literal-only expressions as plain input fields, expression linting UI) — UI concerns; no language surface.

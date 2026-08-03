@@ -21,9 +21,12 @@ crates/
   manifest/      ★ Manifest schema types, parsing, import-section cross-check
   daemon/          Binary: tokio runtime, wasmtime engine, OCI client,
                    management API, state store, pub/sub bridge
-  block-sdk/       Guest-side (SDK-SPEC)
+  block-sdk/       Guest-side (SDK-SPEC); published as `eio-sdk`
+  cargo-eio/       Block build/publish tooling (SDK-SPEC §5)
   conformance/     Reference harness + golden blocks (ABI §13) + expr vectors (EXPR §11)
 ```
+
+★-marked crates are shared with the leaf runtime and MUST stay `no_std`-compatible (`alloc` allowed). `daemon` and `cargo-eio` are `std` binaries; `block-sdk` is `no_std` by necessity (it compiles into guests).
 
 Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (leaf) MUST pass the same harness — the shared crate is how divergence is prevented structurally, not just tested for.
 
@@ -34,14 +37,14 @@ Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (le
 **PROPOSED:**
 
 ```
-/etc/nio/                      (or --data-dir)
+/etc/eieio/                      (or --data-dir)
   node.toml                    node identity, listen addr, limits, budgets
   auth/                        node token, TLS material (OPEN, SCOPE §3.11)
   services/
     <service>.toml             one service definition per file
   blocks/                      OCI pull cache: <name>/<version>/block.wasm
                                (+ precompiled wasmtime artifact, keyed by engine hash)
-  state/                       nio:state backing store
+  state/                       eio:state backing store
 ```
 
 - **Service definition format: TOML** (PROPOSED — human-first, comment-friendly, agents handle it fine; JSON Schema published for the equivalent structure regardless). One file = one service = the deployable unit.
@@ -57,7 +60,7 @@ Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (le
 ## 4. Block manager
 
 - Pulls OCI artifacts (SCOPE §3.6) by reference; verifies digest; **PROPOSED:** verifies cosign signature when the registry entry carries one, policy knob in `node.toml` (`require_signed = true|false`).
-- Load-time validation is exactly ABI §4: exports present, imports ⊆ `nio:*`, imports ⊆ manifest capabilities, ABI version accepted, embedded manifest (if present) matches registry manifest.
+- Load-time validation is exactly ABI §4: exports present, imports ⊆ `eio:*`, imports ⊆ manifest capabilities, ABI version accepted, embedded manifest (if present) matches registry manifest.
 - Caches wasmtime-precompiled modules keyed by (digest, engine config hash) — cold-start matters on a Pi.
 - Airgap/offline: cache is authoritative when the registry is unreachable; a service whose blocks are cached starts fine offline.
 
@@ -67,7 +70,7 @@ The runtime embodiment of ABI §1 invariants:
 
 - One wasmtime `Store` + instance per block instance. **One tokio task per block instance** owning the store (stores are `!Sync`; ownership model and serialization requirement align perfectly): the task loops over a bounded mpsc mailbox of work items (`Deliver{port, batch}`, `Timer{id}`, `GpioEdge{..}`, `HttpDone{..}`, `Stop`), invoking guest callbacks strictly sequentially. Serialized invocation falls out of the architecture rather than a lock.
 - Fuel or epoch interruption per callback (ABI §10); budget from `node.toml`. Trap/exhaustion → instance DEAD → supervision (§8).
-- Host functions (`nio:*`) implemented against the mailbox/router: `emit` enqueues to the router (never delivers inline — ABI §6.2); `prop` hits the expression engine with the callback's current-batch context; async capabilities post completions back into the mailbox.
+- Host functions (`eio:*`) implemented against the mailbox/router: `emit` enqueues to the router (never delivers inline — ABI §6.2); `prop` hits the expression engine with the callback's current-batch context; async capabilities post completions back into the mailbox.
 
 ## 6. Router
 
@@ -82,7 +85,7 @@ Transport is OPEN (SCOPE §3.9). The bridge is the isolation layer that keeps it
 
 ## 8. Supervision
 
-Policy is OPEN (SCOPE §3.13); the daemon ships the _mechanism_: per-instance restart with exponential backoff and a restart-count circuit breaker escalating to service-errored. Re-instantiation = fresh `nio_configure` (ABI §5.1); durable state via `nio:state` only. **PROPOSED default policy:** restart-instance up to N times per window, then stop service and surface. Callback error returns (ABI §8) are counted/logged, never restart-triggering.
+Policy is OPEN (SCOPE §3.13); the daemon ships the _mechanism_: per-instance restart with exponential backoff and a restart-count circuit breaker escalating to service-errored. Re-instantiation = fresh `eio_configure` (ABI §5.1); durable state via `eio:state` only. **PROPOSED default policy:** restart-instance up to N times per window, then stop service and surface. Callback error returns (ABI §8) are counted/logged, never restart-triggering.
 
 ## 9. Management API (SCOPE §3.10)
 
@@ -100,14 +103,14 @@ GET    /services/{s}/errors           validation/runtime error detail
 POST   /taps                          {service, connection} -> tap_id
 GET    /taps/{id}/stream              SSE/WS: sampled signals + expr-failure events
 GET    /logs/stream                   SSE/WS, filterable by service/instance
-GET    /state/{instance}              inspect nio:state KV (debug)
+GET    /state/{instance}              inspect eio:state KV (debug)
 ```
 
 Auth: per-node bearer token (SCOPE §3.11), generated by the daemon on first boot, printed once / readable from `auth/`. Transport security OPEN.
 
 ## 10. State store
 
-Backs `nio:state` (ABI §7.2), namespaced `service/instance/key`. **PROPOSED: redb** (pure-Rust embedded KV, single file, no compaction daemon). Leaf hosts implement the same host functions against flash with `ERR_THROTTLED` budgets — another host-core trait boundary.
+Backs `eio:state` (ABI §7.2), namespaced `service/instance/key`. **PROPOSED: redb** (pure-Rust embedded KV, single file, no compaction daemon). Leaf hosts implement the same host functions against flash with `ERR_THROTTLED` budgets — another host-core trait boundary.
 
 ## 11. Observability
 
