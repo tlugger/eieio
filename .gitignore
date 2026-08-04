@@ -1,4 +1,7 @@
 
+# Implementation plan files (transient artifacts of the /implement skill)
+*.eio-plan.md
+
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
