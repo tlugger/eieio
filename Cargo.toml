@@ -1,0 +1,27 @@
+[workspace]
+# Resolver 3 is the edition-2024 default and is MSRV-aware; a virtual manifest
+# must state it explicitly.
+resolver = "3"
+# Crates are added by their own epics. This list grows; it is never a glob,
+# because a glob that matches nothing is a hard error in cargo.
+members = ["crates/signal"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+repository = "https://github.com/tlugger/eieio"
+
+# Lint levels are shared here; the -D warnings escalation belongs to the `just
+# lint` recipe, so a local `cargo build` stays usable while CI stays strict.
+# Crates opt in with `[lints] workspace = true`.
+[workspace.lints.rust]
+missing_docs = "warn"
+# All `unsafe` lives in block-sdk's audited glue, each block carrying a
+# `// SAFETY:` comment citing the ABI section that justifies it (SDK-SPEC §4).
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

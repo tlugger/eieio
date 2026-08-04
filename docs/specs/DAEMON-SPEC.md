@@ -30,6 +30,23 @@ crates/
 
 Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (leaf) MUST pass the same harness — the shared crate is how divergence is prevented structurally, not just tested for.
 
+**Naming.** Directory names are exactly as listed above. Package names are `eio`-prefixed and imported with underscores:
+
+|Directory|Package|Import path|
+|---|---|---|
+|`host-core/`|`eio-host-core`|`eio_host_core`|
+|`expr/`|`eio-expr`|`eio_expr`|
+|`signal/`|`eio-signal`|`eio_signal`|
+|`manifest/`|`eio-manifest`|`eio_manifest`|
+|`daemon/`|`eio-daemon`|—|
+|`block-sdk/`|`eio-sdk`|`eio_sdk`|
+|`cargo-eio/`|`cargo-eio`|—|
+|`conformance/`|`eio-conformance`|`eio_conformance`|
+
+`cargo-eio` is the sole exception: cargo discovers subcommands by binary name, so it cannot be prefixed differently. No crate overrides its `[lib] name` — package name and import path differ only by the `-`→`_` substitution cargo already performs.
+
+The prefix is not cosmetic. `eio-sdk` publishes to crates.io (SCOPE §7.1), and a published crate cannot depend on path-only crates, so every crate reachable from it — `signal` (SDK-SPEC §2) and `expr` (SDK-SPEC §6.1, `TestHost` evaluates with the real interpreter) at minimum — MUST carry a publishable name. The bare names `signal`, `expr`, and `manifest` are already taken on crates.io.
+
 ---
 
 ## 2. On-disk layout (source of truth, SCOPE §3.8)

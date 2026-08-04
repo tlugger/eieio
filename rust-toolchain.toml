@@ -1,0 +1,10 @@
+[toolchain]
+# Pinned to an exact release, not the rolling `stable` channel: clippy and
+# rustfmt change behaviour between releases, and every host implementation has
+# to agree byte for byte. Bumping this is a deliberate, reviewable commit.
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+# Blocks are core WASM modules (ABI-SPEC §1). The bare-metal target used by
+# `just check-nostd` is added by eieio-u2m.2 with that recipe.
+targets = ["wasm32-unknown-unknown"]
