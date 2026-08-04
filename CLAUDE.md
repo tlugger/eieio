@@ -99,6 +99,8 @@ These are the decisions most likely to be eroded by a reasonable-seeming local i
 
 ## Testing
 
+**Run `just ci`, not raw cargo.** It is the same gate CI runs — `fmt-check`, `lint` (warnings denied, plus the per-crate lint opt-in check), `build`, `test`, `check-nostd` — and `check-nostd` is the only thing that catches a `std` dependency creeping into a ★ crate. `just` bare lists the rest.
+
 Conformance is the mechanism that keeps two host implementations honest, so it is not an afterthought:
 
 - **`expr-tests/`** — host-agnostic vectors: expression, optional signal CBOR, expected value or error code. Every builtin, every special form, every error code, budget floors, signal-dependence classification (EXPR §11).
