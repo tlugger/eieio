@@ -227,3 +227,28 @@ The project is `eieio`; the identifier prefix is `eio` — short enough for hot-
 8. CLI + agent tooling (MCP).
 9. Designer UI.
 10. Leaf runtime + firmware build pipeline.
+
+### 7.1 Work tracking (beads)
+
+The implementation phase is tracked in the beads issue tracker (`bd`, see CLAUDE.md), planned 2026-08. One epic per sequencing stage plus cross-cutting epics for tooling and CI/CD; dependencies encode the ordering above, so `bd ready` always surfaces the correct next work. Issue descriptions carry the governing spec sections and repo standards; acceptance criteria are the conformance bar.
+
+|Epic|Covers|Sequencing item|
+|---|---|---|
+|`eieio-u2m`|Workspace scaffold + `just` recipe suite|precedes 1|
+|`eieio-e6s`|`signal` crate|1|
+|`eieio-s85`|`expr` crate + `expr-tests/` vectors|2|
+|`eieio-m7o`|`manifest` crate + `manifest.schema.json`|3|
+|`eieio-35h`|`host-core` + daemon skeleton (executor, router, end-to-end milestone)|4|
+|`eieio-7d8`|`block-sdk`, `cargo-eio`, TestHost, conformance harness, golden + hostile blocks|5|
+|`eieio-8yq`|Service files, `node.toml`, block manager, management API, state store, taps/logs|6|
+|`eieio-p0k`|CI/CD (see gates below)|cross-cutting|
+|`eieio-2vm`|Pub/sub decision (§3.4/§3.9 OPEN) + bridge + system blocks|7|
+|`eieio-yck`|CLI + daemon MCP surface|8|
+|`eieio-m9s`|Designer UI|9|
+|`eieio-x7g`|LEAF-SPEC draft, then leaf runtime + firmware pipeline|10|
+
+Tooling and CI/CD placement (settled):
+
+- **`just` is the single command surface.** A `justfile` lands with the workspace scaffold (`fmt`, `lint`, `build`, `test`, `check-nostd`, `ci`, run recipes). Recipe names are a stable interface; CI invokes `just ci` and nothing else, so local and CI runs are identical and the entrypoint never changes.
+- **CI waits for the test baseline.** The GitHub Actions workflow lands only once `signal` tests and the `expr-tests/` vector suite exist — CI on an untested codebase asserts nothing.
+- **Deploy/release pipelines land per deployable component**, each tag-triggered and independent within the monorepo: daemon binaries (multi-arch), `eio-sdk` + `cargo-eio` to crates.io, Designer container image. Each is blocked on its component existing; all require CI as a prerequisite job.
