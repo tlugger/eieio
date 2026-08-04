@@ -1,4 +1,16 @@
 
+# Rust build artifacts (Cargo.lock IS committed — the workspace ships binaries)
+/target/
+**/*.rs.bk
+
+# Designer (SvelteKit) artifacts
+designer/node_modules/
+designer/.svelte-kit/
+designer/build/
+
+# macOS
+.DS_Store
+
 # Implementation plan files (transient artifacts of the /implement skill)
 *.eio-plan.md
 
