@@ -87,6 +87,23 @@ docs/
 
 Code lands as a Cargo workspace under `crates/`, with the Designer as a sibling SvelteKit app. Blocks live in their own repositories and publish to an OCI registry independently.
 
+## Developing
+
+You need [`just`](https://just.systems) and `rustup`. The toolchain is pinned in `rust-toolchain.toml`, so rustup installs the right compiler and targets on first use — there is nothing else to set up.
+
+Everything goes through `just`; run it bare to list the recipes.
+
+|Recipe|What it does|
+|---|---|
+|`just ci`|**The gate.** Runs `fmt-check`, `lint`, `build`, `test`, `check-nostd` in that order, stopping at the first failure. CI runs this and nothing else.|
+|`just fmt`|Format in place (upstream rustfmt defaults).|
+|`just fmt-check`|Formatting gate — fails instead of rewriting.|
+|`just lint`|`clippy` with warnings denied, plus a check that every crate opts into the shared lint baseline.|
+|`just build` / `just test`|Build and test the workspace.|
+|`just check-nostd`|Compile the leaf-shareable crates for two bare-metal targets (Cortex-M4F and the no-atomics ESP32-C3 class RISC-V). A `std` dependency that sneaks into those crates fails here.|
+
+Warnings are denied in `just lint`, never in a `Cargo.toml`, so a plain `cargo build` stays usable while the gate stays strict.
+
 ## Roadmap
 
 Specifications are Draft 1. Implementation is bottom-up, starting with the `no_std` crates the leaf runtime also needs:
