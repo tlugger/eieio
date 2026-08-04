@@ -45,6 +45,7 @@ The project is **eieio**; the identifier prefix is **`eio`** (SCOPE §5.1).
 |Custom section|`eio:manifest`|
 |SDK|crate `eio-sdk`, import path `eio_sdk` (directory `crates/block-sdk`)|
 |Tooling|`cargo eio`|
+|Workspace crates|package `eio-<dir>`, import `eio_<dir>` (`crates/signal` → `eio-signal` → `eio_signal`); `cargo-eio` excepted (DAEMON §1)|
 |Node data dir|`/etc/eieio/`|
 
 `nio` is the defunct predecessor. It appears legitimately only in historic prose (SCOPE §1) and links to the original repos. **Any `nio_*` or `nio:*` identifier in code or a spec is a leftover — fix it.**
