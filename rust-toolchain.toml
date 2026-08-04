@@ -5,6 +5,12 @@
 channel = "1.97.1"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
-# Blocks are core WASM modules (ABI-SPEC §1). The bare-metal target used by
-# `just check-nostd` is added by eieio-u2m.2 with that recipe.
-targets = ["wasm32-unknown-unknown"]
+targets = [
+    # Blocks are core WASM modules (ABI-SPEC §1).
+    "wasm32-unknown-unknown",
+    # The two bare-metal targets `just check-nostd` proves the ★ crates against:
+    # Cortex-M4F, and the ESP32-C3/C6 class RISC-V that has no atomics. See the
+    # comment block in the justfile for why it is both and not one.
+    "thumbv7em-none-eabihf",
+    "riscv32imc-unknown-none-elf",
+]
