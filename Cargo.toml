@@ -13,6 +13,17 @@ rust-version = "1.97"
 license = "Apache-2.0"
 repository = "https://github.com/tlugger/eieio"
 
+# Pinned once here, used by every crate that touches the wire format. Two host
+# implementations have to agree byte for byte (ABI-SPEC §6.3), so the codec
+# version is not a per-crate choice.
+#
+# `default-features = false` drops `std`; `alloc` is what the ★ crates are
+# allowed (CLAUDE.md). The `half` feature stays OFF deliberately: eieio's
+# canonical form admits binary64 floats only, so a decoder that could read
+# binary16 would accept bytes our encoder can never produce (ABI §6.3).
+[workspace.dependencies]
+minicbor = { version = "2.3", default-features = false, features = ["alloc"] }
+
 # Lint levels are shared here; the -D warnings escalation belongs to the `just
 # lint` recipe, so a local `cargo build` stays usable while CI stays strict.
 # Crates opt in with `[lints] workspace = true`.

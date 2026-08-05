@@ -30,11 +30,11 @@ The value space is exactly the CBOR subset fixed in ABI §6.3. Nothing exists in
 |`null`||
 |`bool`|`true`, `false`|
 |`int`|Signed 64-bit. Arithmetic overflow is an **error**, not a wrap (determinism over convenience)|
-|`float`|IEEE 754 binary64. `NaN` and infinities MUST NOT be produced: operations that would yield them (e.g. `(/ 1.0 0.0)`) are errors|
+|`float`|IEEE 754 binary64. `NaN` and infinities MUST NOT be produced: operations that would yield them (e.g. `(/ 1.0 0.0)`) are errors. They cannot *enter* via a signal either — ABI §6.3.1 rejects them at the decode boundary — so no value an expression ever sees is non-finite. Negative zero is a legal, distinct value|
 |`string`|UTF-8 text|
 |`bytes`|Byte string. No literal syntax in v1; bytes enter only via signals|
 |`array`|Ordered, heterogeneous|
-|`map`|String keys only (matches signal shape). Iteration order: sorted by key (determinism)|
+|`map`|String keys only (matches signal shape), unique. Iteration order: ascending bytewise order of the keys' UTF-8 content (determinism) — the same order the canonical encoding uses, ABI §6.3.1 rule 7|
 
 There is one additional evaluation-time-only type: **function** (§5.4). Functions are not values in the CBOR sense — an expression whose _final result_ is a function is an error (`ERR_EXPR`), and functions cannot be stored in arrays or maps.
 

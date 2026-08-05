@@ -145,7 +145,29 @@ A block MAY emit zero, one, or many batches per callback; timer-driven blocks (s
 
 ### 6.3 Batch encoding
 
-A batch is a CBOR array of CBOR maps. Keys are text strings. Values are any CBOR data item; hosts and the expression engine MUST support at minimum: unsigned/negative integers, float64, text string, byte string, bool, null, array, map. An empty batch (`[]`) is legal and MUST be delivered/routable like any other.
+A batch is a CBOR array of CBOR maps. Keys are text strings. An empty batch (`[]`) is legal and MUST be delivered/routable like any other.
+
+The value space is **exactly** the following, not a minimum: signed 64-bit integer, float64, text string, byte string, bool, null, array, map. Hosts and the expression engine MUST support all of them and MUST reject everything else. (EXPR §2 already states the value space is exactly this set; the closed reading is the normative one.) Integers are signed 64-bit: a CBOR integer outside `i64` is outside the data model, whichever major type carries it.
+
+#### 6.3.1 Canonical form
+
+There is **exactly one** valid encoding of any given batch. Encoders MUST emit it; decoders MUST reject anything else. Two independent host implementations have to agree byte for byte (§13), and a decoder that quietly normalised non-canonical input would let a divergent encoder ship unnoticed — so strictness here is what makes conformance testable at all.
+
+For every input a decoder accepts, re-encoding the decoded batch MUST reproduce that input byte for byte.
+
+1. **Definite lengths only.** Indefinite-length arrays, maps, text strings, and byte strings MUST be rejected.
+2. **Preferred serialization.** Every integer value, and every length of major types 2–5, MUST use the shortest head that carries it (RFC 8949 §4.2.1).
+3. **Integers** MUST lie within `i64`. Major type 0 above `i64::MAX` and major type 1 below `i64::MIN` MUST be rejected.
+4. **Floats are `binary64` only.** Encoders MUST write a `binary64` (`0xfb`) head; `binary16` and `binary32` MUST be rejected. *This is a deliberate deviation from RFC 8949 §4.2.1's shortest-float rule:* the data model has exactly one float type, and shortest-float would make a value's encoded width depend on its magnitude.
+5. **NaN and ±Infinity MUST be rejected** on decode. EXPR §2 forbids operations from *producing* them; refusing them on arrival makes "no NaN/inf escape" (EXPR §9) a property of the type rather than an obligation on every builtin, and keeps equality, ordering, and canonical rendering (EXPR §7.6, which pins no NaN spelling) total.
+6. **Negative zero** is a distinct encoding and MUST be preserved. It is a finite value; rejecting or normalising it is not permitted.
+7. **Map keys** MUST be text strings, MUST be unique, and MUST appear in ascending bytewise order **of their UTF-8 content**. *This is a deliberate deviation from RFC 8949 §4.2.1*, which orders keys by their encoded bytes and therefore sorts `"z"` (`0x617a`) before `"aa"` (`0x626161`). Ordering by content gives the platform a single ordering: the same one EXPR §2 exposes as map iteration order and EXPR §7.5's `(keys m)` returns. Duplicate keys are rejected rather than collapsed, because collapsing would re-encode to different bytes than arrived.
+8. **Tags, `undefined`, and simple values** other than `false`/`true`/`null` MUST be rejected.
+9. **Nesting depth** MUST be bounded, and exceeding the bound MUST be a decode error rather than a host crash. Decoding is naturally recursive, and at this boundary a stack overflow kills the *host*, which the "traps are death" rule (§1, §8) does nothing to contain. The bound MUST be at least EXPR §9's `MAX_DEPTH` reference default, so that no expression can construct a value the boundary then refuses.
+10. **Trailing bytes** after the batch MUST be rejected. A concatenated or truncated payload is corruption, not a batch carrying extra data.
+11. **Declared lengths are not allocation instructions.** A decoder MUST NOT pre-allocate on a declared collection length before the corresponding items are present: a nine-byte head can claim `u64::MAX` elements in a payload of ten bytes.
+
+Rules 4 and 7 are the only two deviations from RFC 8949 §4.2.1's core deterministic encoding requirements; both are recorded here rather than being left to implementations to rediscover.
 
 ### 6.4 Error port
 
