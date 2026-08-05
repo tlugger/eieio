@@ -144,9 +144,9 @@ impl Value {
     /// a wrapping sum would report a *small* length for a huge value — silently
     /// defeating the budget check that calls this.
     ///
-    /// Recurses, so like encoding it assumes nesting within [`MAX_DEPTH`]. Values
-    /// obtained by decoding always satisfy that; a value built programmatically
-    /// is the caller's responsibility.
+    /// Recurses, like encoding and like `Value`'s drop glue. Safe because every
+    /// decode entry point is depth-bounded — see the depth invariant in the crate
+    /// docs for why the bound lives at the boundary rather than here.
     pub fn encoded_len(&self) -> usize {
         match self {
             Value::Null | Value::Bool(_) => 1,

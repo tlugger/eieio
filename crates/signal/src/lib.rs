@@ -26,6 +26,32 @@
 //! floats are always `binary64` rather than shortest-form, and map keys sort by
 //! the bytewise order of their UTF-8 **content** rather than of their encodings.
 //!
+//! # Depth invariant
+//!
+//! Encoding, [`Value::encoded_len`] and `Value`'s drop glue all recurse, so what
+//! keeps them safe is where deep values can come from:
+//!
+//! > Every path by which externally supplied bytes become a [`Value`] is
+//! > depth-bounded. Over-deep values are reachable only by host code constructing
+//! > them directly.
+//!
+//! Every decode entry point is bounded — the inherent `from_cbor` methods *and*
+//! the `minicbor::Decode` impls, which are a separate public route that skips
+//! them. `tests/depth.rs` enforces this rather than leaving it to this comment.
+//! `expr` bounds the construction side with its own EXPR §9 `MAX_DEPTH`.
+//!
+//! The residual is a host that builds a deeply nested `Value` in a loop: that
+//! overflows the stack, and it is not defended against. Two reasons it is left
+//! alone. Recursion in `drop` cannot be removed at all — `impl Drop for Value`
+//! fails to compile with E0509, `cannot move out of type Value, which implements
+//! the Drop trait`, breaking the `Value::Map(fields)` destructuring that this
+//! crate and `expr` both rely on. And while `drop` recurses, an iterative encoder
+//! would only move the crash rather than remove it, at the cost of a work-stack
+//! machine inside the one component that has to be byte-exact.
+//!
+//! So the boundary is where the bound belongs, and untrusted input never reaches
+//! the recursion unbounded.
+//!
 //! # Public dependency on minicbor
 //!
 //! `minicbor` is a **public** dependency: [`Value`], [`Signal`] and [`Batch`]
