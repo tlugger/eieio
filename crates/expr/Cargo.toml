@@ -10,5 +10,11 @@ repository.workspace = true
 [dependencies]
 eio-signal.workspace = true
 
+# Tests only. Canonical rendering claims floats round-trip (EXPR-SPEC §7.6); a
+# property over generated floats is the only way to believe it, since the failures
+# live in magnitudes nobody writes by hand.
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true
