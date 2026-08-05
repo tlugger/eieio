@@ -26,6 +26,14 @@
 //! floats are always `binary64` rather than shortest-form, and map keys sort by
 //! the bytewise order of their UTF-8 **content** rather than of their encodings.
 //!
+//! # Public dependency on minicbor
+//!
+//! `minicbor` is a **public** dependency: [`Value`], [`Signal`] and [`Batch`]
+//! implement its `Encode`/`Decode` traits so they can be embedded in
+//! minicbor-derived structs, and [`DecodeError::OutsideDataModel`] carries its
+//! `Type`. A major-version bump of minicbor is therefore a breaking change here,
+//! which is why the version is pinned once in `[workspace.dependencies]`.
+//!
 //! # Example
 //!
 //! ```
@@ -47,9 +55,11 @@
 extern crate alloc;
 
 mod batch;
+mod error;
 mod signal;
 mod value;
 
 pub use batch::Batch;
+pub use error::DecodeError;
 pub use signal::Signal;
 pub use value::{MAX_DEPTH, Map, Value};

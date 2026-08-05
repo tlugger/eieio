@@ -9,7 +9,8 @@
 //! The exhaustive malformed-input matrix and property-based generation belong to
 //! eieio-e6s.2; this file covers the rules this issue introduces.
 
-use eio_signal::Batch;
+use eio_signal::{Batch, DecodeError};
+use minicbor::data::Type;
 
 /// Decodes hex text into bytes, so test inputs read as CBOR rather than as Rust.
 fn unhex(text: &str) -> Vec<u8> {
@@ -23,23 +24,31 @@ fn unhex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Asserts that `hex` is rejected, and that the reason mentions `expected`.
-#[track_caller]
-fn rejects(hex: &str, expected: &str) {
-    let bytes = unhex(hex);
-    match Batch::from_cbor(&bytes) {
-        Ok(batch) => panic!("expected rejection of {hex}, got {batch:?}"),
-        Err(err) => {
-            let message = err.to_string();
-            assert!(
-                message.contains(expected),
-                "rejected {hex} for the wrong reason:\n  expected to mention: {expected}\n  actual: {message}"
-            );
+/// Asserts that `$hex` is rejected, and that it is rejected under the specific
+/// rule `$pattern` names.
+///
+/// Matching a [`DecodeError`] variant rather than a message substring is what
+/// makes these assertions exact. The substring form this replaced was brittle in
+/// both directions: rewording a message silently weakened the test, and a test
+/// could pass against an unintended message — which happened during eieio-e6s.1,
+/// where a case asserting "outside the data model" passed against the bare
+/// string `"Simple"`.
+macro_rules! rejects {
+    ($hex:expr, $pattern:pat $(, $note:literal)?) => {{
+        let hex: &str = $hex;
+        let bytes = unhex(hex);
+        match Batch::from_cbor(&bytes) {
+            Ok(batch) => panic!("expected rejection of {hex}, got {batch:?}"),
+            Err(err) => assert!(
+                matches!(err, $pattern),
+                "rejected {hex} under the wrong rule:\n  expected: {}\n  actual:   {err:?} ({err})",
+                stringify!($pattern),
+            ),
         }
-    }
+    }};
 }
 
-/// Asserts that `hex` is rejected, without pinning the reason.
+/// Asserts that `hex` is rejected, without pinning the rule.
 ///
 /// Used where the rejection is the whole point and more than one check could
 /// legitimately fire first.
@@ -77,29 +86,29 @@ fn control_is_accepted() {
 /// A batch is a CBOR array. Anything else is not a batch.
 #[test]
 fn batch_is_not_an_array() {
-    rejects("a1616101", "batch is not a CBOR array");
-    rejects("01", "batch is not a CBOR array");
-    rejects("f6", "batch is not a CBOR array");
+    rejects!("a1616101", DecodeError::NotAnArray);
+    rejects!("01", DecodeError::NotAnArray);
+    rejects!("f6", DecodeError::NotAnArray);
 }
 
 /// Every element of a batch MUST be a map (ABI §6.3) — an acceptance criterion
 /// of this issue.
 #[test]
 fn batch_element_is_not_a_map() {
-    rejects("8101", "signal is not a CBOR map");
-    rejects("81f6", "signal is not a CBOR map");
-    rejects("816161", "signal is not a CBOR map");
-    rejects("8181a0", "signal is not a CBOR map");
+    rejects!("8101", DecodeError::SignalNotAMap);
+    rejects!("81f6", DecodeError::SignalNotAMap);
+    rejects!("816161", DecodeError::SignalNotAMap);
+    rejects!("8181a0", DecodeError::SignalNotAMap);
     // A non-map in second position, after a valid signal.
-    rejects("82a0f5", "signal is not a CBOR map");
+    rejects!("82a0f5", DecodeError::SignalNotAMap);
 }
 
 /// Trailing bytes are corruption, not a batch with extra data.
 #[test]
 fn trailing_bytes() {
     accepts("80");
-    rejects("8000", "trailing bytes after batch");
-    rejects("81a161610100", "trailing bytes after batch");
+    rejects!("8000", DecodeError::TrailingBytes);
+    rejects!("81a161610100", DecodeError::TrailingBytes);
 }
 
 /// A truncated payload must fail cleanly rather than panic.
@@ -121,15 +130,15 @@ fn truncated_input() {
 #[test]
 fn indefinite_lengths() {
     // 9f … ff  indefinite array as the batch
-    rejects("9fa1616101ff", "indefinite-length");
+    rejects!("9fa1616101ff", DecodeError::IndefiniteLength);
     // bf … ff  indefinite map as a signal
-    rejects("81bf616101ff", "indefinite-length");
+    rejects!("81bf616101ff", DecodeError::IndefiniteLength);
     // 7f … ff  indefinite text string as a value
-    rejects("81a161617f616160ff", "indefinite-length");
+    rejects!("81a161617f616160ff", DecodeError::IndefiniteLength);
     // 5f … ff  indefinite byte string as a value
-    rejects("81a161615f41ffff", "indefinite-length");
+    rejects!("81a161615f41ffff", DecodeError::IndefiniteLength);
     // an indefinite array nested as a value
-    rejects("81a161619f01ff", "indefinite-length");
+    rejects!("81a161619f01ff", DecodeError::IndefiniteLength);
 }
 
 // ── preferred serialization (shortest heads) ─────────────────────────────────
@@ -139,12 +148,12 @@ fn indefinite_lengths() {
 fn non_shortest_integer_heads() {
     // 1 as a one-byte head (canonical) vs. wider heads carrying the same value.
     accepts("81a1616101");
-    rejects("81a161611801", "non-shortest head"); // uint8 head for 1
-    rejects("81a16161190001", "non-shortest head"); // uint16 head for 1
-    rejects("81a161611a00000001", "non-shortest head"); // uint32 head for 1
-    rejects("81a161611b0000000000000001", "non-shortest head"); // uint64 head for 1
+    rejects!("81a161611801", DecodeError::NonShortestHead); // uint8 head for 1
+    rejects!("81a16161190001", DecodeError::NonShortestHead); // uint16 head for 1
+    rejects!("81a161611a00000001", DecodeError::NonShortestHead); // uint32 head for 1
+    rejects!("81a161611b0000000000000001", DecodeError::NonShortestHead); // uint64 head for 1
     // Negative: -1 is `20`; `3800` is the uint8-headed spelling of the same value.
-    rejects("81a161613800", "non-shortest head");
+    rejects!("81a161613800", DecodeError::NonShortestHead);
     // 24 genuinely needs the uint8 head, so that one is accepted.
     accepts("81a161611818");
 }
@@ -153,17 +162,17 @@ fn non_shortest_integer_heads() {
 #[test]
 fn non_shortest_length_heads() {
     // Text string "a" is `6161`; `7801 61` is the same string with a uint8 head.
-    rejects("81a16161780161", "non-shortest head");
+    rejects!("81a16161780161", DecodeError::NonShortestHead);
     // Byte string of one byte: `41ff` vs `5801ff`.
-    rejects("81a161615801ff", "non-shortest head");
+    rejects!("81a161615801ff", DecodeError::NonShortestHead);
     // Array of one element: `8101` vs `980101`.
-    rejects("81a16161980101", "non-shortest head");
+    rejects!("81a16161980101", DecodeError::NonShortestHead);
     // Map with one entry: `a1616101` vs `b801616101`.
-    rejects("81a16161b801616101", "non-shortest head");
+    rejects!("81a16161b801616101", DecodeError::NonShortestHead);
     // The batch array's own head: `81` vs `9801`.
-    rejects("9801a1616101", "non-shortest head");
+    rejects!("9801a1616101", DecodeError::NonShortestHead);
     // A non-shortest head on a map *key*.
-    rejects("81a178016101", "non-shortest head");
+    rejects!("81a178016101", DecodeError::NonShortestHead);
 }
 
 // ── integers stay inside i64 ─────────────────────────────────────────────────
@@ -176,13 +185,25 @@ fn integers_outside_i64() {
     accepts("81a161611b7fffffffffffffff");
     accepts("81a161613b7fffffffffffffff");
     // One past i64::MAX: 2^63.
-    rejects("81a161611b8000000000000000", "above i64::MAX");
+    rejects!(
+        "81a161611b8000000000000000",
+        DecodeError::IntegerAboveI64Max
+    );
     // u64::MAX.
-    rejects("81a161611bffffffffffffffff", "above i64::MAX");
+    rejects!(
+        "81a161611bffffffffffffffff",
+        DecodeError::IntegerAboveI64Max
+    );
     // One past i64::MIN: -(2^63) - 1, encoded as major type 1 with argument 2^63.
-    rejects("81a161613b8000000000000000", "below i64::MIN");
+    rejects!(
+        "81a161613b8000000000000000",
+        DecodeError::IntegerBelowI64Min
+    );
     // -(2^64).
-    rejects("81a161613bffffffffffffffff", "below i64::MIN");
+    rejects!(
+        "81a161613bffffffffffffffff",
+        DecodeError::IntegerBelowI64Min
+    );
 }
 
 // ── floats ───────────────────────────────────────────────────────────────────
@@ -193,8 +214,8 @@ fn integers_outside_i64() {
 fn non_binary64_floats() {
     // 1.5 as binary64 (canonical), binary32, and binary16.
     accepts("81a16161fb3ff8000000000000");
-    rejects("81a16161fa3fc00000", "binary64");
-    rejects("81a16161f93e00", "binary64");
+    rejects!("81a16161fa3fc00000", DecodeError::NonBinary64Float);
+    rejects!("81a16161f93e00", DecodeError::NonBinary64Float);
 }
 
 /// NaN and ±Infinity are rejected on arrival, which is what makes "no NaN/inf
@@ -202,11 +223,11 @@ fn non_binary64_floats() {
 /// builtin.
 #[test]
 fn non_finite_floats() {
-    rejects("81a16161fb7ff8000000000000", "NaN or infinite"); // NaN
-    rejects("81a16161fb7ff0000000000000", "NaN or infinite"); // +inf
-    rejects("81a16161fbfff0000000000000", "NaN or infinite"); // -inf
+    rejects!("81a16161fb7ff8000000000000", DecodeError::NonFiniteFloat); // NaN
+    rejects!("81a16161fb7ff0000000000000", DecodeError::NonFiniteFloat); // +inf
+    rejects!("81a16161fbfff0000000000000", DecodeError::NonFiniteFloat); // -inf
     // A NaN with a non-canonical payload is still a NaN.
-    rejects("81a16161fb7ff8000000000001", "NaN or infinite");
+    rejects!("81a16161fb7ff8000000000001", DecodeError::NonFiniteFloat);
     // Negative zero, by contrast, is a legal finite value.
     accepts("81a16161fb8000000000000000");
 }
@@ -216,24 +237,24 @@ fn non_finite_floats() {
 /// Map keys MUST be text strings.
 #[test]
 fn non_text_map_keys() {
-    rejects("81a10102", "map key is not a text string"); // {1: 2}
-    rejects("81a1f602", "map key is not a text string"); // {null: 2}
-    rejects("81a1416102", "map key is not a text string"); // {h'61': 2}
+    rejects!("81a10102", DecodeError::MapKeyNotText); // {1: 2}
+    rejects!("81a1f602", DecodeError::MapKeyNotText); // {null: 2}
+    rejects!("81a1416102", DecodeError::MapKeyNotText); // {h'61': 2}
     // Nested map with an integer key.
-    rejects("81a16161a10102", "map key is not a text string");
+    rejects!("81a16161a10102", DecodeError::MapKeyNotText);
 }
 
 /// Map keys MUST be unique and ascending by UTF-8 content.
 #[test]
 fn unsorted_or_duplicate_map_keys() {
     accepts("81a2616101616202"); // {"a": 1, "b": 2}
-    rejects("81a2616202616101", "unique and ascending"); // {"b": 2, "a": 1}
-    rejects("81a2616101616102", "unique and ascending"); // {"a": 1, "a": 2}
+    rejects!("81a2616202616101", DecodeError::MapKeysUnordered); // {"b": 2, "a": 1}
+    rejects!("81a2616101616102", DecodeError::MapKeysUnordered); // {"a": 1, "a": 2}
     // Content order, not encoded-bytes order: "aa" precedes "z".
     accepts("81a262616101617a02");
-    rejects("81a2617a0262616101", "unique and ascending");
+    rejects!("81a2617a0262616101", DecodeError::MapKeysUnordered);
     // Nested maps are checked too.
-    rejects("81a16161a2616202616101", "unique and ascending");
+    rejects!("81a16161a2616202616101", DecodeError::MapKeysUnordered);
 }
 
 // ── everything outside the data model ────────────────────────────────────────
@@ -242,14 +263,14 @@ fn unsorted_or_duplicate_map_keys() {
 /// model does not contain (ABI §6.3).
 #[test]
 fn outside_the_data_model() {
-    rejects("81a16161c101", "tags are outside the data model"); // tag(1) 1
-    rejects("81a16161f7", "`undefined` is outside the data model");
-    rejects("81a16161f0", "outside the data model"); // simple(16)
+    rejects!("81a16161c101", DecodeError::OutsideDataModel(Type::Tag)); // tag(1) 1
+    rejects!("81a16161f7", DecodeError::OutsideDataModel(Type::Undefined));
+    rejects!("81a16161f0", DecodeError::OutsideDataModel(Type::Simple)); // simple(16)
     // A tag wrapping the whole batch is caught by the batch's own type check —
     // a tag is not an array — while a tag wrapping a signal reaches the value
     // decoder, which names it precisely.
-    rejects("c181a1616101", "batch is not a CBOR array");
-    rejects("81c1a1616101", "tags are outside the data model");
+    rejects!("c181a1616101", DecodeError::NotAnArray);
+    rejects!("81c1a1616101", DecodeError::OutsideDataModel(Type::Tag));
 }
 
 // ── depth ────────────────────────────────────────────────────────────────────
@@ -266,7 +287,7 @@ fn deep_nesting_does_not_overflow_the_stack() {
     let mut hex = String::from("81a16161");
     hex.push_str(&"81".repeat(100_000));
     hex.push_str("f6");
-    rejects(&hex, "MAX_DEPTH");
+    rejects!(&hex, DecodeError::DepthExceeded);
 }
 
 /// A collection may not pre-allocate on a length it did not actually deliver: a

@@ -5,8 +5,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use minicbor::data::Type;
-use minicbor::decode::{Decode, Decoder, Error as DecodeError};
+use minicbor::decode::{Decode, Decoder, Error as CborError};
 use minicbor::encode::{Encode, Encoder, Error as EncodeError, Write};
+
+use crate::error::DecodeError;
 
 /// A CBOR map with text-string keys, ordered by key.
 ///
@@ -187,15 +189,15 @@ impl Value {
         let mut d = Decoder::new(bytes);
         let value = Self::decode_at(&mut d, 0)?;
         if d.position() != bytes.len() {
-            return Err(DecodeError::message("trailing bytes after value"));
+            return Err(DecodeError::TrailingBytes);
         }
         Ok(value)
     }
 
     /// Decodes one value, enforcing eieio's canonical form (ABI §6.3.1).
-    fn decode_at(d: &mut Decoder<'_>, depth: u32) -> Result<Self, DecodeError> {
+    pub(crate) fn decode_at(d: &mut Decoder<'_>, depth: u32) -> Result<Self, DecodeError> {
         if depth > MAX_DEPTH {
-            return Err(DecodeError::message("nesting deeper than MAX_DEPTH"));
+            return Err(DecodeError::DepthExceeded);
         }
 
         let start = d.position();
@@ -212,8 +214,7 @@ impl Value {
             // compare consumed bytes, and cannot be a match on the type alone.
             Type::U8 | Type::U16 | Type::U32 | Type::U64 => {
                 let n = d.u64()?;
-                let n =
-                    i64::try_from(n).map_err(|_| DecodeError::message("integer above i64::MAX"))?;
+                let n = i64::try_from(n).map_err(|_| DecodeError::IntegerAboveI64Max)?;
                 Self::check_int_head(d, start, n)?;
                 Ok(Value::Int(n))
             }
@@ -224,7 +225,7 @@ impl Value {
             }
             // Reported for integers needing the full CBOR range, i.e. outside
             // i64 in the negative direction.
-            Type::Int => Err(DecodeError::message("integer below i64::MIN")),
+            Type::Int => Err(DecodeError::IntegerBelowI64Min),
 
             Type::F64 => {
                 let f = d.f64()?;
@@ -232,16 +233,14 @@ impl Value {
                     // EXPR §2 forbids *producing* NaN and infinities; refusing
                     // them on arrival is what makes that a property of the type
                     // instead of an obligation on every builtin.
-                    return Err(DecodeError::message("float is NaN or infinite"));
+                    return Err(DecodeError::NonFiniteFloat);
                 }
                 Ok(Value::Float(f))
             }
             // Deliberate deviation from RFC 8949 §4.2.1's shortest-float rule:
             // the data model has one float type, and shortening would make a
             // value's encoded width depend on its magnitude (ABI §6.3.1).
-            Type::F16 | Type::F32 => Err(DecodeError::message(
-                "float is not binary64; the canonical form admits binary64 only",
-            )),
+            Type::F16 | Type::F32 => Err(DecodeError::NonBinary64Float),
 
             Type::String => {
                 let s = d.str()?;
@@ -260,7 +259,7 @@ impl Value {
                 let mut items = Vec::new();
                 items
                     .try_reserve(Self::reserve_hint(n))
-                    .map_err(|_| DecodeError::message("array too large to allocate"))?;
+                    .map_err(|_| DecodeError::AllocationFailed)?;
                 for _ in 0..n {
                     items.push(Self::decode_at(d, depth + 1)?);
                 }
@@ -285,9 +284,7 @@ impl Value {
                     if let Some((prev, _)) = map.last_key_value()
                         && key.as_str() <= prev.as_str()
                     {
-                        return Err(DecodeError::message(
-                            "map keys are not unique and ascending by UTF-8 content",
-                        ));
+                        return Err(DecodeError::MapKeysUnordered);
                     }
                     let value = Self::decode_at(d, depth + 1)?;
                     map.insert(key, value);
@@ -299,20 +296,12 @@ impl Value {
             // model (ABI §6.3.1). Indefinite-length items are excluded because
             // the canonical form is definite-length only.
             Type::ArrayIndef | Type::MapIndef | Type::StringIndef | Type::BytesIndef => {
-                Err(DecodeError::message(
-                    "indefinite-length item; the canonical form is definite-length",
-                ))
+                Err(DecodeError::IndefiniteLength)
             }
-            Type::Tag => Err(DecodeError::message("tags are outside the data model")),
-            Type::Undefined => Err(DecodeError::message(
-                "`undefined` is outside the data model",
-            )),
-            // `Break` and simple values other than false/true/null. Note that
-            // `with_message` *replaces* an error's message rather than
-            // appending to it, so the type name is formatted in directly.
-            other => Err(DecodeError::message(alloc::format!(
-                "{other:?} is outside the data model"
-            ))),
+            Type::Tag => Err(DecodeError::OutsideDataModel(Type::Tag)),
+            Type::Undefined => Err(DecodeError::OutsideDataModel(Type::Undefined)),
+            // `Break` and simple values other than false/true/null.
+            other => Err(DecodeError::OutsideDataModel(other)),
         }
     }
 
@@ -325,16 +314,14 @@ impl Value {
                 Self::check_len_head(d, start, s.len(), s.len())?;
                 Ok(String::from(s))
             }
-            _ => Err(DecodeError::message("map key is not a text string")),
+            _ => Err(DecodeError::MapKeyNotText),
         }
     }
 
     /// Rejects the indefinite-length form, which `array()`/`map()` signal by
     /// returning `None`.
     fn definite_len(len: Option<u64>) -> Result<u64, DecodeError> {
-        len.ok_or_else(|| {
-            DecodeError::message("indefinite-length item; the canonical form is definite-length")
-        })
+        len.ok_or_else(|| DecodeError::IndefiniteLength)
     }
 
     /// Verifies that an integer used the shortest head for its value.
@@ -360,9 +347,7 @@ impl Value {
         if d.position() - start == expected {
             Ok(())
         } else {
-            Err(DecodeError::message(
-                "non-shortest head; the canonical form requires preferred serialization",
-            ))
+            Err(DecodeError::NonShortestHead)
         }
     }
 
@@ -432,7 +417,10 @@ impl<C> Encode<C> for Value {
 }
 
 impl<'b, C> Decode<'b, C> for Value {
-    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, DecodeError> {
-        Self::decode_at(d, 0)
+    /// Bridges to the typed decoder. The trait's error type is fixed to
+    /// minicbor's, so the classification is flattened to text here; callers
+    /// needing it use [`Value::from_cbor`].
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
+        Self::decode_at(d, 0).map_err(Into::into)
     }
 }

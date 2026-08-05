@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use eio_signal::{Batch, MAX_DEPTH, Map, Signal, Value};
+use eio_signal::{Batch, DecodeError, MAX_DEPTH, Map, Signal, Value};
 
 /// Wraps one value under the key `"v"` in a one-signal batch.
 fn batch_of(value: Value) -> Batch {
@@ -317,8 +317,8 @@ fn depth_limit_boundary() {
     let bytes = batch_of(nest(MAX_DEPTH)).to_cbor();
     let err = Batch::from_cbor(&bytes).expect_err("nesting past MAX_DEPTH must be rejected");
     assert!(
-        err.to_string().contains("MAX_DEPTH"),
-        "unexpected error: {err}"
+        matches!(err, DecodeError::DepthExceeded),
+        "unexpected error: {err:?}"
     );
 }
 
@@ -404,7 +404,7 @@ fn value_cbor_pair_matches_batch_strictness() {
     let mut trailing = bytes.clone();
     trailing.push(0x00);
     let err = Value::from_cbor(&trailing).expect_err("trailing bytes must be rejected");
-    assert!(err.to_string().contains("trailing bytes"), "{err}");
+    assert!(matches!(err, DecodeError::TrailingBytes), "{err:?}");
 
     // And the canonical rules apply identically to a bare value.
     for bad in ["f97e00", "fb7ff8000000000000", "1801", "a10102", "9f01ff"] {

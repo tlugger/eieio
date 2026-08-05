@@ -169,6 +169,8 @@ For every input a decoder accepts, re-encoding the decoded batch MUST reproduce 
 
 Rules 4 and 7 are the only two deviations from RFC 8949 §4.2.1's core deterministic encoding requirements; both are recorded here rather than being left to implementations to rediscover.
 
+**Which** rule a host rejects under is diagnostic, not normative. Two implementations MUST agree on *whether* input is canonical; they need not agree on how they classify or describe a violation, and a conformance suite MUST NOT require identical rejection reasons. Hosts SHOULD nonetheless make the reason machine-readable, because it is what a deploy-time error message and a signal tap have to show.
+
 ### 6.4 Error port
 
 `PORT_ERR` is a reserved output port on every block, absent from the manifest's `outputs` list. A guest MAY `emit(PORT_ERR, ...)` signals it cannot process. Routing of the error port is a service-level concern (host/Designer); unrouted error emissions are logged and counted. This gives failure a data path without inventing new mechanisms.

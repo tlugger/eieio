@@ -2,9 +2,10 @@
 
 use alloc::string::String;
 
-use minicbor::decode::{Decode, Decoder, Error as DecodeError};
+use minicbor::decode::{Decode, Decoder, Error as CborError};
 use minicbor::encode::{Encode, Encoder, Error as EncodeError, Write};
 
+use crate::error::DecodeError;
 use crate::value::{Map, Value};
 
 /// One signal: a schemaless, dict-shaped CBOR map with text-string keys.
@@ -138,12 +139,21 @@ impl<C> Encode<C> for Signal {
     }
 }
 
-impl<'b, C> Decode<'b, C> for Signal {
-    /// Decodes one signal, which MUST be a CBOR map (ABI §6.3).
-    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, DecodeError> {
-        match Value::decode(d, ctx)? {
+impl Signal {
+    /// Decodes one signal, which MUST be a CBOR map (ABI §6.3.1).
+    ///
+    /// The typed counterpart to the [`Decode`] impl, which cannot carry a
+    /// [`DecodeError`] because the trait fixes its error type.
+    pub(crate) fn decode_from(d: &mut Decoder<'_>) -> Result<Self, DecodeError> {
+        match Value::decode_at(d, 0)? {
             Value::Map(fields) => Ok(Self { fields }),
-            _ => Err(DecodeError::message("signal is not a CBOR map")),
+            _ => Err(DecodeError::SignalNotAMap),
         }
+    }
+}
+
+impl<'b, C> Decode<'b, C> for Signal {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
+        Self::decode_from(d).map_err(Into::into)
     }
 }

@@ -3,9 +3,10 @@
 use alloc::vec::Vec;
 
 use minicbor::data::Type;
-use minicbor::decode::{Decode, Decoder, Error as DecodeError};
+use minicbor::decode::{Decode, Decoder, Error as CborError};
 use minicbor::encode::{Encode, Encoder, Error as EncodeError, Write};
 
+use crate::error::DecodeError;
 use crate::signal::Signal;
 use crate::value::Value;
 
@@ -118,9 +119,9 @@ impl Batch {
     /// payload is corruption, not a batch with extra data.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut d = Decoder::new(bytes);
-        let batch: Self = Decode::decode(&mut d, &mut ())?;
+        let batch = Self::decode_from(&mut d)?;
         if d.position() != bytes.len() {
-            return Err(DecodeError::message("trailing bytes after batch"));
+            return Err(DecodeError::TrailingBytes);
         }
         Ok(batch)
     }
@@ -170,38 +171,39 @@ impl<C> Encode<C> for Batch {
     }
 }
 
-impl<'b, C> Decode<'b, C> for Batch {
-    /// Decodes a batch: a definite-length CBOR array whose every element is a
-    /// map (ABI §6.3.1). A non-map element is a decode error.
-    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, DecodeError> {
+impl Batch {
+    /// Decodes a batch: a definite-length CBOR array whose every element is a map
+    /// (ABI §6.3.1). A non-map element is a decode error.
+    ///
+    /// The typed counterpart to the [`Decode`] impl, which cannot carry a
+    /// [`DecodeError`] because the trait fixes its error type.
+    fn decode_from(d: &mut Decoder<'_>) -> Result<Self, DecodeError> {
         let start = d.position();
         match d.datatype()? {
             Type::Array => {}
             // Called out separately from "not an array" so the diagnosis names
             // the actual violation.
-            Type::ArrayIndef => {
-                return Err(DecodeError::message(
-                    "indefinite-length item; the canonical form is definite-length",
-                ));
-            }
-            _ => return Err(DecodeError::message("batch is not a CBOR array")),
+            Type::ArrayIndef => return Err(DecodeError::IndefiniteLength),
+            _ => return Err(DecodeError::NotAnArray),
         }
-        let n = d.array()?.ok_or_else(|| {
-            DecodeError::message("indefinite-length item; the canonical form is definite-length")
-        })?;
+        let n = d.array()?.ok_or(DecodeError::IndefiniteLength)?;
         if d.position() - start != Value::canonical_arg_len(n) {
-            return Err(DecodeError::message(
-                "non-shortest head; the canonical form requires preferred serialization",
-            ));
+            return Err(DecodeError::NonShortestHead);
         }
 
         let mut signals = Vec::new();
         signals
             .try_reserve(Value::reserve_hint(n))
-            .map_err(|_| DecodeError::message("batch too large to allocate"))?;
+            .map_err(|_| DecodeError::AllocationFailed)?;
         for _ in 0..n {
-            signals.push(Signal::decode(d, ctx)?);
+            signals.push(Signal::decode_from(d)?);
         }
         Ok(Self { signals })
+    }
+}
+
+impl<'b, C> Decode<'b, C> for Batch {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
+        Self::decode_from(d).map_err(Into::into)
     }
 }
