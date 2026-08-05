@@ -1,0 +1,196 @@
+{
+  "vectors": [
+    {
+      "name": "order-lt-1-2",
+      "expr": "(< 1 2)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-lt-2-1",
+      "expr": "(< 2 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-lt-1-1",
+      "expr": "(< 1 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-le-1-1",
+      "expr": "(<= 1 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-le-2-1",
+      "expr": "(<= 2 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-gt-2-1",
+      "expr": "(> 2 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-gt-1-2",
+      "expr": "(> 1 2)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-ge-1-1",
+      "expr": "(>= 1 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-ge-1-2",
+      "expr": "(>= 1 2)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-across-int-and-float",
+      "expr": "(< 1 1.5)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-is-exact-above-2-53",
+      "expr": "(> 9007199254740993 9007199254740992.0)",
+      "expect": {
+        "bool": true
+      },
+      "note": "Ordering follows \u00a74.2's exact rule: the int is genuinely larger, though converting it to a float would say equal.",
+      "spec": "\u00a77.2, \u00a74.2"
+    },
+    {
+      "name": "order-strings-lexicographic-by-scalar",
+      "expr": "(< \"apple\" \"banana\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-strings-uppercase-before-lowercase",
+      "expr": "(< \"Z\" \"a\")",
+      "expect": {
+        "bool": true
+      },
+      "note": "By Unicode scalar, not a locale collation: U+005A before U+0061.",
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-strings-prefix-is-smaller",
+      "expr": "(< \"ab\" \"abc\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-mixed-number-and-string-is-an-error",
+      "expr": "(< 1 \"1\")",
+      "error": "TYPE",
+      "note": "Numbers, or two strings. Mixed is an error rather than an invented ordering across types.",
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-rejects-bools",
+      "expr": "(< true false)",
+      "error": "TYPE",
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-rejects-arrays",
+      "expr": "(< (arr 1) (arr 2))",
+      "error": "TYPE",
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-rejects-null",
+      "expr": "(< null 1)",
+      "error": "TYPE",
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "order-negative-zero-not-less-than-zero",
+      "expr": "(< -0.0 0.0)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "not-of-false-is-true",
+      "expr": "(not false)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "not-of-null-is-true",
+      "expr": "(not null)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "not-of-zero-is-false",
+      "expr": "(not 0)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Truthiness-based: 0 is truthy, so not 0 is false.",
+      "spec": "\u00a77.2, \u00a74.1"
+    },
+    {
+      "name": "not-of-empty-string-is-false",
+      "expr": "(not \"\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "not-requires-one-argument",
+      "expr": "(not)",
+      "error": "ARITY",
+      "spec": "\u00a77.2"
+    },
+    {
+      "name": "equal-two-arguments-required",
+      "expr": "(= 1)",
+      "error": "ARITY",
+      "spec": "\u00a77.2"
+    }
+  ]
+}

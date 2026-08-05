@@ -1,0 +1,791 @@
+{
+  "vectors": [
+    {
+      "name": "predicate-null-of-null-value",
+      "expr": "(null? null)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-null-value",
+      "expr": "(bool? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-null-value",
+      "expr": "(int? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-null-value",
+      "expr": "(float? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-null-value",
+      "expr": "(number? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-null-value",
+      "expr": "(string? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-null-value",
+      "expr": "(bytes? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-null-value",
+      "expr": "(array? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-null-value",
+      "expr": "(map? null)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-bool-value",
+      "expr": "(null? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-bool-value",
+      "expr": "(bool? true)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-bool-value",
+      "expr": "(int? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-bool-value",
+      "expr": "(float? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-bool-value",
+      "expr": "(number? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-bool-value",
+      "expr": "(string? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-bool-value",
+      "expr": "(bytes? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-bool-value",
+      "expr": "(array? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-bool-value",
+      "expr": "(map? true)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-int-value",
+      "expr": "(null? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-int-value",
+      "expr": "(bool? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-int-value",
+      "expr": "(int? 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-int-value",
+      "expr": "(float? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-int-value",
+      "expr": "(number? 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-int-value",
+      "expr": "(string? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-int-value",
+      "expr": "(bytes? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-int-value",
+      "expr": "(array? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-int-value",
+      "expr": "(map? 1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-float-value",
+      "expr": "(null? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-float-value",
+      "expr": "(bool? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-float-value",
+      "expr": "(int? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-float-value",
+      "expr": "(float? 1.5)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-float-value",
+      "expr": "(number? 1.5)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-float-value",
+      "expr": "(string? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-float-value",
+      "expr": "(bytes? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-float-value",
+      "expr": "(array? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-float-value",
+      "expr": "(map? 1.5)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-string-value",
+      "expr": "(null? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-string-value",
+      "expr": "(bool? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-string-value",
+      "expr": "(int? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-string-value",
+      "expr": "(float? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-string-value",
+      "expr": "(number? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-string-value",
+      "expr": "(string? \"s\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-string-value",
+      "expr": "(bytes? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-string-value",
+      "expr": "(array? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-string-value",
+      "expr": "(map? \"s\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-array-value",
+      "expr": "(null? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-array-value",
+      "expr": "(bool? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-array-value",
+      "expr": "(int? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-array-value",
+      "expr": "(float? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-array-value",
+      "expr": "(number? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-array-value",
+      "expr": "(string? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-array-value",
+      "expr": "(bytes? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-array-value",
+      "expr": "(array? (arr))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-array-value",
+      "expr": "(map? (arr))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-map-value",
+      "expr": "(null? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bool-of-map-value",
+      "expr": "(bool? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-int-of-map-value",
+      "expr": "(int? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-float-of-map-value",
+      "expr": "(float? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-map-value",
+      "expr": "(number? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-string-of-map-value",
+      "expr": "(string? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-map-value",
+      "expr": "(bytes? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-array-of-map-value",
+      "expr": "(array? (dict))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-map-of-map-value",
+      "expr": "(map? (dict))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-bytes-of-a-byte-string",
+      "expr": "(bytes? $raw)",
+      "signal": {
+        "raw": {
+          "bytes": "00"
+        }
+      },
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-number-of-an-int",
+      "expr": "(number? 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "predicate-null-of-a-function-is-false",
+      "expr": "(null? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-bool-of-a-function-is-false",
+      "expr": "(bool? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-int-of-a-function-is-false",
+      "expr": "(int? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-float-of-a-function-is-false",
+      "expr": "(float? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-number-of-a-function-is-false",
+      "expr": "(number? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-string-of-a-function-is-false",
+      "expr": "(string? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-bytes-of-a-function-is-false",
+      "expr": "(bytes? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-array-of-a-function-is-false",
+      "expr": "(array? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "predicate-map-of-a-function-is-false",
+      "expr": "(map? abs)",
+      "expect": {
+        "bool": false
+      },
+      "note": "Type predicates are total over functions and answer false: a function is not an int, and saying so is honest rather than silently wrong.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-int-from-float-truncates",
+      "expr": "(int 1.9)",
+      "expect": {
+        "int": 1
+      },
+      "note": "Truncation toward zero, not flooring: floor is spelled (floor x).",
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-negative-float-truncates",
+      "expr": "(int -1.9)",
+      "expect": {
+        "int": -1
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-numeric-string",
+      "expr": "(int \"42\")",
+      "expect": {
+        "int": 42
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-negative-numeric-string",
+      "expr": "(int \"-42\")",
+      "expect": {
+        "int": -42
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-true",
+      "expr": "(int true)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-false",
+      "expr": "(int false)",
+      "expect": {
+        "int": 0
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-int-is-unchanged",
+      "expr": "(int 7)",
+      "expect": {
+        "int": 7
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-a-float-string-is-an-error",
+      "expr": "(int \"1.5\")",
+      "error": "DOMAIN",
+      "note": "It asks for two conversions and names one. (int (float \"1.5\")) says it.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-int-from-inf-is-an-error",
+      "expr": "(int \"inf\")",
+      "error": "DOMAIN",
+      "note": "A numeric string is \u00a73.1's grammar and nothing else, or a non-finite float would be one step from a value (\u00a72).",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-int-with-leading-plus-is-an-error",
+      "expr": "(int \"+1\")",
+      "error": "DOMAIN",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-int-with-surrounding-whitespace-is-an-error",
+      "expr": "(int \" 1\")",
+      "error": "DOMAIN",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-int-from-empty-string-is-an-error",
+      "expr": "(int \"\")",
+      "error": "DOMAIN",
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-null-is-an-error",
+      "expr": "(int null)",
+      "error": "TYPE",
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-beyond-i64-is-an-error",
+      "expr": "(int \"9223372036854775808\")",
+      "error": "DOMAIN",
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-int-from-a-huge-float-is-an-error",
+      "expr": "(int 1e19)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-float-from-int",
+      "expr": "(float 1)",
+      "expect": {
+        "float": 1.0
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-float-from-int-string",
+      "expr": "(float \"1\")",
+      "expect": {
+        "float": 1.0
+      },
+      "note": "(float s) takes \u00a73.1's `number`, which includes an int spelling.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-float-from-float-string",
+      "expr": "(float \"1.5\")",
+      "expect": {
+        "float": 1.5
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-float-from-exponent-string",
+      "expr": "(float \"1e3\")",
+      "expect": {
+        "float": 1000.0
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-float-from-bool-is-an-error",
+      "expr": "(float true)",
+      "error": "TYPE",
+      "note": "(float x) does not accept a bool though (int x) does: the asymmetry is \u00a77.3's table as written, and (float (int b)) reads better than a second implicit rule.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-float-from-nan-string-is-an-error",
+      "expr": "(float \"NaN\")",
+      "error": "DOMAIN",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-float-from-inf-string-is-an-error",
+      "expr": "(float \"inf\")",
+      "error": "DOMAIN",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "convert-string-from-an-int",
+      "expr": "(string 42)",
+      "expect": {
+        "str": "42"
+      },
+      "spec": "\u00a77.3"
+    },
+    {
+      "name": "convert-string-from-a-map-is-canonical",
+      "expr": "(string (dict \"b\" 1 \"a\" 2))",
+      "expect": {
+        "str": "{\"a\": 2, \"b\": 1}"
+      },
+      "spec": "\u00a77.3, \u00a77.6"
+    },
+    {
+      "name": "convert-string-from-a-function-is-an-error",
+      "expr": "(string abs)",
+      "error": "TYPE",
+      "spec": "\u00a77.3"
+    }
+  ]
+}

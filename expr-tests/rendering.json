@@ -1,0 +1,365 @@
+{
+  "vectors": [
+    {
+      "name": "render-null",
+      "expr": "(string null)",
+      "expect": {
+        "str": "null"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-true",
+      "expr": "(string true)",
+      "expect": {
+        "str": "true"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-false",
+      "expr": "(string false)",
+      "expect": {
+        "str": "false"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-int-zero",
+      "expr": "(string 0)",
+      "expect": {
+        "str": "0"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-int-negative",
+      "expr": "(string -42)",
+      "expect": {
+        "str": "-42"
+      },
+      "note": "A leading - when negative, no +, no leading zeros.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-int-i64-bounds",
+      "expr": "(str (string 9223372036854775807) \" \" (string -9223372036854775808))",
+      "expect": {
+        "str": "9223372036854775807 -9223372036854775808"
+      },
+      "spec": "\u00a77.6, \u00a72"
+    },
+    {
+      "name": "render-float-zero",
+      "expr": "(string 0.0)",
+      "expect": {
+        "str": "0.0"
+      },
+      "note": "Zero renders 0.0 -- at least one digit after the point.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-negative-zero",
+      "expr": "(string -0.0)",
+      "expect": {
+        "str": "-0.0"
+      },
+      "note": "Negative zero is preserved and rendered, so a host cannot normalise it away (ABI 6.3.1 rule 6).",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-one",
+      "expr": "(string 1.0)",
+      "expect": {
+        "str": "1.0"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-half",
+      "expr": "(string 0.5)",
+      "expect": {
+        "str": "0.5"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-lower-fixed-bound",
+      "expr": "(string 0.0001)",
+      "expect": {
+        "str": "0.0001"
+      },
+      "note": "1e-4 is the inclusive lower edge of the fixed-point window.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-just-below-lower-bound",
+      "expr": "(string 0.00009999)",
+      "expect": {
+        "str": "9.999e-5"
+      },
+      "note": "Below 1e-4 goes scientific. The spec's own example.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-upper-fixed-bound",
+      "expr": "(string 1000000000000000.0)",
+      "expect": {
+        "str": "1000000000000000.0"
+      },
+      "note": "1e15 is inside the window; the exclusive upper edge is 1e16.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-at-upper-bound",
+      "expr": "(string 1e16)",
+      "expect": {
+        "str": "1e16"
+      },
+      "note": "At 1e16 the rendering switches to scientific, with no digits after the point when there are none.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-max",
+      "expr": "(string 1.7976931348623157e308)",
+      "expect": {
+        "str": "1.7976931348623157e308"
+      },
+      "note": "The largest finite binary64. Without the upper bound on fixed-point this would be 310 characters.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-min-subnormal",
+      "expr": "(string 5e-324)",
+      "expect": {
+        "str": "5e-324"
+      },
+      "note": "The smallest positive subnormal. The shortest digit string that round-trips is one digit.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-shortest-roundtrip",
+      "expr": "(string 0.1)",
+      "expect": {
+        "str": "0.1"
+      },
+      "note": "Shortest round-tripping decimal, not the exact binary value: 0.1 is not representable, and 0.1000000000000000055511151231257827 round-trips to the same double.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-float-negative-exponent-no-plus",
+      "expr": "(string 1e-7)",
+      "expect": {
+        "str": "1e-7"
+      },
+      "note": "The exponent carries - when negative and never +, and never a leading zero.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-string-unquoted-at-top-level",
+      "expr": "(string \"hello\")",
+      "expect": {
+        "str": "hello"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-string-quoted-when-nested",
+      "expr": "(string (arr \"hello\"))",
+      "expect": {
+        "str": "[\"hello\"]"
+      },
+      "note": "The same string is bare at the top level and quoted inside a container, so a rendered container re-reads as itself.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-string-escapes",
+      "expr": "(string (arr \"a\\\"b\\\\c\"))",
+      "expect": {
+        "str": "[\"a\\\"b\\\\c\"]"
+      },
+      "note": "Quote and backslash escape when nested -- 3.1's escape set exactly.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-string-control-escapes",
+      "expr": "(string (arr \"a\\nb\\tc\\rd\"))",
+      "expect": {
+        "str": "[\"a\\nb\\tc\\rd\"]"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-string-low-scalar-escape",
+      "expr": "(string (arr \"a\\u{1}b\"))",
+      "expect": {
+        "str": "[\"a\\u{1}b\"]"
+      },
+      "note": "Any other scalar below U+0020 uses \\u{h...} with lowercase hex and no leading zeros.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-string-non-ascii-is-itself",
+      "expr": "(string (arr \"\u00fcber \u2192 \ud83d\ude00\"))",
+      "expect": {
+        "str": "[\"\u00fcber \u2192 \ud83d\ude00\"]"
+      },
+      "note": "Every other scalar renders as itself: no \\u escaping of ordinary text, and no normalisation.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-bytes-lowercase-hex",
+      "expr": "(string (get (dict \"b\" (get-in $ (arr \"raw\"))) \"b\"))",
+      "expect": {
+        "str": "00ff10"
+      },
+      "signal": {
+        "raw": {
+          "bytes": "00ff10"
+        }
+      },
+      "note": "Lowercase hex, two digits per byte, no separator, unquoted at the top level.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-bytes-quoted-when-nested",
+      "expr": "(string (arr $raw))",
+      "expect": {
+        "str": "[\"61ff\"]"
+      },
+      "signal": {
+        "raw": {
+          "bytes": "61ff"
+        }
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-bytes-empty",
+      "expr": "(string $raw)",
+      "expect": {
+        "str": ""
+      },
+      "signal": {
+        "raw": {
+          "bytes": ""
+        }
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-array-empty",
+      "expr": "(string (arr))",
+      "expect": {
+        "str": "[]"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-array-separator",
+      "expr": "(string (arr 1 2 3))",
+      "expect": {
+        "str": "[1, 2, 3]"
+      },
+      "note": "Elements in order, separated by a comma and a space.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-array-mixed-types",
+      "expr": "(string (arr 1 1.0 \"a\" true null))",
+      "expect": {
+        "str": "[1, 1.0, \"a\", true, null]"
+      },
+      "note": "int 1 and float 1.0 render differently, which is why the vector notation tags them.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-array-nested",
+      "expr": "(string (arr (arr 1) (arr)))",
+      "expect": {
+        "str": "[[1], []]"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-map-empty",
+      "expr": "(string (dict))",
+      "expect": {
+        "str": "{}"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-map-keys-quoted-and-sorted",
+      "expr": "(string (dict \"b\" 2 \"a\" 1))",
+      "expect": {
+        "str": "{\"a\": 1, \"b\": 2}"
+      },
+      "note": "Ascending key order regardless of construction order (2), and keys are always quoted. This is what makes a rendered map the same text on every host.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-map-key-order-is-bytewise",
+      "expr": "(string (dict \"B\" 1 \"a\" 2 \"A\" 3))",
+      "expect": {
+        "str": "{\"A\": 3, \"B\": 1, \"a\": 2}"
+      },
+      "note": "Bytewise over UTF-8, so uppercase sorts before lowercase -- not a locale collation.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-map-nested-in-array",
+      "expr": "(string (arr (dict \"k\" \"v\")))",
+      "expect": {
+        "str": "[{\"k\": \"v\"}]"
+      },
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-str-concatenates-renderings",
+      "expr": "(str \"n=\" 1 \" f=\" 1.5 \" a=\" (arr \"x\"))",
+      "expect": {
+        "str": "n=1 f=1.5 a=[\"x\"]"
+      },
+      "note": "str renders each argument by the same rules, so 7.6 pins str's output too.",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-function-is-type-error",
+      "expr": "(string (fn (x) x))",
+      "error": "TYPE",
+      "note": "A function has no rendering.",
+      "spec": "\u00a77.6, \u00a72"
+    },
+    {
+      "name": "render-str-with-function-argument-is-type-error",
+      "expr": "(str \"f=\" (fn (x) x))",
+      "error": "TYPE",
+      "spec": "\u00a77.6"
+    },
+    {
+      "name": "render-field-pins-the-result-rendering",
+      "expr": "(dict \"a\" 1 \"b\" (arr 1.5 \"x\"))",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 1
+          },
+          "b": {
+            "arr": [
+              {
+                "float": 1.5
+              },
+              {
+                "str": "x"
+              }
+            ]
+          }
+        }
+      },
+      "render": "{\"a\": 1, \"b\": [1.5, \"x\"]}",
+      "note": "A vector may pin both the value and its rendering; the two assertions are independent, and this one shows the `render` field doing the job (string x) does above.",
+      "spec": "\u00a77.6"
+    }
+  ]
+}

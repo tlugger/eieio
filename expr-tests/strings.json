@@ -1,0 +1,388 @@
+{
+  "vectors": [
+    {
+      "name": "str-identity-at-zero-arguments",
+      "expr": "(str)",
+      "expect": {
+        "str": ""
+      },
+      "spec": "\u00a77"
+    },
+    {
+      "name": "str-concatenates-renderings",
+      "expr": "(str \"a\" 1 \" \" 1.5)",
+      "expect": {
+        "str": "a1 1.5"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "str-of-one-string",
+      "expr": "(str \"solo\")",
+      "expect": {
+        "str": "solo"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "len-of-a-string-counts-scalars",
+      "expr": "(len \"\u00fcber\")",
+      "expect": {
+        "int": 4
+      },
+      "note": "Unicode scalars, not bytes: \u00fc is two UTF-8 bytes and one scalar.",
+      "spec": "\u00a77.4, \u00a77.8"
+    },
+    {
+      "name": "len-of-an-astral-scalar",
+      "expr": "(len \"\ud83d\ude00\")",
+      "expect": {
+        "int": 1
+      },
+      "note": "One scalar, four UTF-8 bytes, and one UTF-16 surrogate pair elsewhere -- the count is scalars everywhere.",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "len-of-an-empty-string",
+      "expr": "(len \"\")",
+      "expect": {
+        "int": 0
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "len-of-an-array",
+      "expr": "(len (arr 1 2 3))",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "len-of-a-map",
+      "expr": "(len (dict \"a\" 1))",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "len-of-bytes-counts-bytes",
+      "expr": "(len $raw)",
+      "signal": {
+        "raw": {
+          "bytes": "00ff10"
+        }
+      },
+      "expect": {
+        "int": 3
+      },
+      "note": "Bytes for a byte string, scalars for text: the two are different measures and \u00a77.8 says which applies where.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "len-of-an-int-is-an-error",
+      "expr": "(len 1)",
+      "error": "TYPE",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "upper-ascii",
+      "expr": "(upper \"abc1\")",
+      "expect": {
+        "str": "ABC1"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "upper-leaves-non-ascii-alone",
+      "expr": "(upper \"\u00fcber\")",
+      "expect": {
+        "str": "\u00fcBER"
+      },
+      "note": "ASCII-only case mapping in v1: no_std locale honesty. A host with a Unicode table would produce \u00dcBER and diverge.",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "lower-ascii",
+      "expr": "(lower \"ABC1\")",
+      "expect": {
+        "str": "abc1"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "lower-leaves-non-ascii-alone",
+      "expr": "(lower \"\u00dcBER\")",
+      "expect": {
+        "str": "\u00dcber"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "trim-both-ends",
+      "expr": "(trim \"  a  \")",
+      "expect": {
+        "str": "a"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "trim-removes-exactly-the-grammar-whitespace",
+      "expr": "(trim \" \\t\\n\\ra\\t \")",
+      "expect": {
+        "str": "a"
+      },
+      "note": "Space, tab, newline, carriage return -- \u00a73.1's set, not the Unicode White_Space property, whose table does not fit the leaf tier.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "trim-leaves-inner-whitespace",
+      "expr": "(trim \" a b \")",
+      "expect": {
+        "str": "a b"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "trim-of-an-empty-string",
+      "expr": "(trim \"\")",
+      "expect": {
+        "str": ""
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "contains-substring-true",
+      "expr": "(contains? \"hello\" \"ell\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "contains-substring-false",
+      "expr": "(contains? \"hello\" \"z\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "contains-empty-substring",
+      "expr": "(contains? \"hello\" \"\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "starts-with-true",
+      "expr": "(starts-with? \"hello\" \"he\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "starts-with-false",
+      "expr": "(starts-with? \"hello\" \"lo\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "ends-with-true",
+      "expr": "(ends-with? \"hello\" \"lo\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "ends-with-false",
+      "expr": "(ends-with? \"hello\" \"he\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "substr-basic",
+      "expr": "(substr \"hello\" 1 3)",
+      "expect": {
+        "str": "ell"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "substr-clamps-past-the-end",
+      "expr": "(substr \"hello\" 3 99)",
+      "expect": {
+        "str": "lo"
+      },
+      "note": "Out-of-range clamps rather than erroring, so (substr s 0 n) is a safe truncation.",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "substr-start-past-the-end-is-empty",
+      "expr": "(substr \"hello\" 99 1)",
+      "expect": {
+        "str": ""
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "substr-zero-length",
+      "expr": "(substr \"hello\" 1 0)",
+      "expect": {
+        "str": ""
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "substr-is-scalar-indexed",
+      "expr": "(substr \"\u00fcber\" 0 1)",
+      "expect": {
+        "str": "\u00fc"
+      },
+      "note": "Scalar-indexed, never byte-indexed: a byte index would split \u00fc and produce invalid UTF-8.",
+      "spec": "\u00a77.4, \u00a77.8"
+    },
+    {
+      "name": "substr-negative-start-is-an-error",
+      "expr": "(substr \"hello\" -1 2)",
+      "error": "DOMAIN",
+      "note": "Negative clamps would silently mean from-the-end indexing, which v1 does not have.",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "substr-negative-length-is-an-error",
+      "expr": "(substr \"hello\" 1 -1)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "split-on-a-separator",
+      "expr": "(split \"a,b,c\" \",\")",
+      "expect": {
+        "arr": [
+          {
+            "str": "a"
+          },
+          {
+            "str": "b"
+          },
+          {
+            "str": "c"
+          }
+        ]
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "split-with-no-match-is-the-whole-string",
+      "expr": "(split \"abc\" \",\")",
+      "expect": {
+        "arr": [
+          {
+            "str": "abc"
+          }
+        ]
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "split-yields-empty-fields",
+      "expr": "(split \"a,,b\" \",\")",
+      "expect": {
+        "arr": [
+          {
+            "str": "a"
+          },
+          {
+            "str": ""
+          },
+          {
+            "str": "b"
+          }
+        ]
+      },
+      "note": "Empty fields are preserved: dropping them would lose the shape of the input.",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "split-on-an-empty-separator-is-an-error",
+      "expr": "(split \"abc\" \"\")",
+      "error": "DOMAIN",
+      "note": "No single obvious meaning; (map (fn (i) (substr s i 1)) (range (len s))) states the character-wise reading explicitly.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "join-strings",
+      "expr": "(join (arr \"a\" \"b\") \"-\")",
+      "expect": {
+        "str": "a-b"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "join-empty-array",
+      "expr": "(join (arr) \"-\")",
+      "expect": {
+        "str": ""
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "join-single-element-has-no-separator",
+      "expr": "(join (arr \"a\") \"-\")",
+      "expect": {
+        "str": "a"
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "join-renders-nothing",
+      "expr": "(join (arr 1 2) \"-\")",
+      "error": "TYPE",
+      "note": "A non-string element is TYPE, not canonically rendered. (join (map string a) sep) is the other reading, said out loud.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "index-of-found",
+      "expr": "(index-of \"hello\" \"ll\")",
+      "expect": {
+        "int": 2
+      },
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "index-of-not-found-is-minus-one",
+      "expr": "(index-of \"hello\" \"z\")",
+      "expect": {
+        "int": -1
+      },
+      "note": "-1 rather than MISSING: the question is where, and \"nowhere\" is an answer.",
+      "spec": "\u00a77.4"
+    },
+    {
+      "name": "index-of-is-scalar-indexed",
+      "expr": "(index-of \"\u00fcber-x\" \"x\")",
+      "expect": {
+        "int": 5
+      },
+      "note": "Scalar index: a byte index would say 6.",
+      "spec": "\u00a77.4, \u00a77.8"
+    },
+    {
+      "name": "index-of-empty-substring",
+      "expr": "(index-of \"hello\" \"\")",
+      "expect": {
+        "int": 0
+      },
+      "spec": "\u00a77.4"
+    }
+  ]
+}

@@ -1,0 +1,244 @@
+{
+  "vectors": [
+    {
+      "name": "dependence-bare-sigil",
+      "expr": "$",
+      "signal_dependent": true,
+      "error": "NO_SIGNAL",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-named-sigil",
+      "expr": "$temp",
+      "signal_dependent": true,
+      "signal": {
+        "temp": {
+          "int": 1
+        }
+      },
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-literal-is-independent",
+      "expr": "42",
+      "signal_dependent": false,
+      "expect": {
+        "int": 42
+      },
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-arithmetic-on-literals-is-independent",
+      "expr": "(* 60 1000)",
+      "signal_dependent": false,
+      "expect": {
+        "int": 60000
+      },
+      "note": "The canonical constant-folding case: evaluated once at configure time and served from cache for every signal (ABI 7.1).",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-sigil-nested-deep-is-dependent",
+      "expr": "(if (> (len (str \"x\" $name)) 1) 1 2)",
+      "signal_dependent": true,
+      "signal": {
+        "name": {
+          "str": "a"
+        }
+      },
+      "expect": {
+        "int": 1
+      },
+      "note": "Iff ANY sigil appears anywhere in it -- depth and position are irrelevant.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-sigil-inside-a-function-body-is-dependent",
+      "expr": "(map (fn (x) (+ x $offset)) (arr 1 2))",
+      "signal_dependent": true,
+      "signal": {
+        "offset": {
+          "int": 10
+        }
+      },
+      "expect": {
+        "arr": [
+          {
+            "int": 11
+          },
+          {
+            "int": 12
+          }
+        ]
+      },
+      "note": "A sigil inside a fn body still makes the whole expression signal-dependent: the function is applied during this evaluation, not a later one.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-sigil-in-a-let-binding-is-dependent",
+      "expr": "(let ((t $temp)) (* t 2))",
+      "signal_dependent": true,
+      "signal": {
+        "temp": {
+          "int": 21
+        }
+      },
+      "expect": {
+        "int": 42
+      },
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-attribute-name-shadowed-by-a-binding-is-still-dependent",
+      "expr": "(let ((temp 1)) (+ temp $temp))",
+      "signal_dependent": true,
+      "signal": {
+        "temp": {
+          "int": 2
+        }
+      },
+      "expect": {
+        "int": 3
+      },
+      "note": "A binding named like an attribute does not shadow the sigil: $temp reads the signal, temp reads the binding. They are different syntax, deliberately.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "dependence-unused-sigil-still-counts",
+      "expr": "(if true 1 $temp)",
+      "signal_dependent": true,
+      "signal": {
+        "temp": {
+          "int": 9
+        }
+      },
+      "expect": {
+        "int": 1
+      },
+      "note": "Classification is syntactic, not reachability-based: the sigil is in the untaken branch and the expression is still signal-dependent. A host that folded this once and cached it would be wrong for a signal that takes the other branch.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-unbound-symbol",
+      "expr": "(frobnicate 1)",
+      "error": "ANY",
+      "note": "Rejected. Which code says so is diagnostic (10); this implementation reports UNBOUND.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-let-binding-not-a-pair",
+      "expr": "(let (x) x)",
+      "error": "ANY",
+      "note": "What (let (x) x) binds has no answer, so a host that guessed would accept an expression that cannot evaluate.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-let-name-not-a-symbol",
+      "expr": "(let ((1 2)) 1)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-let-without-exactly-one-body",
+      "expr": "(let ((x 1)) x x)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-fn-parameters-not-symbols",
+      "expr": "(fn (1) 1)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-fn-repeats-a-parameter",
+      "expr": "(fn (x x) x)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-fn-without-exactly-one-body",
+      "expr": "(fn (x) x x)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-if-wrong-argument-count",
+      "expr": "(if true 1 2 3)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-binding-shadows-a-special-form",
+      "expr": "(let ((if 1)) if)",
+      "error": "ANY",
+      "note": "A binding or parameter that shadows a special form is rejected: the head of a list would stop meaning what 5 says it means.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-parameter-shadows-a-special-form",
+      "expr": "(fn (and) and)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-special-form-outside-head-position",
+      "expr": "(+ 1 if)",
+      "error": "ANY",
+      "note": "4 would resolve a special form in argument position as an ordinary symbol and find nothing.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-empty-list",
+      "expr": "()",
+      "error": "ANY",
+      "note": "Nothing to apply (4).",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-empty-list-nested",
+      "expr": "(+ 1 ())",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-valid-let-with-several-bindings",
+      "expr": "(let ((a 1) (b 2)) (+ a b))",
+      "expect": {
+        "int": 3
+      },
+      "signal_dependent": false,
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-valid-fn-with-no-parameters",
+      "expr": "((fn () 7))",
+      "expect": {
+        "int": 7
+      },
+      "note": "An empty parameter list is a list of zero symbols, which is a valid shape.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-valid-nested-fn",
+      "expr": "((fn (x) ((fn (y) (+ x y)) 2)) 1)",
+      "expect": {
+        "int": 3
+      },
+      "note": "A closure over an outer parameter: the case a naive symbol table gets wrong.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-valid-shadowing-a-builtin-is-allowed",
+      "expr": "(let ((len 5)) len)",
+      "expect": {
+        "int": 5
+      },
+      "note": "Shadowing a *builtin* is allowed -- only special forms may not be shadowed (5.2, 5.4). Nothing in the grammar depends on len being a function.",
+      "spec": "\u00a710"
+    }
+  ]
+}

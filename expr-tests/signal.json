@@ -1,0 +1,343 @@
+{
+  "vectors": [
+    {
+      "name": "signal-whole-signal-is-a-map",
+      "expr": "(map? $)",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-attribute-sugar",
+      "expr": "$temp",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "float": 21.5
+      },
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-sugar-equals-explicit-get",
+      "expr": "(= $temp (get $ \"temp\"))",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "bool": true
+      },
+      "note": "$name is reader sugar for (get $ \"name\"), single-level.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-nested-access-is-explicit",
+      "expr": "(get-in $ (arr \"nested\" \"a\" \"b\"))",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "int": 7
+      },
+      "note": "There is no $a.b: nested access is spelled out, so the sugar stays single-level and unambiguous.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-missing-attribute-is-an-error",
+      "expr": "$humidity",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "error": "MISSING",
+      "note": "Missing data is an error, not null. Silent null converts config typos into downstream mysteries.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-missing-handled-with-get-or",
+      "expr": "(get-or $ \"humidity\" 0)",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "int": 0
+      },
+      "note": "Graceful handling is explicit, which is the point: the reader sees the default.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-presence-tested-with-has",
+      "expr": "(has? $ \"humidity\")",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-presence-tested-with-has-true",
+      "expr": "(has? $ \"temp\")",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        },
+        "name": {
+          "str": "probe"
+        },
+        "nested": {
+          "map": {
+            "a": {
+              "map": {
+                "b": {
+                  "int": 7
+                }
+              }
+            }
+          }
+        },
+        "count": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-none-bare-sigil",
+      "expr": "$",
+      "error": "NO_SIGNAL",
+      "note": "Under SIGNAL_NONE, the sigil is ERR_NO_SIGNAL_CONTEXT -- never a null value (ABI \u00a77.1).",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-none-named-sigil",
+      "expr": "$temp",
+      "error": "NO_SIGNAL",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-none-everything-else-still-evaluates",
+      "expr": "(+ 1 2)",
+      "expect": {
+        "int": 3
+      },
+      "note": "Only the sigils need a signal; the rest of the language evaluates normally under SIGNAL_NONE.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-none-get-or-does-not-rescue-a-missing-context",
+      "expr": "(get-or $ \"temp\" 0)",
+      "error": "NO_SIGNAL",
+      "note": "get-or substitutes for a missing *attribute*, not for a missing signal: the two failures are different and only one of them is the block's business.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-empty-map",
+      "expr": "(len $)",
+      "signal": {},
+      "expect": {
+        "int": 0
+      },
+      "note": "A signal with no attributes is a present, empty context -- distinct from SIGNAL_NONE.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-attribute-holding-null-is-present",
+      "expr": "$maybe",
+      "signal": {
+        "maybe": {
+          "null": null
+        }
+      },
+      "expect": {
+        "null": null
+      },
+      "note": "An attribute whose value is null is present: MISSING is about absence, not about null.",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "signal-keys-are-sorted",
+      "expr": "(keys $)",
+      "signal": {
+        "b": {
+          "int": 1
+        },
+        "a": {
+          "int": 2
+        },
+        "C": {
+          "int": 3
+        }
+      },
+      "expect": {
+        "arr": [
+          {
+            "str": "C"
+          },
+          {
+            "str": "a"
+          },
+          {
+            "str": "b"
+          }
+        ]
+      },
+      "note": "Map iteration is sorted, so every host walks a signal in the same order.",
+      "spec": "\u00a76, \u00a72"
+    },
+    {
+      "name": "signal-attribute-with-a-non-identifier-name",
+      "expr": "(get $ \"a b\")",
+      "signal": {
+        "a b": {
+          "int": 1
+        }
+      },
+      "expect": {
+        "int": 1
+      },
+      "note": "The sugar only reaches names that are identifiers; (get $ \"...\") reaches any attribute a CBOR map can carry.",
+      "spec": "\u00a76"
+    }
+  ]
+}

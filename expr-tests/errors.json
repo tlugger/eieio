@@ -1,0 +1,93 @@
+{
+  "vectors": [
+    {
+      "name": "parse-unclosed-list",
+      "expr": "(+ 1 2",
+      "error": "PARSE",
+      "spec": "\u00a78",
+      "note": "PARSE rejects the configuration rather than one signal, so it is the one code that is not a per-signal failure"
+    },
+    {
+      "name": "unbound-symbol",
+      "expr": "(frobnicate 1)",
+      "error": "UNBOUND",
+      "spec": "\u00a78"
+    },
+    {
+      "name": "type-wrong-operand",
+      "expr": "(+ 1 \"two\")",
+      "error": "TYPE",
+      "spec": "\u00a78"
+    },
+    {
+      "name": "arity-if-missing-else",
+      "expr": "(if true 1)",
+      "error": "ARITY",
+      "spec": "\u00a75.1",
+      "note": "else is mandatory: an if with no else would have to invent a value for the missing branch"
+    },
+    {
+      "name": "domain-division-by-zero",
+      "expr": "(/ 1 0)",
+      "error": "DOMAIN",
+      "spec": "\u00a78"
+    },
+    {
+      "name": "no-signal-attribute-without-context",
+      "expr": "$temp",
+      "error": "NO_SIGNAL",
+      "spec": "\u00a76",
+      "note": "evaluating a signal-dependent expression with SIGNAL_NONE is an error, never a null (ABI \u00a77.1)"
+    },
+    {
+      "name": "no-signal-whole-signal-without-context",
+      "expr": "$",
+      "error": "NO_SIGNAL",
+      "spec": "\u00a76"
+    },
+    {
+      "name": "missing-attribute-present-signal",
+      "expr": "$humidity",
+      "signal": {
+        "temp": {
+          "float": 21.5
+        }
+      },
+      "error": "MISSING",
+      "spec": "\u00a76",
+      "note": "missing data is an error, not null \u2014 the invariant that keeps a config typo from becoming a 2 a.m. mystery"
+    },
+    {
+      "name": "missing-key-in-map",
+      "expr": "(get (dict \"a\" 1) \"b\")",
+      "error": "MISSING",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "type-function-as-final-result",
+      "expr": "(fn (x) x)",
+      "error": "TYPE",
+      "spec": "\u00a72, \u00a78",
+      "note": "A function cannot be an expression's result: there is no CBOR value for one, so the property would have nothing to hand the guest."
+    },
+    {
+      "name": "type-applying-a-non-function",
+      "expr": "(1 2)",
+      "error": "TYPE",
+      "spec": "\u00a78"
+    },
+    {
+      "name": "domain-int-overflow",
+      "expr": "(* 9223372036854775807 2)",
+      "error": "DOMAIN",
+      "spec": "\u00a78",
+      "note": "Ints are i64 (\u00a72); overflow is an error rather than a wrap, because a silently wrapped threshold is a control decision made on a wrong number."
+    },
+    {
+      "name": "missing-first-of-empty-array",
+      "expr": "(first (arr))",
+      "error": "MISSING",
+      "spec": "\u00a77.5, \u00a78"
+    }
+  ]
+}

@@ -1,0 +1,830 @@
+{
+  "vectors": [
+    {
+      "name": "arr-empty-is-the-only-empty-array-syntax",
+      "expr": "(arr)",
+      "expect": {
+        "arr": []
+      },
+      "note": "\u00a73.2 gives no literal syntax for an array, so the zero-argument variadic is how an empty one is written.",
+      "spec": "\u00a77"
+    },
+    {
+      "name": "arr-of-mixed-values",
+      "expr": "(arr 1 \"a\" true null 1.5)",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "str": "a"
+          },
+          {
+            "bool": true
+          },
+          {
+            "null": null
+          },
+          {
+            "float": 1.5
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "arr-nested",
+      "expr": "(arr (arr 1) (arr))",
+      "expect": {
+        "arr": [
+          {
+            "arr": [
+              {
+                "int": 1
+              }
+            ]
+          },
+          {
+            "arr": []
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "dict-empty-is-the-only-empty-map-syntax",
+      "expr": "(dict)",
+      "expect": {
+        "map": {}
+      },
+      "spec": "\u00a77"
+    },
+    {
+      "name": "dict-pairs",
+      "expr": "(dict \"a\" 1 \"b\" 2)",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 1
+          },
+          "b": {
+            "int": 2
+          }
+        }
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "dict-orders-by-key",
+      "expr": "(dict \"b\" 1 \"a\" 2)",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 2
+          },
+          "b": {
+            "int": 1
+          }
+        }
+      },
+      "spec": "\u00a77.5, \u00a72"
+    },
+    {
+      "name": "dict-odd-arity-is-an-error",
+      "expr": "(dict \"a\")",
+      "error": "ARITY",
+      "note": "Even arity: keys and values.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "dict-non-string-key-is-an-error",
+      "expr": "(dict 1 2)",
+      "error": "TYPE",
+      "note": "Keys MUST be strings.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "dict-duplicate-key-is-an-error",
+      "expr": "(dict \"a\" 1 \"a\" 2)",
+      "error": "DOMAIN",
+      "note": "Not last-wins: keys are written out one by one, so a repeat is a typo, and keeping one of the two values silently is how it reaches production.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "get-from-a-map",
+      "expr": "(get (dict \"a\" 1) \"a\")",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-missing-map-key-is-an-error",
+      "expr": "(get (dict \"a\" 1) \"b\")",
+      "error": "MISSING",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-from-an-array-by-index",
+      "expr": "(get (arr 10 20) 1)",
+      "expect": {
+        "int": 20
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-array-index-out-of-range-is-an-error",
+      "expr": "(get (arr 10) 5)",
+      "error": "MISSING",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-negative-array-index-is-absent-not-ill-typed",
+      "expr": "(get (arr 10) -1)",
+      "error": "MISSING",
+      "note": "It is an integer, which is the right *kind* of key for an array, and there is no from-the-end indexing in v1 -- so it is absent, not ill-typed.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "get-with-a-wrong-kind-of-key-is-ill-typed",
+      "expr": "(get (arr 10) \"a\")",
+      "error": "TYPE",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "get-or-substitutes-for-a-missing-key",
+      "expr": "(get-or (dict \"a\" 1) \"b\" 0)",
+      "expect": {
+        "int": 0
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-or-returns-a-present-value",
+      "expr": "(get-or (dict \"a\" 1) \"a\" 0)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-or-substitutes-for-a-negative-index",
+      "expr": "(get-or (arr 10) -1 0)",
+      "expect": {
+        "int": 0
+      },
+      "note": "Absent, so the default applies.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "get-or-does-not-rescue-a-wrong-key-kind",
+      "expr": "(get-or (arr 10) \"a\" 0)",
+      "error": "TYPE",
+      "note": "get-or substitutes for absence only. A key of a kind the container could never hold is still TYPE: it is not absent, it was never a key that container has.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "get-in-nested",
+      "expr": "(get-in (dict \"a\" (dict \"b\" 7)) (arr \"a\" \"b\"))",
+      "expect": {
+        "int": 7
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-in-through-an-array",
+      "expr": "(get-in (dict \"a\" (arr 1 2)) (arr \"a\" 1))",
+      "expect": {
+        "int": 2
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "get-in-empty-path-is-the-container",
+      "expr": "(get-in (dict \"a\" 1) (arr))",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 1
+          }
+        }
+      },
+      "note": "What folding over no steps means.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "get-in-missing-step-is-an-error",
+      "expr": "(get-in (dict \"a\" 1) (arr \"b\"))",
+      "error": "MISSING",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "has-map-key-true",
+      "expr": "(has? (dict \"a\" 1) \"a\")",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "has-map-key-false",
+      "expr": "(has? (dict \"a\" 1) \"b\")",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "has-array-index-valid",
+      "expr": "(has? (arr 1 2) 1)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "has-array-index-out-of-range",
+      "expr": "(has? (arr 1 2) 9)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "has-negative-array-index-is-false",
+      "expr": "(has? (arr 1) -1)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "first-of-an-array",
+      "expr": "(first (arr 1 2))",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "last-of-an-array",
+      "expr": "(last (arr 1 2))",
+      "expect": {
+        "int": 2
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "first-of-empty-is-an-error",
+      "expr": "(first (arr))",
+      "error": "MISSING",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "last-of-empty-is-an-error",
+      "expr": "(last (arr))",
+      "error": "MISSING",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "slice-basic",
+      "expr": "(slice (arr 1 2 3 4) 1 2)",
+      "expect": {
+        "arr": [
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "slice-clamps-past-the-end",
+      "expr": "(slice (arr 1 2 3) 2 99)",
+      "expect": {
+        "arr": [
+          {
+            "int": 3
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "slice-start-past-the-end-is-empty",
+      "expr": "(slice (arr 1 2) 9 1)",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "slice-negative-start-is-an-error",
+      "expr": "(slice (arr 1 2) -1 1)",
+      "error": "DOMAIN",
+      "note": "Clamping, like substr -- and negative is an error there too.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "concat-identity-at-zero-arguments",
+      "expr": "(concat)",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77"
+    },
+    {
+      "name": "concat-arrays",
+      "expr": "(concat (arr 1) (arr 2 3))",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "concat-one-array",
+      "expr": "(concat (arr 1))",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "concat-rejects-a-string",
+      "expr": "(concat (arr 1) \"ab\")",
+      "error": "TYPE",
+      "note": "Arrays only: string concatenation is str.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "assoc-adds-a-key",
+      "expr": "(assoc (dict \"a\" 1) \"b\" 2)",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 1
+          },
+          "b": {
+            "int": 2
+          }
+        }
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "assoc-replaces-a-key",
+      "expr": "(assoc (dict \"a\" 1) \"a\" 2)",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 2
+          }
+        }
+      },
+      "note": "Replacing an existing key is the point of assoc, unlike dict where a repeat is a typo.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "assoc-does-not-mutate-its-input",
+      "expr": "(let ((m (dict \"a\" 1))) (len (arr (assoc m \"b\" 2) m)))",
+      "expect": {
+        "int": 2
+      },
+      "note": "Persistent: inputs never mutate.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "assoc-input-is-unchanged",
+      "expr": "(let ((m (dict \"a\" 1))) (get-or (assoc m \"b\" 2) \"b\" 0))",
+      "expect": {
+        "int": 2
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "assoc-non-string-key-is-an-error",
+      "expr": "(assoc (dict) 1 2)",
+      "error": "TYPE",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "keys-are-sorted",
+      "expr": "(keys (dict \"b\" 1 \"a\" 2 \"C\" 3))",
+      "expect": {
+        "arr": [
+          {
+            "str": "C"
+          },
+          {
+            "str": "a"
+          },
+          {
+            "str": "b"
+          }
+        ]
+      },
+      "spec": "\u00a77.5, \u00a72"
+    },
+    {
+      "name": "keys-of-an-empty-map",
+      "expr": "(keys (dict))",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "vals-follow-key-order",
+      "expr": "(vals (dict \"b\" 1 \"a\" 2))",
+      "expect": {
+        "arr": [
+          {
+            "int": 2
+          },
+          {
+            "int": 1
+          }
+        ]
+      },
+      "note": "Sorted-by-key order, so keys and vals line up on every host.",
+      "spec": "\u00a77.5, \u00a72"
+    },
+    {
+      "name": "keys-of-an-array-is-an-error",
+      "expr": "(keys (arr 1))",
+      "error": "TYPE",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "range-length-form",
+      "expr": "(range 3)",
+      "expect": {
+        "arr": [
+          {
+            "int": 0
+          },
+          {
+            "int": 1
+          },
+          {
+            "int": 2
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "range-start-end-form",
+      "expr": "(range 2 5)",
+      "expect": {
+        "arr": [
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          },
+          {
+            "int": 4
+          }
+        ]
+      },
+      "note": "End-exclusive, so (range 0 n) and (range n) agree.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "range-of-zero-is-empty",
+      "expr": "(range 0)",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "range-of-a-negative-length-is-empty",
+      "expr": "(range -5)",
+      "expect": {
+        "arr": []
+      },
+      "note": "Empty rather than an error, so (range (len a)) iterates nothing over an empty array.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "range-with-end-below-start-is-empty",
+      "expr": "(range 5 2)",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "range-rejects-a-float",
+      "expr": "(range 2.0)",
+      "error": "TYPE",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "map-over-an-array",
+      "expr": "(map (fn (x) (* x 2)) (arr 1 2))",
+      "expect": {
+        "arr": [
+          {
+            "int": 2
+          },
+          {
+            "int": 4
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "map-over-empty",
+      "expr": "(map abs (arr))",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "map-requires-a-unary-function",
+      "expr": "(map (fn (x y) x) (arr 1))",
+      "error": "ARITY",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "map-requires-a-function",
+      "expr": "(map 1 (arr 1))",
+      "error": "TYPE",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "filter-keeps-truthy-results",
+      "expr": "(filter (fn (x) (> x 1)) (arr 1 2 3))",
+      "expect": {
+        "arr": [
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "filter-over-empty",
+      "expr": "(filter (fn (x) true) (arr))",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "reduce-sums",
+      "expr": "(reduce (fn (acc x) (+ acc x)) 0 (arr 1 2 3))",
+      "expect": {
+        "int": 6
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "reduce-over-empty-is-the-initial-value",
+      "expr": "(reduce (fn (acc x) (+ acc x)) 42 (arr))",
+      "expect": {
+        "int": 42
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "reduce-argument-order-is-acc-then-element",
+      "expr": "(reduce (fn (acc x) (str acc x)) \"\" (arr \"a\" \"b\"))",
+      "expect": {
+        "str": "ab"
+      },
+      "note": "f is binary (acc elem), and folds left to right.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "reduce-requires-a-binary-function",
+      "expr": "(reduce (fn (x) x) 0 (arr 1))",
+      "error": "ARITY",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "any-true",
+      "expr": "(any? (fn (x) (> x 2)) (arr 1 2 3))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "any-false",
+      "expr": "(any? (fn (x) (> x 9)) (arr 1 2))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "any-over-empty-is-false",
+      "expr": "(any? (fn (x) true) (arr))",
+      "expect": {
+        "bool": false
+      },
+      "note": "The vacuous reading.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "any-short-circuits",
+      "expr": "(any? (fn (x) (= x 1)) (arr 1 2))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "all-true",
+      "expr": "(all? (fn (x) (> x 0)) (arr 1 2))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "all-false",
+      "expr": "(all? (fn (x) (> x 1)) (arr 1 2))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "all-over-empty-is-true",
+      "expr": "(all? (fn (x) false) (arr))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "sort-ints",
+      "expr": "(sort (arr 3 1 2))",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "sort-strings",
+      "expr": "(sort (arr \"b\" \"a\"))",
+      "expect": {
+        "arr": [
+          {
+            "str": "a"
+          },
+          {
+            "str": "b"
+          }
+        ]
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "sort-mixed-int-and-float-is-allowed",
+      "expr": "(sort (arr 2 1.5 3))",
+      "expect": {
+        "arr": [
+          {
+            "float": 1.5
+          },
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          }
+        ]
+      },
+      "note": "Both are numbers and \u00a74.2's exact ordering is total over them.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "sort-is-stable-for-numerically-equal-elements",
+      "expr": "(sort (arr 1 1.0))",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "float": 1.0
+          }
+        ]
+      },
+      "note": "Stable, so 1 and 1.0 keep their original order rather than one spelling winning.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "sort-is-stable-for-numerically-equal-elements-reversed",
+      "expr": "(sort (arr 1.0 1))",
+      "expect": {
+        "arr": [
+          {
+            "float": 1.0
+          },
+          {
+            "int": 1
+          }
+        ]
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "sort-of-empty",
+      "expr": "(sort (arr))",
+      "expect": {
+        "arr": []
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "sort-mixed-numbers-and-strings-is-an-error",
+      "expr": "(sort (arr 1 \"a\"))",
+      "error": "TYPE",
+      "note": "Homogeneous numbers or strings; else ERR. There is no ordering across types (\u00a77.2).",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "sort-of-bools-is-an-error",
+      "expr": "(sort (arr true false))",
+      "error": "TYPE",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "contains-array-by-deep-equality",
+      "expr": "(contains? (arr (arr 1) (arr 2)) (arr 2))",
+      "expect": {
+        "bool": true
+      },
+      "note": "contains? serves arrays too, by deep equality rather than identity.",
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "contains-array-false",
+      "expr": "(contains? (arr 1 2) 3)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.5"
+    },
+    {
+      "name": "contains-array-compares-numbers-by-value-across-int-and-float",
+      "expr": "(contains? (arr 1) 1.0)",
+      "expect": {
+        "bool": true
+      },
+      "note": "contains? uses \u00a74.2 deep equality, and \u00a74.2 compares numbers by mathematical value across int and float -- so an array of ints contains 1.0. \u00a74.2's \"exact rather than by conversion\" rule is about precision above 2^53, not about int and float being distinct for equality. The counter-intuitive direction is why this vector exists.",
+      "spec": "\u00a77.5, \u00a74.2"
+    },
+    {
+      "name": "contains-array-is-exact-above-2-53",
+      "expr": "(contains? (arr 9007199254740993) 9007199254740992.0)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a77.5, \u00a74.2",
+      "note": "The other half of the rule: equality is by mathematical value but computed exactly, so above 2^53 the int and the float are different numbers. A host comparing by conversion would answer true here and agree everywhere below -- the silent divergence \u00a711 exists to catch."
+    }
+  ]
+}

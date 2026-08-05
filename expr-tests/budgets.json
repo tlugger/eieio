@@ -1,0 +1,224 @@
+{
+  "vectors": [
+    {
+      "name": "fuel-exhausted-at-the-floor",
+      "expr": "(reduce (fn (acc x) (+ acc (+ x (+ x (+ x (+ x x)))))) 0 (range 1000))",
+      "budget": {
+        "fuel": 1
+      },
+      "error": "FUEL",
+      "spec": "\u00a79, \u00a79.1",
+      "note": "Asks for fuel 1, which every host clamps up to the 10 000 floor, and then does ~15 000 node visits \u2014 over the floor under the *cheapest* accounting \u00a79.1 permits (one step per node visited), so every conforming host reports FUEL. The step it fires at is deliberately not pinned; the code is."
+    },
+    {
+      "name": "fuel-floor-is-enough-for-honest-work",
+      "expr": "(reduce (fn (acc x) (+ acc x)) 0 (range 100))",
+      "budget": {
+        "fuel": 1
+      },
+      "expect": {
+        "int": 4950
+      },
+      "spec": "\u00a79",
+      "note": "The other half of a floor: it is a promise, so work this size MUST complete on the tightest conforming host. Same clamped budget as the vector above."
+    },
+    {
+      "name": "depth-exceeded-by-a-constructed-value",
+      "expr": "(reduce (fn (acc x) (arr acc)) (arr) (range 40))",
+      "budget": {
+        "depth": 1
+      },
+      "error": "DEPTH",
+      "spec": "\u00a79",
+      "note": "\u00a79's own example: source and call depth are shallow, but the *result* nests 40 deep against a floor of 32. This is the bound that keeps every walk over a value in the system provably shallow \u2014 including the walk that drops it."
+    },
+    {
+      "name": "depth-floor-admits-nesting-up-to-it",
+      "expr": "(reduce (fn (acc x) (arr acc)) (arr) (range 31))",
+      "budget": {
+        "depth": 1
+      },
+      "expect": {
+        "arr": [
+          {
+            "arr": [
+              {
+                "arr": [
+                  {
+                    "arr": [
+                      {
+                        "arr": [
+                          {
+                            "arr": [
+                              {
+                                "arr": [
+                                  {
+                                    "arr": [
+                                      {
+                                        "arr": [
+                                          {
+                                            "arr": [
+                                              {
+                                                "arr": [
+                                                  {
+                                                    "arr": [
+                                                      {
+                                                        "arr": [
+                                                          {
+                                                            "arr": [
+                                                              {
+                                                                "arr": [
+                                                                  {
+                                                                    "arr": [
+                                                                      {
+                                                                        "arr": [
+                                                                          {
+                                                                            "arr": [
+                                                                              {
+                                                                                "arr": [
+                                                                                  {
+                                                                                    "arr": [
+                                                                                      {
+                                                                                        "arr": [
+                                                                                          {
+                                                                                            "arr": [
+                                                                                              {
+                                                                                                "arr": [
+                                                                                                  {
+                                                                                                    "arr": [
+                                                                                                      {
+                                                                                                        "arr": [
+                                                                                                          {
+                                                                                                            "arr": [
+                                                                                                              {
+                                                                                                                "arr": [
+                                                                                                                  {
+                                                                                                                    "arr": [
+                                                                                                                      {
+                                                                                                                        "arr": [
+                                                                                                                          {
+                                                                                                                            "arr": [
+                                                                                                                              {
+                                                                                                                                "arr": [
+                                                                                                                                  {
+                                                                                                                                    "arr": []
+                                                                                                                                  }
+                                                                                                                                ]
+                                                                                                                              }
+                                                                                                                            ]
+                                                                                                                          }
+                                                                                                                        ]
+                                                                                                                      }
+                                                                                                                    ]
+                                                                                                                  }
+                                                                                                                ]
+                                                                                                              }
+                                                                                                            ]
+                                                                                                          }
+                                                                                                        ]
+                                                                                                      }
+                                                                                                    ]
+                                                                                                  }
+                                                                                                ]
+                                                                                              }
+                                                                                            ]
+                                                                                          }
+                                                                                        ]
+                                                                                      }
+                                                                                    ]
+                                                                                  }
+                                                                                ]
+                                                                              }
+                                                                            ]
+                                                                          }
+                                                                        ]
+                                                                      }
+                                                                    ]
+                                                                  }
+                                                                ]
+                                                              }
+                                                            ]
+                                                          }
+                                                        ]
+                                                      }
+                                                    ]
+                                                  }
+                                                ]
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "spec": "\u00a79",
+      "note": "The initial (arr) is one level and each of 31 iterations wraps it, so the result nests exactly 32 deep -- the floor itself. The floor is usable to its stated value, not merely present."
+    },
+    {
+      "name": "size-range-longer-than-the-floor",
+      "expr": "(range 2000)",
+      "budget": {
+        "range": 1
+      },
+      "error": "SIZE",
+      "spec": "\u00a79, \u00a77.8",
+      "note": "MAX_RANGE reports SIZE. Clamped to the 1 000 floor, so 2 000 is over it on every conforming host."
+    },
+    {
+      "name": "size-range-at-the-floor-exactly",
+      "expr": "(len (range 1000))",
+      "budget": {
+        "range": 1
+      },
+      "expect": {
+        "int": 1000
+      },
+      "spec": "\u00a79",
+      "note": "The boundary is inclusive: longer than MAX_RANGE is SIZE, so exactly MAX_RANGE is a value."
+    },
+    {
+      "name": "size-value-bytes-over-the-floor",
+      "expr": "(concat (range 1000) (range 1000))",
+      "budget": {
+        "value_bytes": 1
+      },
+      "error": "SIZE",
+      "spec": "\u00a79",
+      "note": "Each range encodes to ~2 723 canonical CBOR bytes, under the 4 096 floor; concatenated they are ~5 443, over it. Chosen so fuel stays far under its floor in both accountings, or the vector would not say which budget it is about."
+    },
+    {
+      "name": "parse-source-longer-than-the-expr-bytes-floor",
+      "expr": "(str \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\")",
+      "budget": {
+        "expr_bytes": 1
+      },
+      "error": "PARSE",
+      "spec": "\u00a79",
+      "note": "Over the 1 024-byte floor. A budget exceeded at parse time reports PARSE, not SIZE: the expression never runs against any signal, so the failure is a configuration rejection (\u00a78)."
+    },
+    {
+      "name": "parse-source-nested-past-the-depth-floor",
+      "expr": "(+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 (+ 1 1)))))))))))))))))))))))))))))))))",
+      "budget": {
+        "depth": 1
+      },
+      "error": "PARSE",
+      "spec": "\u00a79",
+      "note": "The other reporting site for the same budget: 34 levels of source nesting against the floor of 32 is PARSE, where the constructed-value vector above is DEPTH. One budget, two codes, both pinned here."
+    }
+  ]
+}

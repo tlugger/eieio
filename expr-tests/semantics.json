@@ -1,0 +1,248 @@
+{
+  "vectors": [
+    {
+      "name": "truthy-false",
+      "expr": "(if false \"t\" \"f\")",
+      "expect": {
+        "str": "f"
+      },
+      "note": null,
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-null",
+      "expr": "(if null \"t\" \"f\")",
+      "expect": {
+        "str": "f"
+      },
+      "note": null,
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-true",
+      "expr": "(if true \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": null,
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-0",
+      "expr": "(if 0 \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "Only false and null are falsy: zero, the empty string, and empty containers are all truthy.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-0-0",
+      "expr": "(if 0.0 \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "Only false and null are falsy: zero, the empty string, and empty containers are all truthy.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-empty-string",
+      "expr": "(if \"\" \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "Only false and null are falsy: zero, the empty string, and empty containers are all truthy.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-arr",
+      "expr": "(if (arr) \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "Only false and null are falsy: zero, the empty string, and empty containers are all truthy.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-dict",
+      "expr": "(if (dict) \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "Only false and null are falsy: zero, the empty string, and empty containers are all truthy.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy--1",
+      "expr": "(if -1 \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "Only false and null are falsy: zero, the empty string, and empty containers are all truthy.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-function-is-truthy",
+      "expr": "(if abs \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "note": "A function is neither false nor null, so it is truthy. \u00a75.4's restrictions are about values, not truthiness.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "truthy-not-of-a-function-is-false",
+      "expr": "(not abs)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a74.1, \u00a77.8"
+    },
+    {
+      "name": "truthy-filter-uses-the-same-rule",
+      "expr": "(filter (fn (x) x) (arr 1 false 0 null \"\"))",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "int": 0
+          },
+          {
+            "str": ""
+          }
+        ]
+      },
+      "note": "filter reads truthiness identically to if: 0 and \"\" survive, false and null do not.",
+      "spec": "\u00a74.1"
+    },
+    {
+      "name": "equal-int-and-float-by-value",
+      "expr": "(= 1 1.0)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-exact-above-2-53",
+      "expr": "(= 9007199254740993 9007199254740992.0)",
+      "expect": {
+        "bool": false
+      },
+      "note": "The spec's own case. Converting the int to a float makes these indistinguishable, so an implementation that compares by conversion agrees below 2^53 and then diverges silently -- exactly what \u00a711 exists to catch.",
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-exact-above-2-53-negated",
+      "expr": "(!= 9007199254740993 9007199254740992.0)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-deep-arrays",
+      "expr": "(= (arr 1 (arr \"a\" 2.5)) (arr 1 (arr \"a\" 2.5)))",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-deep-maps-regardless-of-construction-order",
+      "expr": "(= (dict \"a\" 1 \"b\" 2) (dict \"b\" 2 \"a\" 1))",
+      "expect": {
+        "bool": true
+      },
+      "note": "Maps are ordered by key, so construction order cannot make two equal maps unequal.",
+      "spec": "\u00a74.2, \u00a72"
+    },
+    {
+      "name": "equal-arrays-are-order-sensitive",
+      "expr": "(= (arr 1 2) (arr 2 1))",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-bytes-bytewise",
+      "expr": "(= $a $b)",
+      "signal": {
+        "a": {
+          "bytes": "00ff"
+        },
+        "b": {
+          "bytes": "00ff"
+        }
+      },
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-bytes-differ",
+      "expr": "(= $a $b)",
+      "signal": {
+        "a": {
+          "bytes": "00ff"
+        },
+        "b": {
+          "bytes": "00fe"
+        }
+      },
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-across-types-is-false-not-an-error",
+      "expr": "(= 1 \"1\")",
+      "expect": {
+        "bool": false
+      },
+      "note": "Different types are unequal; only a function operand is an error.",
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-null-to-itself",
+      "expr": "(= null null)",
+      "expect": {
+        "bool": true
+      },
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-function-left-is-type-error",
+      "expr": "(= abs abs)",
+      "error": "TYPE",
+      "note": "A function has no identity to compare. Answering false would let a mistyped comparison evaluate quietly forever.",
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-function-right-is-type-error",
+      "expr": "(= 1 (fn (x) x))",
+      "error": "TYPE",
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "not-equal-function-is-type-error",
+      "expr": "(!= abs 1)",
+      "error": "TYPE",
+      "spec": "\u00a74.2"
+    },
+    {
+      "name": "equal-negative-zero-equals-zero",
+      "expr": "(= 0.0 -0.0)",
+      "expect": {
+        "bool": true
+      },
+      "note": "IEEE 754 numeric equality: -0.0 = 0.0, even though \u00a77.6 renders them differently and ABI \u00a76.3.1 preserves the sign.",
+      "spec": "\u00a74.2"
+    }
+  ]
+}

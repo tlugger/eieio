@@ -1,0 +1,275 @@
+{
+  "vectors": [
+    {
+      "name": "if-takes-the-then-branch",
+      "expr": "(if true \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "spec": "\u00a75.1"
+    },
+    {
+      "name": "if-takes-the-else-branch",
+      "expr": "(if false \"t\" \"f\")",
+      "expect": {
+        "str": "f"
+      },
+      "spec": "\u00a75.1"
+    },
+    {
+      "name": "if-evaluates-exactly-one-branch",
+      "expr": "(if true 1 (/ 1 0))",
+      "expect": {
+        "int": 1
+      },
+      "note": "The untaken branch is not evaluated: a division by zero there is never reached.",
+      "spec": "\u00a75.1"
+    },
+    {
+      "name": "if-evaluates-exactly-one-branch-else",
+      "expr": "(if false (/ 1 0) 1)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a75.1"
+    },
+    {
+      "name": "if-condition-uses-truthiness",
+      "expr": "(if 0 \"t\" \"f\")",
+      "expect": {
+        "str": "t"
+      },
+      "spec": "\u00a75.1, \u00a74.1"
+    },
+    {
+      "name": "if-else-is-mandatory",
+      "expr": "(if true 1)",
+      "error": "ARITY",
+      "spec": "\u00a75.1"
+    },
+    {
+      "name": "let-binds-and-uses",
+      "expr": "(let ((x 2)) (* x 3))",
+      "expect": {
+        "int": 6
+      },
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-is-sequential",
+      "expr": "(let ((a 1) (b (+ a 1))) b)",
+      "expect": {
+        "int": 2
+      },
+      "note": "let* semantics: each binding sees the earlier ones.",
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-rebinding-in-one-list-is-permitted",
+      "expr": "(let ((a 1) (a (+ a 1))) a)",
+      "expect": {
+        "int": 2
+      },
+      "note": "Ordinary let*: the second binding's expression sees the first's value.",
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-inner-shadows-outer",
+      "expr": "(let ((a 1)) (let ((a 2)) a))",
+      "expect": {
+        "int": 2
+      },
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-binding-is-not-recursive",
+      "expr": "(let ((a a)) a)",
+      "error": "ANY",
+      "note": "A binding's expression cannot reference its own name. Rejected; the code is diagnostic (\u00a710).",
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-shadowing-a-builtin-is-permitted",
+      "expr": "(let ((abs 3)) abs)",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-shadowing-true-is-a-parse-error",
+      "expr": "(let ((true 1)) true)",
+      "error": "PARSE",
+      "note": "true/false/null are literals in the grammar (\u00a73.1), not symbols, so this fails at parse -- a different code from shadowing a special form, which \u00a710 rejects.",
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "let-with-no-bindings",
+      "expr": "(let () 7)",
+      "expect": {
+        "int": 7
+      },
+      "spec": "\u00a75.2"
+    },
+    {
+      "name": "and-zero-arguments-is-true",
+      "expr": "(and)",
+      "expect": {
+        "bool": true
+      },
+      "note": "The identity of conjunction.",
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "or-zero-arguments-is-false",
+      "expr": "(or)",
+      "expect": {
+        "bool": false
+      },
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "and-returns-the-first-falsy-value",
+      "expr": "(and 1 null 2)",
+      "expect": {
+        "null": null
+      },
+      "note": "Not a bool: and returns the offending *value*, which is what makes (and $a $b) usable as a value expression.",
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "and-returns-the-last-value-when-all-truthy",
+      "expr": "(and 1 2 \"x\")",
+      "expect": {
+        "str": "x"
+      },
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "and-short-circuits",
+      "expr": "(and false (/ 1 0))",
+      "expect": {
+        "bool": false
+      },
+      "note": "The division is never evaluated.",
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "or-returns-the-first-truthy-value",
+      "expr": "(or false null 3 (/ 1 0))",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "or-returns-the-last-value-when-all-falsy",
+      "expr": "(or false null)",
+      "expect": {
+        "null": null
+      },
+      "spec": "\u00a75.3"
+    },
+    {
+      "name": "fn-applied-directly",
+      "expr": "((fn (x) (* x x)) 4)",
+      "expect": {
+        "int": 16
+      },
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "fn-closes-over-its-environment",
+      "expr": "(let ((k 10)) ((fn (x) (+ x k)) 5))",
+      "expect": {
+        "int": 15
+      },
+      "note": "Lexical closure over the enclosing environment.",
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "fn-arity-mismatch-too-few",
+      "expr": "((fn (x y) x) 1)",
+      "error": "ARITY",
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "fn-arity-mismatch-too-many",
+      "expr": "((fn (x) x) 1 2)",
+      "error": "ARITY",
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "fn-parameters-bind-simultaneously",
+      "expr": "(let ((a 1)) ((fn (a b) (+ a b)) 2 a))",
+      "expect": {
+        "int": 3
+      },
+      "note": "The argument `a` is the outer binding, not the parameter being bound: parameters bind simultaneously, unlike let.",
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "fn-passed-to-a-builtin",
+      "expr": "(map (fn (x) (+ x 1)) (arr 1 2 3))",
+      "expect": {
+        "arr": [
+          {
+            "int": 2
+          },
+          {
+            "int": 3
+          },
+          {
+            "int": 4
+          }
+        ]
+      },
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "builtin-name-is-a-function-value",
+      "expr": "(map abs (arr -1 -2))",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "int": 2
+          }
+        ]
+      },
+      "note": "A symbol resolving to the builtin table yields a function, which is what makes this legal. There is no second kind of callable.",
+      "spec": "\u00a75.4, \u00a74"
+    },
+    {
+      "name": "function-bound-by-let-then-applied",
+      "expr": "(let ((f (fn (x) (* 2 x)))) (f 21))",
+      "expect": {
+        "int": 42
+      },
+      "note": "Functions flow as operands -- bound by let, passed to a builtin, applied directly -- but never into a value.",
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "function-cannot-enter-a-collection",
+      "expr": "(arr (fn (x) x))",
+      "error": "TYPE",
+      "note": "Functions are not CBOR values, so they cannot be stored in a collection.",
+      "spec": "\u00a75.4, \u00a72"
+    },
+    {
+      "name": "recursion-is-unconstructible",
+      "expr": "(let ((f (fn (x) (f x)))) (f 1))",
+      "error": "ANY",
+      "note": "A function cannot name itself: no define, no letrec, no self-reference. This is what makes termination structural rather than fuel-dependent.",
+      "spec": "\u00a75.4"
+    },
+    {
+      "name": "applying-a-non-function",
+      "expr": "(1 2)",
+      "error": "TYPE",
+      "spec": "\u00a74"
+    }
+  ]
+}

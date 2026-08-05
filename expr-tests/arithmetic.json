@@ -1,0 +1,424 @@
+{
+  "vectors": [
+    {
+      "name": "add-identity-at-zero-arguments",
+      "expr": "(+)",
+      "expect": {
+        "int": 0
+      },
+      "note": "A variadic total at zero arguments answers the operation's identity.",
+      "spec": "\u00a77"
+    },
+    {
+      "name": "mul-identity-at-zero-arguments",
+      "expr": "(*)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77"
+    },
+    {
+      "name": "add-ints",
+      "expr": "(+ 1 2 3)",
+      "expect": {
+        "int": 6
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "add-single-argument",
+      "expr": "(+ 5)",
+      "expect": {
+        "int": 5
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "add-promotes-at-the-first-float-and-stays-float",
+      "expr": "(+ 1 2.5 3)",
+      "expect": {
+        "float": 6.5
+      },
+      "note": "\u00a77 fold order: left to right, promoting at the first float operand and staying float.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "add-float-only",
+      "expr": "(+ 0.5 0.25)",
+      "expect": {
+        "float": 0.75
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "sub-variadic-folds-left",
+      "expr": "(- 10 3 2)",
+      "expect": {
+        "int": 5
+      },
+      "note": "Left fold: (10-3)-2, not 10-(3-2).",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "sub-single-argument-negates",
+      "expr": "(- 5)",
+      "expect": {
+        "int": -5
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "sub-negates-a-float",
+      "expr": "(- 2.5)",
+      "expect": {
+        "float": -2.5
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "sub-requires-an-argument",
+      "expr": "(-)",
+      "error": "ARITY",
+      "note": "- has no identity, so unlike + it is not total at zero arguments.",
+      "spec": "\u00a77"
+    },
+    {
+      "name": "mul-ints",
+      "expr": "(* 6 7)",
+      "expect": {
+        "int": 42
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "mul-mixed-promotes",
+      "expr": "(* 2 1.5)",
+      "expect": {
+        "float": 3.0
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "add-int-overflow-is-an-error",
+      "expr": "(+ 9223372036854775807 1)",
+      "error": "DOMAIN",
+      "note": "Ints are i64 and overflow errors rather than wrapping: a wrapped threshold is a control decision made on a wrong number.",
+      "spec": "\u00a77.1, \u00a72"
+    },
+    {
+      "name": "sub-int-overflow-is-an-error",
+      "expr": "(- -9223372036854775808 1)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "mul-int-overflow-is-an-error",
+      "expr": "(* 4294967296 4294967296)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "div-is-always-float",
+      "expr": "(/ 4 2)",
+      "expect": {
+        "float": 2.0
+      },
+      "note": "Float division always, even for two ints that divide exactly -- so the result type does not depend on the values.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "div-float-result",
+      "expr": "(/ 1 8)",
+      "expect": {
+        "float": 0.125
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "div-by-zero-is-an-error",
+      "expr": "(/ 1 0)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "div-by-float-zero-is-an-error",
+      "expr": "(/ 1 0.0)",
+      "error": "DOMAIN",
+      "note": "Numerically zero, so the error does not depend on how the zero was spelled -- and no infinity can escape into a value (\u00a72).",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "div-by-negative-float-zero-is-an-error",
+      "expr": "(/ 1 -0.0)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "div-requires-two-arguments",
+      "expr": "(/ 1)",
+      "error": "ARITY",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "intdiv-floors-toward-negative-infinity",
+      "expr": "(div -7 2)",
+      "expect": {
+        "int": -4
+      },
+      "note": "Floor, not truncation: -7/2 truncates to -3 and floors to -4.",
+      "spec": "\u00a77.1, \u00a77.8"
+    },
+    {
+      "name": "intdiv-positive",
+      "expr": "(div 7 2)",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "intdiv-two-negatives-is-not-euclidean",
+      "expr": "(div -7 -2)",
+      "expect": {
+        "int": 3
+      },
+      "note": "Floor gives 3 where Euclidean division gives 4.",
+      "spec": "\u00a77.1, \u00a77.8"
+    },
+    {
+      "name": "intdiv-rejects-floats",
+      "expr": "(div 7.0 2)",
+      "error": "TYPE",
+      "note": "Ints only.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "intdiv-by-zero",
+      "expr": "(div 1 0)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "mod-takes-the-sign-of-the-divisor",
+      "expr": "(mod -7 2)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.1, \u00a77.8"
+    },
+    {
+      "name": "mod-negative-divisor",
+      "expr": "(mod 7 -2)",
+      "expect": {
+        "int": -1
+      },
+      "note": "Because div floors, (mod a b) takes the sign of b.",
+      "spec": "\u00a77.1, \u00a77.8"
+    },
+    {
+      "name": "mod-positive",
+      "expr": "(mod 7 2)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "mod-by-zero",
+      "expr": "(mod 1 0)",
+      "error": "DOMAIN",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "min-returns-the-leftmost-of-equals-unchanged",
+      "expr": "(min 1 1.0)",
+      "expect": {
+        "int": 1
+      },
+      "note": "No promotion: the leftmost of two numerically equal arguments comes back, so the result does not depend on how equal values were spelled.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "min-returns-the-leftmost-of-equals-float-first",
+      "expr": "(min 1.0 1)",
+      "expect": {
+        "float": 1.0
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "min-of-several",
+      "expr": "(min 3 1 2)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "max-of-several",
+      "expr": "(max 3 1 2)",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "max-mixed-types-returns-the-argument",
+      "expr": "(max 1 2.5)",
+      "expect": {
+        "float": 2.5
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "min-requires-an-argument",
+      "expr": "(min)",
+      "error": "ARITY",
+      "spec": "\u00a77"
+    },
+    {
+      "name": "max-requires-an-argument",
+      "expr": "(max)",
+      "error": "ARITY",
+      "spec": "\u00a77"
+    },
+    {
+      "name": "abs-int",
+      "expr": "(abs -5)",
+      "expect": {
+        "int": 5
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "abs-float",
+      "expr": "(abs -5.5)",
+      "expect": {
+        "float": 5.5
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "abs-of-i64-min-overflows",
+      "expr": "(abs -9223372036854775808)",
+      "error": "DOMAIN",
+      "note": "Its magnitude is not representable as an i64.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "floor-of-a-float",
+      "expr": "(floor 1.9)",
+      "expect": {
+        "int": 1
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "floor-negative",
+      "expr": "(floor -1.1)",
+      "expect": {
+        "int": -2
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "floor-accepts-an-int-unchanged",
+      "expr": "(floor 3)",
+      "expect": {
+        "int": 3
+      },
+      "note": "An int is already the answer; refusing it would make (floor $count) depend on whether the attribute arrived as an int or a float.",
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "ceil-of-a-float",
+      "expr": "(ceil 1.1)",
+      "expect": {
+        "int": 2
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "ceil-negative",
+      "expr": "(ceil -1.9)",
+      "expect": {
+        "int": -1
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "ceil-accepts-an-int-unchanged",
+      "expr": "(ceil 3)",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "round-half-away-from-zero",
+      "expr": "(round 0.5)",
+      "expect": {
+        "int": 1
+      },
+      "note": "Half away from zero, not banker's rounding: (round 2.5) is 3, not 2.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "round-half-away-from-zero-at-two-and-a-half",
+      "expr": "(round 2.5)",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "round-half-away-from-zero-negative",
+      "expr": "(round -0.5)",
+      "expect": {
+        "int": -1
+      },
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "round-accepts-an-int-unchanged",
+      "expr": "(round 3)",
+      "expect": {
+        "int": 3
+      },
+      "spec": "\u00a77.8"
+    },
+    {
+      "name": "round-beyond-i64-is-an-error",
+      "expr": "(round 1e19)",
+      "error": "DOMAIN",
+      "note": "ERR if the result exceeds i64.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "arithmetic-rejects-a-string",
+      "expr": "(+ 1 \"two\")",
+      "error": "TYPE",
+      "note": "No implicit coercion except int->float promotion.",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "arithmetic-rejects-a-bool",
+      "expr": "(+ 1 true)",
+      "error": "TYPE",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "arithmetic-rejects-null",
+      "expr": "(+ 1 null)",
+      "error": "TYPE",
+      "spec": "\u00a77.1"
+    },
+    {
+      "name": "arithmetic-rejects-a-function",
+      "expr": "(+ 1 abs)",
+      "error": "TYPE",
+      "note": "Every builtin but the type predicates and not refuses a function operand.",
+      "spec": "\u00a77.8"
+    }
+  ]
+}

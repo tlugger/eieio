@@ -15,6 +15,10 @@ eio-signal.workspace = true
 # live in magnitudes nobody writes by hand.
 [dev-dependencies]
 proptest.workspace = true
+# Tests only. The expr-tests/ corpus is JSON data files (EXPR §11) and the runner in
+# tests/vectors.rs is what executes them; the interpreter itself reads no JSON.
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
