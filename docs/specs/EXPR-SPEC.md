@@ -306,6 +306,23 @@ Exceeding a budget is a per-evaluation error, never a trap and never instance de
 
 Determinism restated as testable properties: no host function reachable, no clock, no RNG, map iteration sorted, float ops are IEEE 754 binary64 with no NaN/inf escape, canonical rendering pinned. The conformance vectors (§11) encode all of these.
 
+### 9.1 Step accounting
+
+`MAX_FUEL` is not an exact cost model and MUST NOT be read as one. A host's step count is its own, bounded from both sides:
+
+- **At least one step per node visited.** This is what makes fuel a termination backstop rather than a suggestion: evaluating any node costs something, so no loop inside a builtin and no chain of applications can run without the counter moving.
+- **At most one step per node visited, one per function or builtin application, and one per element, map entry, or byte a builtin reads or produces.** This is what makes a floor a promise: an expression whose work fits within 10 000 of those units evaluates on every conforming host, whatever else that host might like to charge for.
+
+Two consequences, both deliberate. A host MAY be cheaper than the ceiling — an O(*n* log *n*) `sort` charging *n* is conformant, because *n* is itself bounded by `MAX_VALUE_BYTES` and the work therefore stays finite. And **the step at which `FUEL` fires is not conformance-pinned.** Budgets are host configuration already: a leaf host near the floors and a daemon at the defaults disagree about that step by design, so pinning it would pin a number this section deliberately leaves free. What the vectors of §11 pin is the floor guarantee and the error *code*, not the step at which the code arrives.
+
+Bytes rather than Unicode scalars for text, though every string operation in §7.4 is scalar-indexed. The two measure different things: §7.4 fixes what an expression *means*, and this fixes what it *costs*, where the UTF-8 length is both the honest measure of the work and the one a host does not have to walk the string to learn.
+
+### 9.2 Configuring a budget
+
+Every value in the table is host configuration. A host MAY set any of them above its floor, and a host that asks for one **below** its floor gets the floor — the value is clamped up rather than refused. A floor is a promise the language makes to expressions rather than advice a host may decline, and a deployment quietly running under a sub-floor budget would fail expressions in ways no vector could reproduce.
+
+`MAX_DEPTH` is one budget enforced in three places — source nesting at parse time, combined nesting and call depth during evaluation, and the nesting of a constructed value — so a host configures it once and hands the same number to each.
+
 ---
 
 ## 10. Static analysis (normative minimum)

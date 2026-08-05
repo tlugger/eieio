@@ -128,12 +128,20 @@ impl<'a> Evaluator<'a> {
         }
     }
 
-    /// Charges `steps` against `MAX_FUEL` (EXPR §9).
+    /// Charges `steps` against `MAX_FUEL` (EXPR §9.1).
     ///
-    /// One step is one node visited or one element a builtin touches, which is EXPR
-    /// §9's own approximation. Sharpening it into an exact, normative accounting is
-    /// eieio-s85.5's; what matters here is that every loop in the crate passes through
-    /// this function, so no amount of sharpening can find an unmetered one.
+    /// EXPR §9.1 bounds the accounting from both sides rather than fixing it: at least
+    /// one step per node visited, and at most one per node visited, one per application,
+    /// and one per element, entry or byte a builtin reads or produces. This crate sits
+    /// at the ceiling — which is the expensive side, and therefore the safe side of the
+    /// floor guarantee.
+    ///
+    /// The lower bound is what makes fuel a termination backstop, and it holds because
+    /// [`Self::eval_operand`] charges before doing anything else. The upper bound is
+    /// what makes a floor a promise, and it holds because every loop in the crate
+    /// charges per element through [`Self::spend_each`] — a builtin that charged per
+    /// *byte of a rendered result* is still within it, since producing those bytes is
+    /// work §9.1 counts.
     pub(crate) fn spend(&mut self, span: Span, steps: u32) -> Result<(), Error> {
         // Saturating: a builtin charging for a huge collection must not wrap its way
         // back under the budget.
@@ -197,10 +205,7 @@ impl<'a> Evaluator<'a> {
         env: &Env<'a>,
     ) -> Result<Operand<'a>, Error> {
         self.spend(expr.span, 1)?;
-        self.enter(expr.span)?;
-        let result = self.eval_node(expr, env);
-        self.leave();
-        result
+        self.eval_node(expr, env)
     }
 
     /// Takes a level of depth, or reports `MAX_DEPTH`.
@@ -230,7 +235,18 @@ impl<'a> Evaluator<'a> {
             ExprKind::Symbol(name) => self.resolve(name, expr.span, env),
             ExprKind::Signal => self.signal_map(expr.span),
             ExprKind::Attr(name) => self.attribute(name, expr.span),
-            ExprKind::List(items) => self.eval_list(expr, items, env),
+            ExprKind::List(items) => {
+                // A list is a level of nesting, and it is the only thing that is. That
+                // matches what the parser counts (EXPR §9), which is what makes
+                // `MAX_DEPTH` mean the same thing at parse time and at evaluation: an
+                // expression nested exactly to the budget parses *and* evaluates.
+                // Charging leaf nodes as well would have quietly halved the nesting a
+                // floor promises.
+                self.enter(expr.span)?;
+                let result = self.eval_list(expr, items, env);
+                self.leave();
+                result
+            }
         }
     }
 
@@ -330,18 +346,6 @@ impl<'a> Evaluator<'a> {
         args: &[Operand<'a>],
         call: &Call<'a>,
     ) -> Result<Operand<'a>, Error> {
-        self.enter(call.span())?;
-        let result = self.dispatch(function, args, call);
-        self.leave();
-        result
-    }
-
-    fn dispatch(
-        &mut self,
-        function: &Function<'a>,
-        args: &[Operand<'a>],
-        call: &Call<'a>,
-    ) -> Result<Operand<'a>, Error> {
         match function {
             Function::Builtin(builtin) => {
                 if let Err(message) = builtin.arity.check(args.len()) {
@@ -364,7 +368,18 @@ impl<'a> Evaluator<'a> {
                 for (name, arg) in closure.params.iter().zip(args) {
                     scope = env::bind(scope, name, arg.clone());
                 }
-                self.eval_operand(closure.body, &scope)
+                // The call-depth half of `MAX_DEPTH`. Only a closure takes a level:
+                // a builtin does not evaluate a body, and the one that reaches back
+                // into `apply` — `map` and its four siblings — charges through the
+                // closure it applies.
+                //
+                // This is not redundant with the parser's bound, because call depth is
+                // not source nesting: `(let ((f0 (fn (x) x)) (f1 (fn (x) (f0 x))) …))`
+                // nests six levels deep however long the chain of closures is.
+                self.enter(call.span())?;
+                let result = self.eval_operand(closure.body, &scope);
+                self.leave();
+                result
             }
         }
     }

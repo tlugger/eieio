@@ -22,15 +22,15 @@ pub const MIN_VALUE_BYTES: u32 = 4_096;
 
 /// The budgets that apply while evaluating (EXPR §9).
 ///
-/// The counterpart to [`ParseLimits`](crate::ParseLimits), and clamped the same way: a
-/// field below its floor is raised, because EXPR §9 defines a floor as what "a
-/// conforming expression may rely on" — a promise the language makes to expressions
-/// rather than advice a host may decline.
+/// The counterpart to [`ParseLimits`](crate::ParseLimits), and clamped the same way,
+/// which EXPR §9.2 requires: a field below its floor is raised rather than refused,
+/// because a floor is a promise the language makes to expressions rather than advice a
+/// host may decline.
 ///
-/// [`max_depth`](Self::max_depth) appears here *and* in `ParseLimits` because EXPR §9
-/// makes it one budget over "nesting + call depth": parsing can only see the nesting,
-/// so the same configured value has to be handed to both. A host sets them from one
-/// number.
+/// [`max_depth`](Self::max_depth) appears here *and* in `ParseLimits` because EXPR §9.2
+/// makes it one budget enforced in three places — source nesting at parse, combined
+/// nesting and call depth during evaluation, and the nesting of a constructed value. A
+/// host configures it once and hands the same number to each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvalLimits {
     /// Evaluation steps, one per node visited and one per element a builtin touches.
