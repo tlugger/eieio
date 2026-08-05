@@ -302,6 +302,8 @@ Host-enforced budgets, checked during evaluation. Values are host configuration;
 
 Exceeding a budget is a per-evaluation error, never a trap and never instance death — an expression cannot kill a block. `MAX_FUEL` reports `FUEL`, `MAX_DEPTH` reports `DEPTH`, and `MAX_RANGE` and `MAX_VALUE_BYTES` report `SIZE`. Leaf hosts SHOULD sit near the floors.
 
+Two of these budgets are checked while *reading* the text rather than while evaluating it — `MAX_EXPR_BYTES`, and the source-nesting half of `MAX_DEPTH` — and those report `PARSE` per §3.1.1, not the budget's own code. So `MAX_DEPTH` has two reporting sites: `PARSE` for source nesting, and `DEPTH` for call depth and for the nesting of a constructed value. The vectors of §11 pin both.
+
 `MAX_DEPTH` bounds the nesting of a value an expression **builds**, not only the nesting of its source and its call stack. Without that, `(reduce (fn (acc x) (arr acc)) (arr) (range 65536))` is a fully budgeted expression whose result nests as deep as the range is long, and every walk over that value — *including dropping it* — then recurses that deep in the host. A stack overflow there kills the host, which ABI §8's "traps are death, status codes are life" does nothing to contain, and the 16 KiB-of-stack tier is the one that dies first. With the bound, every walk over a value in the system is provably shallow: a value arriving from a signal is bounded by the decode limit (ABI §6.3.1 rule 9, itself at least this `MAX_DEPTH`), and a value built by an expression is bounded here.
 
 Determinism restated as testable properties: no host function reachable, no clock, no RNG, map iteration sorted, float ops are IEEE 754 binary64 with no NaN/inf escape, canonical rendering pinned. The conformance vectors (§11) encode all of these.
@@ -350,7 +352,13 @@ Hosts MAY additionally constant-fold sub-expressions, arity-check builtin applic
 
 ## 11. Conformance
 
-The monorepo carries `expr-tests/`: a host-agnostic vector suite (input expression, optional signal CBOR, expected value CBOR _or_ expected error code) covering every builtin, every special form, every error code, truthiness/equality tables, canonical-rendering pins, budget behavior at the floors, and signal-dependence classification. Both interpreter deployments (daemon, leaf) MUST pass identically. Divergence is a conformance bug by definition (same rule as ABI §13).
+The monorepo carries `expr-tests/`: a host-agnostic vector suite covering every builtin, every special form, every error code, truthiness/equality tables, canonical-rendering pins, budget behavior at the floors, and signal-dependence classification. Both interpreter deployments (daemon, leaf) MUST pass identically. Divergence is a conformance bug by definition (same rule as ABI §13).
+
+The vector file format is itself a contract, and **`expr-tests/README.md` is its normative description**: one JSON file per area of this specification, each vector an expression plus an optional signal, and either the value it must produce or the error code it must fail with. Values carry an explicit type tag, because `1` and `1.0` are different values (§4.2) and no untagged notation can say which one a vector means.
+
+Two rules of this document shape the format and are worth restating where an implementer will meet them. A vector asserting a **static** rejection (§10) does not pin an error code — hosts MUST agree on whether an expression is rejected, not on how they describe the fault — and a vector asserting `FUEL` pins the code and the floor guarantee, never the step at which the code arrives (§9.1).
+
+Coverage is not left to good intentions: the suite's runner enumerates the builtin table, the special forms, and this section's error codes, and fails if any of them has no vector. `RESULT_TYPE` is the sole exemption, being the host's property-type check (ABI §7.1) rather than an interpreter outcome.
 
 ---
 

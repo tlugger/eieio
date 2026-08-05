@@ -23,8 +23,10 @@ crates/
                    management API, state store, pub/sub bridge
   block-sdk/       Guest-side (SDK-SPEC); published as `eio-sdk`
   cargo-eio/       Block build/publish tooling (SDK-SPEC §5)
-  conformance/     Reference harness + golden blocks (ABI §13) + expr vectors (EXPR §11)
+  conformance/     Reference harness + golden blocks (ABI §13)
 ```
+
+The expression conformance vectors are **not** here: they are data files at the repository root in `expr-tests/` (EXPR §11), because a host written in another language must be able to consume them without building a Rust crate. `conformance/` holds the ABI harness, which is Rust by nature — it drives a WASM engine.
 
 ★-marked crates are shared with the leaf runtime and MUST stay `no_std`-compatible (`alloc` allowed). `daemon` and `cargo-eio` are `std` binaries; `block-sdk` is `no_std` by necessity (it compiles into guests).
 
