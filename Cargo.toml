@@ -4,7 +4,7 @@
 resolver = "3"
 # Crates are added by their own epics. This list grows; it is never a glob,
 # because a glob that matches nothing is a hard error in cargo.
-members = ["crates/signal"]
+members = ["crates/expr", "crates/signal"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,6 +27,10 @@ minicbor = { version = "2.3", default-features = false, features = ["alloc"] }
 # Dev-dependency only. The ★ crates stay no_std, but their *tests* build for the
 # host, so a std-using test dependency is fine and `check-nostd` never sees it.
 proptest = "1.11"
+
+# Workspace-internal crates are pinned by path; the version keeps `cargo publish`
+# honest when these eventually reach crates.io.
+eio-signal = { path = "crates/signal", version = "0.1.0" }
 
 # Lint levels are shared here; the -D warnings escalation belongs to the `just
 # lint` recipe, so a local `cargo build` stays usable while CI stays strict.

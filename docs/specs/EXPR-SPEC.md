@@ -55,20 +55,37 @@ float   := ["-"] digit+ "." digit+ [exponent]
          | ["-"] digit+ exponent
 exponent:= ("e"|"E") ["+"|"-"] digit+
 
-string  := '"' char* '"'          ; escapes: \" \\ \n \t \r \u{XXXX}
+string  := '"' char* '"'          ; escapes: \" \\ \n \t \r \u{HEX}
+hex     := 1*6 hexdigit           ; a Unicode scalar value, §3.1.1
 
 symbol  := symstart symchar*
 symstart:= letter | "+" | "-" | "*" | "/" | "=" | "<" | ">" | "!" | "?" | "_"
 symchar := symstart | digit | "." | "-"
+letter  := "a".."z" | "A".."Z"    ; ASCII only, §3.1.1
 
 sigil   := "$" [symbol]           ; signal access, §6
 
 comment := ";" .* end-of-line
 ```
 
-Whitespace (space, tab, newline) separates tokens and is otherwise insignificant. `true`, `false`, and `null` are reserved symbols evaluating to themselves.
+Whitespace (space, tab, newline, carriage return) separates tokens and is otherwise insignificant. `true`, `false`, and `null` are reserved symbols evaluating to themselves.
 
-A parser MUST reject: unterminated strings/lists, integer literals outside i64, more than `MAX_DEPTH` (§9) nesting.
+An expression source contains **exactly one** expression. Content after the first complete expression MUST be rejected: a property is one expression (ABI §11), so a second one could never be evaluated.
+
+A parser MUST reject: unterminated strings/lists, integer literals outside i64, float literals denoting a non-finite value, malformed escapes, a number immediately followed by symbol characters, more than `MAX_DEPTH` (§9) nesting, and source longer than `MAX_EXPR_BYTES` (§9).
+
+#### 3.1.1 Resolved details
+
+Points the grammar above leaves open, fixed here so two implementations cannot diverge:
+
+- **`letter` is ASCII alphabetic.** §7.4 already restricts case mapping to ASCII for `no_std` locale honesty, and Unicode identifier classification needs tables that do not fit the leaf-tier budget. A non-ASCII letter is therefore not a `symstart`.
+- **`-` begins a number iff the next character is a digit**; otherwise it is a symbol. `-` is both a `symstart` and the number sign, so the grammar alone is ambiguous. Hence `-5` is a number while `-` and `-foo` are symbols, which is what lets `(- 1 2)` and `(- -1)` mean what they look like.
+- **`\u{...}` takes one to six hex digits** (case-insensitive) and MUST name a Unicode scalar value. Surrogates (U+D800–U+DFFF) and anything above U+10FFFF MUST be rejected. The braces are what make the count variable; a fixed-width form would not need them.
+- **A float literal denoting a non-finite value MUST be rejected** — `1e400`, for instance. §2 forbids operations from *producing* NaN or an infinity and ABI §6.3.1 rule 5 rejects one arriving in a signal; rejecting the literal closes the last route in, so no non-finite float can exist anywhere in the system.
+- **A number MUST NOT run directly into symbol characters.** `1abc` is neither a number nor a symbol. Lexing it as `1` followed by `abc` would turn a typo into two valid tokens and surface the failure somewhere unrelated.
+- **`1.` and `.5` are not numbers.** A float needs digits on both sides of the point, which is what keeps `.` unambiguous as a `symchar`.
+- **Parse-time budget violations report `PARSE`**, not `SIZE` or `DEPTH`. §8 routes `PARSE` to configuration rejection and every other code to a per-signal `ERR_EXPR`. Source that is too long or nested too deeply is a property of the configuration, so it MUST reject the deployment rather than fail signals one at a time; `DEPTH` and `SIZE` are the evaluation-time codes.
+- **The innermost unterminated list is the one reported**, since the most recently opened `(` is where the missing `)` belongs. Diagnostic only — which list a host names is not normative (cf. ABI §6.3.1).
 
 ### 3.2 What is deliberately absent
 
