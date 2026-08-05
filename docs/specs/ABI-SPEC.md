@@ -346,6 +346,49 @@ Notes:
 
 Full JSON Schema for the manifest ships in the repo as `manifest.schema.json`; this section is the normative prose. The manifest is also the Designer's config-panel source and the agent-tooling surface (SCOPE §4) — descriptions are user-facing documentation and SHOULD be written as such.
 
+### 11.1 Validation rules
+
+A manifest that violates any rule below is invalid and MUST be rejected. "Reject" means refuse the whole document: a partially accepted manifest would leave port indices and `prop_id`s ambiguous, and those are load-bearing (§5.2).
+
+**Presence.** `name`, `version`, and `abi` are REQUIRED; within a property, `name` and `type` are REQUIRED. Every other field is OPTIONAL, and an absent one means exactly:
+
+|Field|Absent means|
+|---|---|
+|`description` (block and property)|no description|
+|`capabilities`, `inputs`, `outputs`, `properties`, `aot`|empty|
+|`targets`|`["wasm32-unknown-unknown"]`|
+|`required` (property)|`false`|
+|`default` (property)|no default; see the semantics below|
+
+**Strictness.** Unknown fields MUST be rejected, at the top level and within every nested object (`abi`, and `inputs`/`outputs`/`properties` entries). A typo'd `"capabilites"` that silently granted nothing is the failure this prevents. This costs no forward compatibility: additive schema growth is a minor bump (§12), and a manifest declaring a minor above the host's is rejected regardless.
+
+Duplicate JSON object keys MUST be rejected rather than resolved last-wins. A present field MUST hold a value of its declared type, and `null` is not a spelling of absence: `"default": null` MUST be rejected, and a property with no default omits the field. One way to say a thing.
+
+**Names.**
+
+|What|Pattern|Bound|
+|---|---|---|
+|`name` (block), `targets[]`, `aot[]`|`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`|≤64 bytes|
+|port names, property names|`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`|≤64 bytes|
+
+Port and property names exclude `.` deliberately: service files address connections as `from.port -> to.port` and carry property names as TOML bare keys (DAEMON §2), and a dot is ambiguous in both. The block `name` admits `.` because it is a registry reference component (SCOPE §3.6).
+
+These are stated as regexes so that one rule reaches every surface: `manifest.schema.json` publishes them as `pattern`, and the SDK, `cargo eio`, and the Designer validate against the same expression rather than each inventing an approximation.
+
+`version` MUST be a valid Semantic Versioning 2.0.0 string: `MAJOR.MINOR.PATCH`, each numeric component without leading zeros, with an optional `-<pre-release>` and `+<build>`.
+
+**Uniqueness.** Names MUST be unique within `inputs`, within `outputs`, and within `properties`. Those are three separate namespaces — port indices are per-direction (§5.2) — so a block MAY have an input and an output that share a name. `capabilities`, `targets`, and `aot` MUST NOT contain duplicates.
+
+**Closed sets.** `capabilities` entries MUST each be one of `state`, `timer`, `gpio`, `i2c`, `http`. `core` MUST NOT appear: `eio:core` is always available and requires no capability (§7.0). A property's `type` MUST be one of `bool`, `int`, `float`, `string`, `bytes`, `any`.
+
+**Targets.** `targets` MUST contain `wasm32-unknown-unknown`. Every block ships the portable module (§1); `aot` entries are additions published alongside it, never replacements for it.
+
+**Default expressions.** A `default`, when present, MUST parse and MUST pass static analysis (EXPR §10) — the same configure-time gate a service-supplied expression gets, so a manifest cannot ship a default naming a function that does not exist. A default MAY be signal-dependent; it is an expression like any other property value, not a constant.
+
+**`required` and `default`.** `default` is the value the property takes when the service does not supply one; it is what makes an instance configurable without the deployer touching every field. `required: true` means configuration MUST fail when the property has no value at configure time — from the service file or from `default`, either satisfies it. `required` is therefore the enforceable half of the pair and the two do not constrain each other in the manifest: any combination of `required` and `default` is a valid declaration, including both (a required property with a suggested starting value, as in the example above).
+
+**Size.** A manifest document larger than the host's configured maximum MUST be rejected before parsing. The bound is host configuration like every other budget (EXPR §9): hosts MUST accept documents of at least 8 KiB, and 64 KiB is the reference default. Manifests are read from registries and from module custom sections, so the bound is a trust-boundary limit, not a style guide.
+
 ---
 
 ## 12. ABI versioning
