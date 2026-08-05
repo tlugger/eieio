@@ -24,6 +24,10 @@ repository = "https://github.com/tlugger/eieio"
 [workspace.dependencies]
 minicbor = { version = "2.3", default-features = false, features = ["alloc"] }
 
+# Dev-dependency only. The ★ crates stay no_std, but their *tests* build for the
+# host, so a std-using test dependency is fine and `check-nostd` never sees it.
+proptest = "1.11"
+
 # Lint levels are shared here; the -D warnings escalation belongs to the `just
 # lint` recipe, so a local `cargo build` stays usable while CI stays strict.
 # Crates opt in with `[lints] workspace = true`.

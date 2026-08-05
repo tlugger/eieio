@@ -90,6 +90,73 @@ impl Value {
         if n < 0 { !(n as u64) } else { n as u64 }
     }
 
+    /// Encoded length of a definite-length array head holding `items` elements.
+    pub(crate) const fn array_head_len(items: usize) -> usize {
+        Self::canonical_arg_len(items as u64)
+    }
+
+    /// Encoded length of a definite-length map head holding `entries` pairs.
+    pub(crate) const fn map_head_len(entries: usize) -> usize {
+        Self::canonical_arg_len(entries as u64)
+    }
+
+    /// Encoded length of a length-prefixed item: its head plus `len` payload
+    /// bytes. Covers text and byte strings, whose encodings differ only in major
+    /// type — so the arithmetic has one definition rather than two.
+    pub(crate) const fn len_prefixed_len(len: usize) -> usize {
+        Self::canonical_arg_len(len as u64).saturating_add(len)
+    }
+
+    /// Encoded length of a text string: its head plus its UTF-8 bytes.
+    pub(crate) const fn text_len(s: &str) -> usize {
+        Self::len_prefixed_len(s.len())
+    }
+
+    /// The exact length in bytes of this value's canonical encoding.
+    ///
+    /// Computed structurally, without encoding anything. That is the whole point:
+    /// EXPR §9's `MAX_VALUE_BYTES` budget exists to stop an expression building
+    /// an oversized value, so measuring it by encoding it would cost the very
+    /// allocation the budget is there to prevent. The same reasoning applies to
+    /// checking a batch against `max_payload` before allocating an emit buffer
+    /// (ABI §9.7).
+    ///
+    /// Exactly equal to `self.to_cbor().len()`, which the property tests assert
+    /// over generated values rather than taking on trust.
+    ///
+    /// Sums saturate rather than wrap. `usize` is 32-bit on the leaf targets, and
+    /// a wrapping sum would report a *small* length for a huge value — silently
+    /// defeating the budget check that calls this.
+    ///
+    /// Recurses, so like encoding it assumes nesting within [`MAX_DEPTH`]. Values
+    /// obtained by decoding always satisfy that; a value built programmatically
+    /// is the caller's responsibility.
+    pub fn encoded_len(&self) -> usize {
+        match self {
+            Value::Null | Value::Bool(_) => 1,
+            Value::Int(n) => Self::canonical_arg_len(Self::int_arg(*n)),
+            // The one-byte binary64 head plus eight bytes of payload. Fixed for
+            // every float, because the canonical form never shortens one
+            // (ABI §6.3.1 rule 4).
+            Value::Float(_) => 9,
+            Value::Str(s) => Self::text_len(s),
+            Value::Bytes(b) => Self::len_prefixed_len(b.len()),
+            Value::Array(items) => items
+                .iter()
+                .fold(Self::array_head_len(items.len()), |total, item| {
+                    total.saturating_add(item.encoded_len())
+                }),
+            Value::Map(map) => {
+                map.iter()
+                    .fold(Self::map_head_len(map.len()), |total, (key, value)| {
+                        total
+                            .saturating_add(Self::text_len(key))
+                            .saturating_add(value.encoded_len())
+                    })
+            }
+        }
+    }
+
     /// Encodes this value to its canonical CBOR form (ABI §6.3.1).
     ///
     /// The counterpart to [`Batch::to_cbor`](crate::Batch::to_cbor), for the

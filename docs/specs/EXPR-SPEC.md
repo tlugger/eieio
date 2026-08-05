@@ -239,7 +239,7 @@ Host-enforced budgets, checked during evaluation. Values are host configuration;
 |`MAX_FUEL` (eval steps)|10 000|100 000|One step ≈ one node visit / one builtin element touch|
 |`MAX_DEPTH` (nesting + call depth)|32|128|Also enforced at parse|
 |`MAX_RANGE`|1 000|65 536|`range` result length|
-|`MAX_VALUE_BYTES`|4 096|262 144|Any constructed string/bytes/array/map, CBOR-encoded size|
+|`MAX_VALUE_BYTES`|4 096|262 144|Any constructed string/bytes/array/map, measured as the length of its **canonical** CBOR encoding (ABI §6.3.1 — exactly one encoding exists, so this length is unambiguous). Hosts SHOULD compute it structurally rather than by encoding, so that checking the budget does not cost the allocation the budget exists to prevent|
 |`MAX_EXPR_BYTES`|1 024|16 384|Source text length|
 
 Exceeding a budget is a per-evaluation error (`FUEL`/`DEPTH`/`SIZE`), never a trap and never instance death — an expression cannot kill a block. Leaf hosts SHOULD sit near the floors.

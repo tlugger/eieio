@@ -73,6 +73,19 @@ impl Batch {
         &self.signals
     }
 
+    /// The exact length in bytes of this batch's canonical encoding.
+    ///
+    /// Lets a caller check a batch against the instance descriptor's
+    /// `max_payload` (ABI §5.2, §9.7) before allocating the buffer to encode it
+    /// into. See [`Value::encoded_len`] for why this is computed rather than
+    /// measured.
+    pub fn encoded_len(&self) -> usize {
+        self.signals.iter().fold(
+            Value::array_head_len(self.signals.len()),
+            |total, signal| total.saturating_add(signal.encoded_len()),
+        )
+    }
+
     /// Encodes the batch to its canonical CBOR form (ABI §6.3.1).
     pub fn to_cbor(&self) -> Vec<u8> {
         let mut out = Vec::new();

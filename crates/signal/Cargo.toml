@@ -10,5 +10,8 @@ repository.workspace = true
 [dependencies]
 minicbor.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true

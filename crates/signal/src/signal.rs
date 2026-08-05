@@ -83,6 +83,20 @@ impl Signal {
         self.fields.is_empty()
     }
 
+    /// The exact length in bytes of this signal's canonical encoding.
+    ///
+    /// See [`Value::encoded_len`] for why this is computed rather than measured.
+    pub fn encoded_len(&self) -> usize {
+        self.fields.iter().fold(
+            Value::map_head_len(self.fields.len()),
+            |total, (key, value)| {
+                total
+                    .saturating_add(Value::text_len(key))
+                    .saturating_add(value.encoded_len())
+            },
+        )
+    }
+
     /// Iterates attributes in sorted key order.
     pub fn iter(&self) -> alloc::collections::btree_map::Iter<'_, String, Value> {
         self.fields.iter()
