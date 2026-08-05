@@ -1,96 +1,108 @@
 ---
 name: implement
-description: Pick up a ready beads issue and drive it to a pushed, closed, spec-conformant implementation through a gated plan → fan-out → verify → review workflow. Use when the user asks to implement, build, or pick up a beads issue (optionally passing an issue id, e.g. /implement eieio-s85.3).
+description: Continuously pick up ready beads issues and drive each one to a pushed, closed, spec-conformant implementation — research → scoping questions → plan → implement (directly or via parallel Sonnet subagents) → verify → review → commit → close → next issue. Stops only for genuine scoping questions, a hard failure, or an empty queue. Use when the user asks to implement, build, or pick up beads issues (optionally passing an issue id, e.g. /implement eieio-s85.3).
 ---
 
-# Implement a beads issue
+# Implement beads issues, continuously
 
-You are the **driving agent** for one beads issue, end to end: research → human scoping → written plan → human review gate → implementation (directly, or via parallel Sonnet subagents in worktrees) → integration & verification → code review → human commit gate → close.
+You are the **driving agent**. You run this cycle per issue and then **start over on the next ready issue**, without being asked:
 
-**Model check (step 0):** This skill assumes an Opus-class or better driving session (Opus, Fable, Mythos). If you are running on a smaller model, say so and ask the user whether to continue anyway — do not silently proceed.
+```
+select → research → ASK (the one gate) → plan → implement → verify → review → commit+push → close → ↻
+```
+
+**There is exactly one gate: step 2.** Everything after it runs unattended. Do not ask for plan approval, do not ask for commit approval, do not ask whether to continue to the next issue. The user opted into all of that by invoking this skill.
+
+**Authorization.** Invoking this skill grants standing authority to commit and push to `main` for the issues you work, overriding the conservative default in the CLAUDE.md Beads block. It does **not** authorize force-pushing, history rewriting, deleting or renaming remote branches, touching CI secrets, or committing files unrelated to the current issue. Those still stop and ask.
+
+**Model check:** this assumes an Opus-class or better driving session. On a smaller model, say so and ask whether to continue before starting.
 
 Non-negotiables from CLAUDE.md that this workflow must never erode:
 
-- **Spec-first.** Never implement past a spec. Spec amendments and PROPOSED ratifications are planned changes, made only by you (the driver), and land in the same commit as the code they govern.
-- **Subagents never touch `docs/`.** If a subagent hits a spec gap, it stops and reports; you amend the spec.
+- **Spec-first.** Never implement past a spec. Spec amendments and PROPOSED ratifications are yours alone (never a subagent's) and land in the same commit as the code they govern.
+- **Subagents never touch `docs/`.** A subagent that hits a spec gap stops and reports; you amend the spec.
 - ★ crates (`signal`, `expr`, `manifest`, `host-core`, `block-sdk`) stay `no_std` (+`alloc`).
 - Commits: emoji-prefixed, grouped by area, no trailers, direct to `main`.
 
-## Step 0 — Resolve and claim the issue
+## Step 0 — Select and claim (no gate)
 
-- If the user passed an issue id, use it. Otherwise run `bd ready`; if exactly one issue is ready, propose it; if several, ask the user which (AskUserQuestion).
-- `bd show <id>` — read the description, acceptance criteria, and the parent epic (`bd show <epic>`) for shared context. The acceptance criteria are the definition of done; treat them as a checklist you will walk in step 6.
+- If the user named an issue, use it. On later loop iterations, choose yourself — do not ask.
+- `bd ready`. Skip `[epic]` rows: epics are containers and close when their children do (unless an epic has no children). Among the rest pick, in order: lowest priority number (P0 first) → whatever unblocks the most downstream work (`bd show` BLOCKS) → the SCOPE §7.1 epic sequence.
+- Announce the pick in one line with the reason. If nothing is ready, **stop and report** — that is the end of the loop.
+- `bd show <id>` plus the parent epic for shared context. The acceptance criteria are the definition of done; you will walk them literally in step 5.
 - `bd update <id> --claim`.
 
 ## Step 1 — Research
 
-Build a complete picture before proposing anything:
+- Read the governing spec sections the issue cites (and `docs/SCOPE.md` where referenced). Note every **PROPOSED** marker this work would ratify, and every point where a spec is silent, ambiguous, or wrong for what you are about to build.
+- Explore the code: what exists, what this touches, blast radius (callers, shared crates, conformance suites, justfile recipes, CI).
+- `bd list` for adjacent open issues, so you don't implement work planned elsewhere.
+- Probe mechanisms empirically now, before they reach the plan. A one-command experiment that kills a bad approach is worth more than a paragraph of reasoning about it.
 
-- Read the governing spec sections cited by the issue (and `docs/SCOPE.md` where referenced). Note every **PROPOSED** marker the work would ratify and every point where the spec is silent or ambiguous for what you're building.
-- Explore the existing code: what exists, what this change touches, blast radius (callers, shared crates, conformance suites, justfile recipes, CI).
-- Check `bd list` for adjacent open issues so you don't implement work planned elsewhere.
+## Step 2 — Scoping questions (THE GATE)
 
-## Step 2 — Human scoping (only genuine questions)
+Ask (AskUserQuestion) **only** what the user's decision genuinely shapes: spec gaps and ambiguities, real trade-offs, scope boundaries, naming that becomes public contract. Spec gaps come first — those are decisions, not implementation details.
 
-Ask the user (AskUserQuestion) **only** about things their decision can genuinely shape: spec ambiguities, real trade-offs, scope boundaries, naming that will become public contract. Prioritize spec gaps — those are decisions, not implementation details. If there is nothing worth asking, say so explicitly and move on. Never invent questions to appear thorough.
+Ground every option in what you actually found in step 1: name the file, the taken crate name, the failing command. Options the user can't distinguish are worthless.
 
-## Step 3 — Plan files
+**If there is nothing genuine to ask, say so in one line and proceed.** Never manufacture a question to create a checkpoint — a trivial issue should run start to finish untouched.
 
-Write the plan as files in the repo (they are review artifacts for the user and input for subagents). Naming convention — **`*.eio-plan.md` is gitignored**; verify the pattern is in `.gitignore` and add it if missing:
+This gate reopens mid-flight, and only for this: a decision of step-2 grade surfaces during implementation (a spec is silent on something load-bearing, or the work turns out to contradict a settled decision). Then stop and ask. Anything smaller, decide yourself and record it.
 
-- **Top-level plan** — `<issue-id>.eio-plan.md` at repo root:
-  - The overall change: files to create / modify / delete (including spec edits and marker removals).
-  - Decisions made (from step 2 and your own), each with a one-line rationale.
-  - **Fan-out decision:** N subagents and why. **N=1 means no subagents at all — you implement directly in this session.** Only fan out when the work splits into genuinely distinct, isolated areas with disjoint file ownership (e.g. independent golden blocks). Anything two workstreams would both touch stays with you.
-  - Verification steps for step 6 (commands to run, acceptance criteria mapped to how each will be checked).
-  - Locations of sub-plans (if N>1).
-- **Sub-plans** (only if N>1) — `<issue-id>.<area>.eio-plan.md` placed in the directory they concern. Each must be **fully self-contained** for a Sonnet subagent that has none of your context:
-  - The issue excerpt and acceptance criteria it serves.
-  - Governing spec content **quoted verbatim** — including any spec amendments you've drafted but not committed (worktrees branch from HEAD, so uncommitted spec edits are invisible to subagents; the sub-plan is how they see them).
-  - Relevant CLAUDE.md invariants (no_std, copies-not-references, emit-enqueues, etc. as applicable).
-  - The exact file list this subagent owns (disjoint from every other sub-plan).
-  - Code examples, patterns to follow, and concrete test cases to implement.
-  - Definition of done: tests to pass, commands to run.
+## Step 3 — Plan (no approval)
 
-Record the plan's key decisions on the bead as you go: `bd update <id> --design "..."` — the plan files get deleted later; the bead is the durable record.
+Write the plan to `<issue-id>.eio-plan.md` at the repo root (`*.eio-plan.md` is gitignored — verify the pattern is present, add it if not). It is your working artifact and the input for subagents, not a document awaiting sign-off. Cover:
 
-## Step 4 — Review gate (loop until approved)
+- Files to create / modify / delete, including spec edits and marker removals.
+- Decisions, each with a one-line rationale — from step 2 and your own.
+- **Fan-out:** N and why. **N=1 means no subagents — you implement directly.** Fan out only for genuinely distinct areas with disjoint file ownership (e.g. independent golden blocks). Anything two workstreams would both touch stays with you.
+- Verification: the commands to run, each acceptance criterion mapped to how it gets checked, and how you will prove each new gate can **fail**.
 
-Prompt the user to review the plan files (AskUserQuestion): option **Approve**, plus free-text feedback via "Other". On feedback: update the plan files (and `--design`), then return to this gate. Do not proceed on anything but an explicit Approve.
+**Sub-plans** (only if N>1) — `<issue-id>.<area>.eio-plan.md` in the directory it concerns, fully self-contained for a Sonnet subagent with none of your context: the issue excerpt and its acceptance criteria; governing spec content **quoted verbatim**, including spec amendments you have drafted but not committed (worktrees branch from HEAD, so uncommitted edits are invisible — the sub-plan is how they see them); applicable CLAUDE.md invariants; the exact disjoint file list it owns; patterns to follow and concrete test cases; definition of done.
 
-## Step 5 — Implement
+Record the durable version on the bead as you go — `bd update <id> --design "..."` — because the plan file gets deleted in step 5.
 
-**If N=1:** implement directly in this session. No worktree, no subagent ceremony.
+Then go straight to step 4.
 
-**If N>1:** for each sub-plan:
+## Step 4 — Implement
 
-1. `git worktree add <repo-parent>/eieio-wt-<area> -b wt/<issue-id>/<area>` (branch from current HEAD).
-2. Spawn all subagents **in parallel in one message** (Agent tool, `model: "sonnet"`). Each prompt must include: the absolute worktree path (work only there), the absolute path to its sub-plan in the main checkout (read it first), and these standing orders: implement only the files the sub-plan owns; never edit `docs/` or any `*.eio-plan.md`; run the plan's tests until green; commit checkpoints on your worktree branch; if the spec or plan is ambiguous or wrong, STOP and report back rather than improvising.
-3. If a subagent reports a spec gap: resolve it (amend spec / plan, consult the user if it's a step-2-grade decision), update the sub-plan, and send the subagent back to work (SendMessage to the same agent keeps its context).
+**N=1:** implement directly. No worktree, no subagent ceremony.
 
-## Step 6 — Integrate and verify
+**N>1:** per sub-plan, `git worktree add <repo-parent>/eieio-wt-<area> -b wt/<issue-id>/<area>` from HEAD, then spawn all subagents **in parallel in one message** (Agent tool, `model: "sonnet"`). Each prompt carries: the absolute worktree path (work only there), the absolute path to its sub-plan in the main checkout (read it first), and the standing orders — implement only the files you own; never edit `docs/` or any `*.eio-plan.md`; run the plan's tests until green; commit checkpoints on your worktree branch; if the spec or plan is ambiguous or wrong, STOP and report rather than improvising. On a reported spec gap: resolve it yourself (amend spec and sub-plan; ask only if it is step-2 grade), then SendMessage the same agent back to work so it keeps its context.
 
-- If N>1: in the main checkout, `git merge --squash wt/<issue-id>/<area>` for each branch (subagent checkpoint commits never reach main's history), resolve conflicts yourself, then `git worktree remove` each tree and delete the `wt/` branches.
-- Run the full gates: `just ci` (or, before the justfile exists, the equivalent fmt/clippy/build/test commands).
-- Walk the issue's **acceptance criteria as a literal checklist**. Verify the change conforms to the governing specs — read the diff, don't trust the reports. Make any adjustments yourself, now.
-- Confirm spec/code pairing: every spec amendment or PROPOSED-marker removal is present and will land with its code.
-- File follow-up beads for anything discovered but out of scope.
-- Record verification evidence in the bead: `bd update <id> --notes "..."`.
+## Step 5 — Integrate and verify
+
+- If N>1: `git merge --squash wt/<issue-id>/<area>` per branch in the main checkout (subagent checkpoints never reach main's history), resolve conflicts yourself, then `git worktree remove` each tree and delete the `wt/` branches.
+- Run `just ci` (before the justfile exists, the equivalent fmt/clippy/build/test commands). It must be green.
+- Walk the acceptance criteria as a literal checklist. **Read the diff — never trust a subagent's report.** Verify conformance against the governing specs and fix what's off, now.
+- **Prove new gates can fail.** A gate verified only in the passing direction is unverified: break the input deliberately, confirm the failure and message, revert. Same for any claim you intend to write down — test it instead of asserting it.
+- Confirm spec/code pairing: every spec amendment and PROPOSED-marker removal is present and lands with its code.
+- File follow-up beads for anything found but out of scope.
+- `bd update <id> --notes "..."` with the evidence: commands run, exit codes, negative tests, and every review dismissal with its reason.
 - Delete all `*.eio-plan.md` files.
 
-## Step 7 — Code review
+## Step 6 — Review the diff
 
-Run the `/code-review` skill on the working diff. Triage its findings:
+Run the `/code-review` skill on the working diff if it is installed; if it isn't, review the diff yourself with the same rigor and say which you did. Fix what matters for this feature. Dismiss what is out of scope, planned elsewhere, or wrong — but **record every dismissal** in the bead notes or as a filed bead. Nothing is silently dropped.
 
-- Fix what matters for this feature.
-- Dismiss what is out of scope, already planned in another bead, or wrong — but **record every dismissal** with its reason in the bead's notes (or as a filed follow-up bead). Nothing is silently dropped.
+## Step 7 — Commit and push (no gate)
 
-## Step 8 — Commit gate (loop until committed)
+Commit per CLAUDE.md: one commit per area, best-fit emoji, spec+code together, no trailers, `main` directly. Then `git push`.
 
-Propose the commit breakdown per CLAUDE.md: per-area commits, best-fit emoji, spec+code together, no trailers. Then prompt (AskUserQuestion): option **Commit and push**, plus free-text feedback via "Other". On feedback: make the fixes, re-run affected gates, and return to this gate. On approval:
+- Commit only what belongs to this issue, plus beads bookkeeping (`.beads/*.jsonl`, 📋) so the tree ends clean for the next iteration.
+- **Unrelated dirty files that you did not create: stop and ask.** Never sweep unknown changes into a commit.
+- If `just ci` is red and you cannot fix it, **stop the loop**: do not commit, leave the bead claimed, record what failed in the notes, and report. Same for a push that is rejected — report the exact error rather than reaching for `--force`.
 
-1. Create the commits as proposed; `git push`.
-2. `bd close <id>` (with `--reason` if useful); ensure follow-up beads from steps 6–7 are filed.
+## Step 8 — Close, then loop
+
+1. `bd close <id>` with `--reason`. If that was an epic's last child and the epic's own criteria are met, close the epic too.
+2. Confirm the follow-up beads from steps 5–6 exist.
 3. `bd dolt push`.
+4. Report this iteration compactly: commits landed, issue closed, follow-ups filed, and what the next driver needs to know.
+5. **Return to step 0 immediately.**
 
-The skill ends here. Report: what landed (commits), issue closed, follow-ups filed, and anything the next issue's driver should know.
+## Stop conditions
+
+Stop the loop and report — do not continue to the next issue — when: `bd ready` is empty; `just ci` cannot be made green; a push fails; the same issue has failed twice; the tree holds unrelated changes you did not make; or an action would need authority this skill does not grant (force-push, history rewrite, remote branch deletion, secrets).
+
+Otherwise keep going. The user interrupts if they want you to stop.
