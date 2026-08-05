@@ -20,6 +20,11 @@ wasmparser.workspace = true
 # surface enforces one rule; `tests/name.rs` proves this crate's hand-written
 # validators accept exactly the language those regexes describe.
 [dev-dependencies]
+# Validates the published schemas/manifest.schema.json against the same fixtures the
+# parser sees (ABI §11). boon over jsonschema for the dependency weight: a draft 2020-12
+# validator is all this needs, and jsonschema brings a much larger tree even with its
+# default features off.
+boon.workspace = true
 regex.workspace = true
 wat.workspace = true
 

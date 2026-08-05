@@ -1,0 +1,55 @@
+{
+  "name": "threshold",
+  "version": "2.0.0-rc.1+build.7",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "description": "Route signals by comparing an attribute to a limit",
+  "capabilities": [
+    "state",
+    "timer",
+    "gpio",
+    "i2c",
+    "http"
+  ],
+  "inputs": [
+    {
+      "name": "in"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "high"
+    },
+    {
+      "name": "low"
+    }
+  ],
+  "properties": [
+    {
+      "name": "limit",
+      "type": "float",
+      "description": "The comparison limit",
+      "default": "(21.5)",
+      "required": true
+    },
+    {
+      "name": "attribute",
+      "type": "string",
+      "default": "(\"temp\")"
+    },
+    {
+      "name": "passthrough",
+      "type": "any",
+      "required": false
+    }
+  ],
+  "targets": [
+    "wasm32-unknown-unknown",
+    "esp32s3"
+  ],
+  "aot": [
+    "esp32s3"
+  ]
+}

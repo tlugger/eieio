@@ -55,6 +55,10 @@ proptest = "1.11"
 # The proof needs a regex engine; the leaf runtime does not.
 regex = "1.11"
 
+# Dev-dependency only. Validates the published JSON Schemas against the same fixtures the
+# Rust parsers accept and reject, so the schema and the types cannot drift apart.
+boon = "0.6"
+
 # Dev-dependency only. Module fixtures are checked in as `.wat` so a reviewer can see
 # what each one is testing, and assembled at test time. Version-matched to wasmparser
 # because both come from the wasm-tools workspace.

@@ -1,0 +1,12 @@
+{
+  "name": "sink",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "aot": [
+    "esp32s3",
+    "esp32s3"
+  ]
+}

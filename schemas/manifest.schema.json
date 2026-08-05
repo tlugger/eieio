@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tlugger/eieio/schemas/manifest.schema.json",
+  "title": "eieio block manifest",
+  "description": "What a block says about itself: its ports, its configurable properties, the host capabilities it needs, and the ABI it was built against. Published in the registry beside the block's OCI artifact and embedded in the module as the `eio:manifest` custom section, so a .wasm file is self-describing. This schema is a structural gate, not the whole contract: ABI-SPEC §11 and §11.1 are normative, and four of their rules cannot be expressed in JSON Schema and this schema therefore does not enforce them: uniqueness of port and property names — `uniqueItems` compares whole items, not a chosen property, so it would coincidentally catch two identical ports today and silently stop catching them the moment a port gains a second field, which §11 says is where port metadata lands next; rejection of duplicate JSON object keys; whether a property `default` parses as an expression; and the document size bound. A manifest that validates here can still be refused for one of those.",
+  "type": "object",
+  "required": ["name", "version", "abi"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "description": "The block's name in the registry, e.g. \"filter\". Lowercase; letters, digits, and the separators . _ - between them.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+      "maxLength": 64
+    },
+    "version": {
+      "description": "The block's own version, as Semantic Versioning 2.0.0 — e.g. \"1.2.0\" or \"2.0.0-rc.1\". This is the block's version, not the ABI's.",
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$"
+    },
+    "abi": {
+      "description": "The block ABI version this block was built against. A host runs a block whose major matches its own and whose minor is at or below its own, because minor versions are purely additive.",
+      "type": "object",
+      "required": ["major", "minor"],
+      "additionalProperties": false,
+      "properties": {
+        "major": {
+          "description": "Incompatible-change counter. A host refuses a block whose major differs from its own.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "minor": {
+          "description": "Additive-change counter. A host accepts any minor at or below its own.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      }
+    },
+    "description": {
+      "description": "What this block does, in one line, for the person choosing it from a palette or the agent choosing it from a list. User-facing documentation — write it as such.",
+      "type": "string"
+    },
+    "capabilities": {
+      "description": "The host facilities this block needs. Deployment fails if the target node cannot provide one, which is what makes designing for an MCU honest rather than hopeful. Leave it out or empty for a pure block that only transforms signals.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "description": "One host capability. `eio:core` is not listed here: logging, emitting, property access, the clock and randomness are available to every block and require no declaration.",
+        "type": "string",
+        "enum": ["state", "timer", "gpio", "i2c", "http"]
+      }
+    },
+    "inputs": {
+      "description": "The block's input ports, in order. The order is part of the contract: a port's position is the index the running block addresses it by, so appending a port is safe and reordering one is not. A source block has none.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/port" }
+    },
+    "outputs": {
+      "description": "The block's output ports, in order — same ordering contract as inputs. A sink block has none.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/port" }
+    },
+    "properties": {
+      "description": "The block's configuration, in order. Every property is an expression evaluated per signal, so a threshold can be a constant on one deployment and read from the signal on another without changing the block. The order defines each property's identifier, so appending a property is backward compatible and reordering or removing one is not.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/property" }
+    },
+    "targets": {
+      "description": "The compilation targets this block is published for. Always includes \"wasm32-unknown-unknown\", the portable module every host can load; omit the field to mean exactly that.",
+      "type": "array",
+      "uniqueItems": true,
+      "contains": { "const": "wasm32-unknown-unknown" },
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+        "maxLength": 64
+      }
+    },
+    "aot": {
+      "description": "Leaf targets for which a prebuilt ahead-of-time compiled artifact is published alongside the portable module — e.g. \"esp32s3\". An addition, never a replacement: the portable module is always there.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",
+        "maxLength": 64
+      }
+    }
+  },
+  "$defs": {
+    "port": {
+      "description": "One input or output terminal. Signals arrive on inputs and are emitted on outputs, a batch at a time.",
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The port's name, unique among the block's ports in the same direction. Lowercase; letters, digits, and _ or - between them. No dots: a service file addresses a connection as \"instance.port\", so a dot here would be ambiguous.",
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
+          "maxLength": 64
+        }
+      }
+    },
+    "property": {
+      "description": "One configurable value. Its value is always an expression, which the host evaluates for each signal and type-checks against the declared type.",
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "The property's name, unique within the block, and the key a service file sets it under. Lowercase; letters, digits, and _ or - between them, no dots.",
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
+          "maxLength": 64
+        },
+        "type": {
+          "description": "What the property's expression must evaluate to. The host checks the evaluated value against this and fails that signal on a mismatch, so a mistyped configuration surfaces as a signal error rather than as wrong behaviour. Use \"any\" only when the block genuinely accepts anything.",
+          "type": "string",
+          "enum": ["bool", "int", "float", "string", "bytes", "any"]
+        },
+        "description": {
+          "description": "What this property controls, for the person filling in the field and the agent generating a service file. User-facing documentation, and the main thing that makes a block usable by someone who did not write it.",
+          "type": "string"
+        },
+        "default": {
+          "description": "The expression this property takes when a service does not set it. An expression like any other, so a default may read from the signal. Omit the field when there is no default; it is never null.",
+          "type": "string"
+        },
+        "required": {
+          "description": "Whether configuration must fail when this property has no value. A value from the service file or from `default` satisfies it, either way. Defaults to false.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

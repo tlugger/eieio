@@ -1,0 +1,18 @@
+{
+  "name": "sink",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "properties": [
+    {
+      "name": "limit",
+      "type": "int"
+    },
+    {
+      "name": "limit",
+      "type": "float"
+    }
+  ]
+}

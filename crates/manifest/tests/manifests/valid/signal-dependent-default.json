@@ -1,0 +1,15 @@
+{
+  "name": "scaled",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "properties": [
+    {
+      "name": "limit",
+      "type": "float",
+      "default": "(* $temp 1.5)"
+    }
+  ]
+}

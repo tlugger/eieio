@@ -1,0 +1,24 @@
+{
+  "name": "passthrough",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "inputs": [
+    {
+      "name": "data"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "data"
+    }
+  ],
+  "properties": [
+    {
+      "name": "data",
+      "type": "any"
+    }
+  ]
+}

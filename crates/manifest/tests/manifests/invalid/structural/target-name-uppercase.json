@@ -1,0 +1,12 @@
+{
+  "name": "sink",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "targets": [
+    "wasm32-unknown-unknown",
+    "ESP32S3"
+  ]
+}

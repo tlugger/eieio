@@ -1,0 +1,16 @@
+{
+  "name": "clock",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "outputs": [
+    {
+      "name": "tick"
+    }
+  ],
+  "capabilities": [
+    "timer"
+  ]
+}

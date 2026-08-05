@@ -1,0 +1,8 @@
+{
+  "name": "sink",
+  "version": "01.2.3",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  }
+}
