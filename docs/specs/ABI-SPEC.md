@@ -354,7 +354,11 @@ Notes:
 - `aot` lists prebuilt AOT artifacts for leaf targets published alongside the portable module.
 - Property order defines `prop_id` — appending properties is backward compatible, reordering or removing is not; this is the block's (not the ABI's) versioning concern.
 
-Full JSON Schema for the manifest ships in the repo as `manifest.schema.json`; this section is the normative prose. The manifest is also the Designer's config-panel source and the agent-tooling surface (SCOPE §4) — descriptions are user-facing documentation and SHOULD be written as such.
+The JSON Schema for the manifest ships in the repo as **`schemas/manifest.schema.json`** (draft 2020-12), beside the schemas of the other published formats. It lives at the repository root rather than inside a crate because its consumers are not Rust: the Designer's config panels, agent tooling, and editor autocomplete all read it directly.
+
+**This section and §11.1 are the normative prose; the schema is a structural gate derived from them.** Four §11.1 rules cannot be expressed in JSON Schema and the schema therefore does not enforce them: uniqueness of port and property names — `uniqueItems` compares whole items rather than a chosen property, so it would coincidentally catch two *identical* ports and stop doing so as soon as a port carries a second field; rejection of duplicate JSON object keys; whether a property `default` parses as an expression; and the document size bound. A manifest that validates against the schema MAY still be rejected for one of those, and a host MUST apply the prose regardless of whether a document validated. The repository tests the boundary in both directions, so the subset stays a documented one rather than an unnoticed gap.
+
+The manifest is also the Designer's config-panel source and the agent-tooling surface (SCOPE §4) — descriptions are user-facing documentation and SHOULD be written as such, in the schema as much as in the manifest.
 
 ### 11.1 Validation rules
 
