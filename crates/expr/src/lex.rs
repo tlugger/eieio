@@ -383,6 +383,34 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// The number `text` denotes, or `None` if `text` is not exactly one number.
+///
+/// What "numeric string" means in EXPR §7.3's `(int x)` and `(float x)`: the `number`
+/// grammar of EXPR §3.1 and nothing else. `str::parse` is not that grammar — it also
+/// accepts `inf`, `NaN`, `+1`, `1.` and `.5`, and `(int "inf")` succeeding would put a
+/// non-finite float one step from a value (EXPR §2). Running the lexer instead is what
+/// keeps one definition of the grammar rather than two that can drift.
+pub(crate) fn number_from_str(text: &str) -> Option<Value> {
+    // Deliberately not `next_token`, which skips leading whitespace and comments:
+    // ` 1` and `1 ; two` are not numbers, and neither is the empty string.
+    let bytes = text.as_bytes();
+    let starts_number = match bytes.first()? {
+        b'0'..=b'9' => true,
+        b'-' => bytes.get(1).is_some_and(u8::is_ascii_digit),
+        _ => false,
+    };
+    if !starts_number {
+        return None;
+    }
+
+    let mut lexer = Lexer::new(text);
+    let TokenKind::Literal(value) = lexer.lex_number().ok()? else {
+        return None;
+    };
+    // Trailing anything — `1.5.2`, `1 2` — leaves the cursor short of the end.
+    (lexer.pos == text.len()).then_some(value)
+}
+
 /// Numeric value of an ASCII hex digit.
 fn hex_value(b: u8) -> u32 {
     match b {

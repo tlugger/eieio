@@ -6,10 +6,18 @@
 //! Designer's expression editor. `no_std` (`alloc` permitted) is therefore a hard
 //! requirement.
 //!
-//! This crate currently provides the **lexer and parser** (EXPR §3) and
-//! **configure-time static analysis** (EXPR §10). The interpreter (EXPR §4–6), the
-//! builtin library (EXPR §7) and the evaluation budgets (EXPR §9) land in their own
-//! issues.
+//! The whole language: lexer and parser (EXPR §3), configure-time static analysis
+//! (EXPR §10), the interpreter (EXPR §4–§6), the builtin library and canonical
+//! rendering (EXPR §7), and the budgets that bound an evaluation (EXPR §9).
+//!
+//! # Purity is the point
+//!
+//! There is no host function, no clock, no randomness and no IO reachable from an
+//! expression, and there is no way to write a loop or a recursive call: iteration exists
+//! only inside builtins, over finite inputs (EXPR §1, §5.4). So the same expression
+//! against the same signal produces the same value on every host, forever — which is
+//! what makes replay, signal taps and cross-node caching sound. Anything that would
+//! trade that away for a convenience is not a candidate feature.
 //!
 //! # What the language deliberately lacks
 //!
@@ -29,15 +37,26 @@
 //! # Example
 //!
 //! ```
-//! use eio_expr::{Expr, ExprKind, parse};
+//! use eio_expr::{ErrorCode, eval_source, parse};
+//! use eio_signal::{Signal, Value};
+//!
+//! let mut signal = Signal::new();
+//! signal.set("temp", Value::Float(21.5));
+//! signal.set("threshold", Value::Int(20));
 //!
 //! // A filter predicate: temperature above a threshold held in another attribute.
-//! let expr = parse("(> $temp $threshold)").unwrap();
-//! assert!(matches!(expr.kind, ExprKind::List(ref items) if items.len() == 3));
-//! assert!(expr.is_signal_dependent());
+//! assert_eq!(
+//!     eval_source("(> $temp $threshold)", Some(&signal)),
+//!     Ok(Value::Bool(true))
+//! );
+//!
+//! // Missing data is an error, not null (EXPR §6).
+//! let missing = eval_source("$humidity", Some(&signal)).unwrap_err();
+//! assert_eq!(missing.code, ErrorCode::Missing);
 //!
 //! // Signal-independent expressions are constant-folded once, at configure time.
 //! assert!(!parse("(* 60 1000)").unwrap().is_signal_dependent());
+//! assert_eq!(eval_source("(* 60 1000)", None), Ok(Value::Int(60_000)));
 //!
 //! // Spans are byte offsets into the source, so a caller can point at the text.
 //! let source = "(+ 1 2)";
@@ -51,17 +70,30 @@ extern crate alloc;
 
 mod analyze;
 mod ast;
+mod budget;
 mod builtin;
+mod env;
 mod error;
+mod eval;
+mod form;
 mod lex;
+mod num;
+mod operand;
 mod parse;
+mod render;
 mod span;
 
 pub use analyze::{Analysis, analyze, analyze_source};
 pub use ast::{Expr, ExprKind};
-pub use builtin::{BUILTINS, SPECIAL_FORMS, is_builtin, is_special_form};
+pub use budget::{
+    EvalLimits, MAX_FUEL, MAX_RANGE, MAX_VALUE_BYTES, MIN_FUEL, MIN_RANGE, MIN_VALUE_BYTES,
+};
+pub use builtin::{Arity, BUILTINS, Builtin, SPECIAL_FORMS, is_builtin, is_special_form};
 pub use error::{Error, ErrorCode};
+pub use eval::{Evaluator, eval, eval_source, eval_with_limits};
+pub use operand::{Closure, Function, Operand};
 pub use parse::{
     MAX_DEPTH, MAX_EXPR_BYTES, MIN_DEPTH, MIN_EXPR_BYTES, ParseLimits, parse, parse_with_limits,
 };
+pub use render::render;
 pub use span::Span;

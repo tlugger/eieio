@@ -98,17 +98,21 @@ No quote/quasiquote, no macros, no keywords, no chars, no rationals, no multiple
 Standard eager applicative-order evaluation with lexical scoping:
 
 - A **number, string, `true`, `false`, `null`** evaluates to itself.
-- A **symbol** evaluates to its binding (innermost `let`/`fn` scope, then the builtin table). Unbound symbol = `ERR_EXPR` at evaluation time (not parse time — but see §10 static checks).
+- A **symbol** evaluates to its binding (innermost `let`/`fn` scope, then the builtin table). A symbol resolving to the builtin table yields a **function** (§5.4): `abs` on its own is a function value, which is what makes `(map abs $samples)` legal. Unbound symbol = `ERR_EXPR` at evaluation time (not parse time — but see §10 static checks).
 - A **sigil** evaluates per §6.
-- A **list** `(f a b ...)`: if `f` is a special form symbol (§5), apply special-form rules; otherwise evaluate `f` and all arguments left-to-right, then apply. Applying a non-function is an error.
+- A **list** `(f a b ...)`: if `f` is a special form symbol (§5), apply special-form rules; otherwise evaluate `f` and all arguments left-to-right, then apply. Applying a non-function is a `TYPE` error, and so is the empty list `()`, which has nothing to apply (§10 rejects it statically, before any signal arrives).
 
 ### 4.1 Truthiness
 
-Only `false` and `null` are falsy; every other value (including `0`, `""`, empty array/map) is truthy. Applies to `if`, `and`, `or`, `filter`, and the `?`-predicates' consumers uniformly.
+Only `false` and `null` are falsy; every other value (including `0`, `""`, empty array/map) is truthy. Applies to `if`, `and`, `or`, `filter`, and the `?`-predicates' consumers uniformly. A function is truthy, being neither `false` nor `null`; none of §5.4's restrictions concerns truthiness.
 
 ### 4.2 Equality
 
-`=` is deep structural equality. Numeric comparison is by mathematical value across int/float (`(= 1 1.0)` → `true`). `bytes` compare bytewise. Functions are never equal to anything.
+`=` is deep structural equality. `bytes` compare bytewise.
+
+Numeric comparison is by mathematical value across int/float (`(= 1 1.0)` → `true`), and it is **exact rather than by conversion**: `(= 9007199254740993 9007199254740992.0)` MUST be `false`, even though converting the int to a float makes the two indistinguishable. Ordering (§7.2) follows the same rule. An implementation that compares by converting one side agrees with this below 2⁵³ and then diverges silently, which is exactly the class of divergence §11 exists to catch.
+
+**Comparing a function is a `TYPE` error**, in either operand position: `(= abs abs)`, `(= (fn (x) x) 1)` and `(!= abs 1)` all fail. A function is not a value (§2) and has no identity to compare; answering `false` instead would let a mistyped comparison evaluate quietly forever, which is the failure mode strict-over-null exists to prevent (§6).
 
 ---
 
@@ -135,7 +139,8 @@ Anonymous function, lexical closure over the enclosing environment. Fixed arity;
 Functions exist so that `map`/`filter`/`reduce` exist (§7.5) — batch signals carry arrays, and per-element work without them forces logic back into custom blocks, which is the failure mode this language exists to prevent. Deliberate restrictions preserving termination:
 
 - No `define`, no `letrec`, no self-reference: a function cannot name itself, so **recursion is unconstructible**.
-- Functions are not CBOR values (§2): they cannot be a final result, stored in collections, or compared. They flow only as arguments to builtins.
+- Functions are not CBOR values (§2): they cannot be a final result, stored in collections, or compared. They flow as operands — bound by `let`, passed to a builtin, applied directly — but never into a value.
+- A **builtin is a function in this sense too** (§4): `abs` names one, and every restriction above applies to it identically. There is no second kind of callable.
 
 Iteration exists only inside builtins over finite inputs; combined with no-recursion, every expression terminates. Fuel (§9) backstops pathological-but-finite cases.
 
@@ -154,7 +159,11 @@ Iteration exists only inside builtins over finite inputs; combined with no-recur
 
 ## 7. Builtin library (v1)
 
-Conventions: `ERR` marks argument-type or domain errors (all surface as `ERR_EXPR` through the ABI). All builtins are total over their documented domains and error outside them — no implicit coercion except int→float promotion in mixed arithmetic.
+Conventions: `ERR` marks argument-type or domain errors (all surface as `ERR_EXPR` through the ABI). All builtins are total over their documented domains and error outside them — no implicit coercion except int→float promotion in mixed arithmetic. Points the tables below leave open are resolved in §7.8.
+
+**Arity.** Each named argument in a form is required, and a trailing `...` admits zero or more further arguments; a wrong count is `ARITY`. Six variadics are therefore total at zero arguments, where they answer the operation's identity: `(+)` → `0`, `(*)` → `1`, `(str)` → `""`, `(arr)` → `[]`, `(dict)` → `{}`, `(concat)` → `[]`. For `arr` and `dict` that is not a curiosity — it is the only way to write an empty array or map, since §3.2 gives neither a literal syntax. `-`, `/`, `min` and `max` have no identity and require their named arguments.
+
+**Fold order.** Variadic arithmetic and `min`/`max` fold left to right, and an arithmetic accumulator promotes to float at the first float operand and stays float. Order is observable above 2⁵³, so it is fixed here rather than left to the implementation.
 
 ### 7.1 Arithmetic
 
@@ -219,11 +228,43 @@ Conventions: `ERR` marks argument-type or domain errors (all surface as `ERR_EXP
 
 ### 7.6 Canonical rendering
 
-`(string x)` / `(str ...)` output is normatively fixed (conformance vectors pin it): ints base-10; floats shortest-roundtrip; `true`/`false`/`null` as spelled; strings as-is (unquoted); bytes lowercase hex; arrays/maps in a JSON-like rendering with sorted map keys. Two hosts MUST render identically — rendered strings end up in signals and must not diverge across nodes.
+`(string x)` / `(str ...)` output is normatively fixed, down to the separators, and the conformance vectors pin it. Two hosts MUST render identically: rendered strings end up in signals and travel between nodes, so a rendering difference is a *data* difference.
+
+- `null` renders `null`; `true` and `false` as spelled.
+- **int**: base-10, a leading `-` when negative, no `+`, no leading zeros.
+- **float**: the shortest decimal digit string that round-trips, placed as follows. Zero renders `0.0`, and negative zero `-0.0`. Otherwise, if the magnitude is at least `1e-4` and below `1e16`, fixed-point with **at least one digit after the point** (`1.0`, `0.5`, `0.0001`, `1000000000000000.0`); outside that range, scientific — one leading digit, the remaining digits after a point if there are any, then `e` and the exponent in base-10 with a `-` when negative and no `+` and no leading zeros (`1e16`, `9.999e-5`, `1.7976931348623157e308`, `5e-324`). The two bounds are what keep the rendering short and total: without an upper one `1e300` would be 301 characters, and without a lower one `5e-324` would be 324. With them, no float exceeds 24.
+- **string**: its own characters, unquoted, at the top level; **quoted** when nested in an array or a map.
+- **bytes**: lowercase hex, two digits per byte, no separator; unquoted at the top level and quoted when nested, like a string.
+- **array**: `[`, then the elements in order separated by `, `, then `]`. Empty: `[]`.
+- **map**: `{`, then the entries in ascending key order (§2) as `"key": value` separated by `, `, then `}`. Empty: `{}`. Keys are always quoted.
+- **Quoting** uses exactly §3.1's escape set, so a rendered string re-reads as itself: `"` → `\"`, `\` → `\\`, U+000A → `\n`, U+0009 → `\t`, U+000D → `\r`, any other scalar below U+0020 → `\u{h…}` with lowercase hex and no leading zeros, and every other scalar as itself.
+- A **function** has no rendering: `(string f)` and a function argument to `str` are `TYPE` (§2).
 
 ### 7.7 Not in v1 (and why)
 
 Regex (interpreter weight + `no_std` + ReDoS-vs-fuel headaches; revisit demand-driven), date/time parsing or formatting (impurity-adjacent, tz tables are enormous; timestamps are ints, blocks own formatting), string formatting mini-language (`str` composes), math beyond arithmetic (`sqrt`/`pow`/trig — additive later if sensor math demands it), bytes manipulation (additive later; likely alongside an `spi`/`uart` capability wave). All additive: minor version.
+
+### 7.8 Resolved details
+
+Points §7.1–§7.5 leave open, fixed here so two implementations cannot diverge — the same role §3.1.1 plays for the grammar.
+
+- **`min`/`max` return an argument unchanged**, without promotion: `(min 1 1.0)` is the int `1` and `(min 1.0 1)` is the float `1.0`. Comparison is by mathematical value (§4.2), so which of two numerically equal arguments comes back has to be said; it is the leftmost, so that the result does not depend on how equal values were spelled.
+- **`div` and `mod` floor**, they do not truncate and they are not Euclidean. The three differ on negative operands: `-7 / 2` truncates to `-3` and floors to `-4`, and `(div -7 -2)` is `3` where Euclidean division gives `4`. `(mod a b)` therefore takes the sign of `b`.
+- **`floor`, `ceil` and `round` accept an int** and return it unchanged. An int is already the answer; refusing it would make `(floor $count)` depend on whether the attribute arrived as an int or a float.
+- **A "numeric string" is one matching §3.1's grammar** and nothing else: `(int s)` takes §3.1's `int`, and `(float s)` takes its `number` (so `(float "1")` works). No surrounding whitespace, no leading `+`, and none of the spellings a general-purpose float parser also accepts — `(int "inf")` and `(float "NaN")` MUST fail, or a non-finite float would be one step from a value (§2). `(int "1.5")` is `DOMAIN`: it asks for two conversions and names one, and `(int (float "1.5"))` says it.
+- **`(float x)` does not accept a bool** though `(int x)` does. The asymmetry is §7.3's table as written: `(float (int b))` states that reading better than a second implicit rule would.
+- **Type predicates are total over functions** and answer `false`: a function is not an int, and saying so is honest rather than silently wrong. So does `not`, which reads truthiness (§4.1) and finds a function truthy. Every *other* builtin refuses a function operand with `TYPE`, the five that take a function argument excepted.
+- **`trim` removes exactly §3.1's whitespace** — space, tab, newline, carriage return. Not the Unicode `White_Space` property, whose table does not fit the leaf tier and which a host without it would apply differently.
+- **`(split s "")` is `DOMAIN`.** An empty separator has no single obvious meaning, and `(map (fn (i) (substr s i 1)) (range (len s)))` states the character-wise reading explicitly.
+- **`(join arr sep)` renders nothing**: a non-string element is `TYPE`, not canonically rendered. `(join (map string a) sep)` is the other reading, said out loud.
+- **A duplicate key in `dict` is `DOMAIN`**, not last-wins. Keys there are written out one by one, so a repeat is a typo, and keeping one of the two values silently is how it reaches production.
+- **`get-or` substitutes for absence only.** A key of a kind the container could never hold — a string against an array — is still `TYPE`: it is not absent, it was never a key that container has.
+- **A negative array index is absent, not ill-typed**: `MISSING` from `get`, `false` from `has?`. It is an integer, which is the right kind of key for an array, and there is no from-the-end indexing in v1.
+- **`range` is empty when its length would be ≤ 0**, rather than an error, so `(range (len a))` iterates nothing over an empty array. Longer than `MAX_RANGE` is `SIZE` (§9).
+- **`sort`'s "homogeneous numbers" admits mixed int and float**; both are numbers and §4.2's exact ordering is total over them. Being stable, it keeps numerically equal elements — `1` and `1.0` — in their original order.
+- **`(len x)`** counts Unicode scalars for a string, elements for an array, entries for a map, and bytes for a byte string; every other type is `TYPE`. String indices and lengths (`substr`, `index-of`) count scalars everywhere, never bytes.
+- **`(get-in c ks)` with an empty path** is the container itself, which is what folding over no steps means.
+- **`(any? f a)` and `(all? f a)` over an empty array** are `false` and `true` respectively — the vacuous readings.
 
 ---
 
@@ -254,12 +295,14 @@ Host-enforced budgets, checked during evaluation. Values are host configuration;
 |Budget|Floor|Reference default|Notes|
 |---|---|---|---|
 |`MAX_FUEL` (eval steps)|10 000|100 000|One step ≈ one node visit / one builtin element touch|
-|`MAX_DEPTH` (nesting + call depth)|32|128|Also enforced at parse|
+|`MAX_DEPTH` (nesting + call depth)|32|128|Also enforced at parse, and on the nesting of a constructed value — see below|
 |`MAX_RANGE`|1 000|65 536|`range` result length|
 |`MAX_VALUE_BYTES`|4 096|262 144|Any constructed string/bytes/array/map, measured as the length of its **canonical** CBOR encoding (ABI §6.3.1 — exactly one encoding exists, so this length is unambiguous). Hosts SHOULD compute it structurally rather than by encoding, so that checking the budget does not cost the allocation the budget exists to prevent|
 |`MAX_EXPR_BYTES`|1 024|16 384|Source text length|
 
-Exceeding a budget is a per-evaluation error (`FUEL`/`DEPTH`/`SIZE`), never a trap and never instance death — an expression cannot kill a block. Leaf hosts SHOULD sit near the floors.
+Exceeding a budget is a per-evaluation error, never a trap and never instance death — an expression cannot kill a block. `MAX_FUEL` reports `FUEL`, `MAX_DEPTH` reports `DEPTH`, and `MAX_RANGE` and `MAX_VALUE_BYTES` report `SIZE`. Leaf hosts SHOULD sit near the floors.
+
+`MAX_DEPTH` bounds the nesting of a value an expression **builds**, not only the nesting of its source and its call stack. Without that, `(reduce (fn (acc x) (arr acc)) (arr) (range 65536))` is a fully budgeted expression whose result nests as deep as the range is long, and every walk over that value — *including dropping it* — then recurses that deep in the host. A stack overflow there kills the host, which ABI §8's "traps are death, status codes are life" does nothing to contain, and the 16 KiB-of-stack tier is the one that dies first. With the bound, every walk over a value in the system is provably shallow: a value arriving from a signal is bounded by the decode limit (ABI §6.3.1 rule 9, itself at least this `MAX_DEPTH`), and a value built by an expression is bounded here.
 
 Determinism restated as testable properties: no host function reachable, no clock, no RNG, map iteration sorted, float ops are IEEE 754 binary64 with no NaN/inf escape, canonical rendering pinned. The conformance vectors (§11) encode all of these.
 

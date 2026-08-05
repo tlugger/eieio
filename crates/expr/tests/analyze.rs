@@ -384,17 +384,18 @@ fn empty_application() {
 
 /// Sorted and duplicate-free, which `is_builtin`'s binary search requires.
 ///
-/// Pinned so a later addition — the interpreter's, in eieio-s85.4 — cannot land out
-/// of order or double up without this failing.
+/// Pinned so a later addition cannot land out of order or double up without this
+/// failing — a table that is merely nearly sorted still answers most lookups.
 #[test]
 fn builtin_table_is_sorted_and_unique() {
-    let mut sorted = BUILTINS.to_vec();
+    let names: Vec<&str> = BUILTINS.iter().map(|builtin| builtin.name).collect();
+    let mut sorted = names.clone();
     sorted.sort_unstable();
-    assert_eq!(BUILTINS, sorted.as_slice(), "BUILTINS must be sorted");
+    assert_eq!(names, sorted, "BUILTINS must be sorted");
 
     let mut deduped = sorted.clone();
     deduped.dedup();
-    assert_eq!(deduped.len(), BUILTINS.len(), "BUILTINS must be unique");
+    assert_eq!(deduped.len(), names.len(), "BUILTINS must be unique");
 
     assert_eq!(
         SPECIAL_FORMS.len(),
@@ -416,9 +417,13 @@ fn tables_do_not_overlap() {
             "{form} is a special form, not a builtin (EXPR §5)"
         );
     }
-    for name in BUILTINS {
-        assert!(is_builtin(name));
-        assert!(!is_special_form(name), "{name} is a builtin, not a form");
+    for builtin in BUILTINS {
+        assert!(is_builtin(builtin.name));
+        assert!(
+            !is_special_form(builtin.name),
+            "{} is a builtin, not a form",
+            builtin.name
+        );
     }
 }
 
@@ -505,10 +510,11 @@ fn every_expr_spec_builtin_is_in_the_table() {
 
     // And nothing extra: the table is exactly §7's names, so a stray entry would
     // let an unbound symbol through as if it were a builtin.
-    for name in BUILTINS {
+    for builtin in BUILTINS {
         assert!(
-            expected.contains(name),
-            "{name:?} is in the table but not in EXPR §7"
+            expected.contains(&builtin.name),
+            "{:?} is in the table but not in EXPR §7",
+            builtin.name
         );
     }
 }

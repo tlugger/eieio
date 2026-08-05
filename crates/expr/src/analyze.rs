@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use crate::ast::{Expr, ExprKind};
 use crate::builtin::{is_builtin, is_special_form};
 use crate::error::{Error, ErrorCode};
+use crate::form;
 use crate::parse::parse;
 
 /// What analysis found.
@@ -89,11 +90,15 @@ fn walk<'a>(expr: &'a Expr, scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
                 out.push(Error::new(
                     ErrorCode::Unbound,
                     expr.span,
-                    "special form cannot be used as a value",
+                    form::SPECIAL_FORM_AS_VALUE,
                 ));
                 return;
             }
-            out.push(Error::new(ErrorCode::Unbound, expr.span, "unbound symbol"));
+            out.push(Error::new(
+                ErrorCode::Unbound,
+                expr.span,
+                form::UNBOUND_SYMBOL,
+            ));
         }
 
         ExprKind::List(items) => {
@@ -101,11 +106,7 @@ fn walk<'a>(expr: &'a Expr, scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
                 // `()` — EXPR §4 makes applying a non-function an error, and an empty
                 // list has nothing to apply. Statically known, so it is reported here
                 // rather than waiting for the first signal.
-                out.push(Error::new(
-                    ErrorCode::Type,
-                    expr.span,
-                    "empty list cannot be applied",
-                ));
+                out.push(Error::new(ErrorCode::Type, expr.span, form::EMPTY_LIST));
                 return;
             };
 
@@ -137,11 +138,7 @@ fn walk<'a>(expr: &'a Expr, scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
 /// `(if cond then else)` — EXPR §5.1: three arguments, always.
 fn walk_if<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
     if items.len() != 4 {
-        out.push(Error::new(
-            ErrorCode::Arity,
-            expr.span,
-            "if takes exactly three arguments; else is mandatory",
-        ));
+        out.push(Error::new(ErrorCode::Arity, expr.span, form::IF_ARITY));
     }
     for item in &items[1..] {
         walk(item, scope, out);
@@ -156,11 +153,7 @@ fn walk_if<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out:
 /// resolve `f`.
 fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
     if items.len() != 3 {
-        out.push(Error::new(
-            ErrorCode::Arity,
-            expr.span,
-            "let takes a binding list and exactly one body expression",
-        ));
+        out.push(Error::new(ErrorCode::Arity, expr.span, form::LET_ARITY));
     }
 
     let depth = scope.len();
@@ -173,7 +166,7 @@ fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out
                         out.push(Error::new(
                             ErrorCode::Type,
                             binding.span,
-                            "let binding must be a (name expr) pair",
+                            form::LET_BINDING_PAIR,
                         ));
                         continue;
                     };
@@ -181,7 +174,7 @@ fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out
                         out.push(Error::new(
                             ErrorCode::Arity,
                             binding.span,
-                            "let binding must be a (name expr) pair",
+                            form::LET_BINDING_PAIR,
                         ));
                     }
 
@@ -203,7 +196,7 @@ fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out
                                 out.push(Error::new(
                                     ErrorCode::Unbound,
                                     span,
-                                    "cannot shadow a special form",
+                                    form::SHADOWS_SPECIAL_FORM,
                                 ));
                             } else {
                                 // Shadowing a builtin is explicitly permitted, and
@@ -215,11 +208,9 @@ fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out
                         // A literal in the name position is `true`/`false`/`null`,
                         // which the parser already rejected (EXPR §5.2), so anything
                         // reaching here is some other non-symbol.
-                        Some((_, span)) => out.push(Error::new(
-                            ErrorCode::Type,
-                            span,
-                            "let binding name must be a symbol",
-                        )),
+                        Some((_, span)) => {
+                            out.push(Error::new(ErrorCode::Type, span, form::LET_BINDING_NAME))
+                        }
                         None => {}
                     }
                 }
@@ -227,7 +218,7 @@ fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out
             _ => out.push(Error::new(
                 ErrorCode::Type,
                 bindings.span,
-                "let requires a list of bindings",
+                form::LET_BINDINGS,
             )),
         }
     }
@@ -245,11 +236,7 @@ fn walk_let<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out
 /// reported.
 fn walk_fn<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
     if items.len() != 3 {
-        out.push(Error::new(
-            ErrorCode::Arity,
-            expr.span,
-            "fn takes a parameter list and exactly one body expression",
-        ));
+        out.push(Error::new(ErrorCode::Arity, expr.span, form::FN_ARITY));
     }
 
     let depth = scope.len();
@@ -264,31 +251,25 @@ fn walk_fn<'a>(expr: &'a Expr, items: &'a [Expr], scope: &mut Vec<&'a str>, out:
                                 out.push(Error::new(
                                     ErrorCode::Unbound,
                                     span,
-                                    "cannot shadow a special form",
+                                    form::SHADOWS_SPECIAL_FORM,
                                 ));
                             } else if scope[depth..].contains(&name.as_str()) {
                                 out.push(Error::new(
                                     ErrorCode::Arity,
                                     span,
-                                    "duplicate parameter name",
+                                    form::FN_PARAM_DUPLICATE,
                                 ));
                             } else {
                                 scope.push(name.as_str());
                             }
                         }
-                        (_, span) => out.push(Error::new(
-                            ErrorCode::Type,
-                            span,
-                            "fn parameter must be a symbol",
-                        )),
+                        (_, span) => {
+                            out.push(Error::new(ErrorCode::Type, span, form::FN_PARAM_NAME))
+                        }
                     }
                 }
             }
-            _ => out.push(Error::new(
-                ErrorCode::Type,
-                params.span,
-                "fn requires a list of parameters",
-            )),
+            _ => out.push(Error::new(ErrorCode::Type, params.span, form::FN_PARAMS)),
         }
     }
 
