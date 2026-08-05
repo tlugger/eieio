@@ -75,13 +75,23 @@ Present only if the block uses the corresponding capability. The host MUST verif
 |`eio_on_gpio`|`(watch_id: i32, value: i32) -> i32`|`gpio`|
 |`eio_on_http`|`(req_id: i32, status: i32, ptr: i32, len: i32) -> i32`|`http`|
 
+The pairing is required in **both** directions: a module that exports `eio_on_timer` while importing no `eio:timer` MUST also be rejected. Such an export is a callback the host can never invoke, which means the block — or the code generator that produced it — believes it holds a capability it never asked for. Silence there is how a block ships with a timer handler that simply never runs.
+
 ### 4.3 Imports
 
-All imports MUST be from `eio:*` namespaces (§7). Anything else fails validation. The set of imported namespaces MUST be a subset of the capabilities declared in the manifest (§11); the import section is authoritative, the manifest is advisory, and a mismatch in either direction where imports exceed manifest MUST be a load-time rejection.
+All imports MUST be from `eio:*` namespaces (§7). Anything else fails validation. Within a namespace, an imported name MUST be one of the functions §7 defines for it; a module importing `eio:core` `frobnicate` is rejected at load time rather than at instantiation, so the rejection can name the offending import. The set of imported namespaces MUST be a subset of the capabilities declared in the manifest (§11); the import section is authoritative, the manifest is advisory, and a mismatch in either direction where imports exceed manifest MUST be a load-time rejection.
+
+Import *signatures* are checked when the host links the module, by the engine. The load-time check above is a superset in namespaces and names only.
+
+**MVP conformance (§1) is enforced by the engine, not by manifest validation.** A host configures its engine to accept core WASM MVP and nothing more — wasm3 admits nothing else in the first place, and wasmtime is configured with every post-MVP proposal disabled. A module using a post-MVP feature is therefore refused at instantiation. This is deliberate placement: WASM feature gating is a moving target that engines already track, and duplicating it in the loader would create a second, slower-moving definition of what "MVP" means.
 
 ### 4.4 Custom section
 
 A module SHOULD embed its manifest as a custom section named `eio:manifest` (UTF-8 JSON, identical to the registry manifest). A `.wasm` file is then self-describing without registry metadata. If both are present the registry manifest and embedded manifest MUST be identical; hosts MAY reject on mismatch.
+
+"Identical" means the two **parsed manifests** are equal, not the two byte sequences. A registry entry reformatted by a publishing tool, or serialized with different whitespace, describes exactly the same block, and refusing to load it would make the manifest's meaning depend on its formatting. Byte-level identity is not required and MUST NOT be relied on.
+
+WASM permits repeated custom sections with the same name. A module carrying more than one `eio:manifest` section MUST be rejected: it describes itself twice, and choosing one silently is the same last-wins resolution §11.1 forbids for duplicate JSON keys.
 
 ---
 
