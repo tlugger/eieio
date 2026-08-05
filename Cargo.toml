@@ -32,6 +32,19 @@ minicbor = { version = "2.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 
+# The module cross-check reads a .wasm's imports, exports and custom sections
+# (ABI-SPEC §4). Deliberately none of the optional features:
+#
+#   `validate`  wasmparser's full validator. Pulls `alloc::sync::Arc`, which does not
+#               exist on a target without atomics, so it breaks the ESP32-C3 leg of
+#               `just check-nostd` outright. (Measured: 9 `alloc::sync` errors.)
+#   `features`  proposal gating. Builds fine on both bare-metal targets, and is still
+#               not wanted: it gates section *encodings*, not instructions, so it
+#               would give partial MVP checking — which is worse than none, because
+#               it invites the belief that the loader validates MVP. Conformance to
+#               MVP is enforced where it is complete: engine configuration (ABI §4.3).
+wasmparser = { version = "0.255", default-features = false }
+
 # Dev-dependency only. The ★ crates stay no_std, but their *tests* build for the
 # host, so a std-using test dependency is fine and `check-nostd` never sees it.
 proptest = "1.11"
@@ -41,6 +54,11 @@ proptest = "1.11"
 # and `manifest`'s hand-written validators have to be provably equivalent to them.
 # The proof needs a regex engine; the leaf runtime does not.
 regex = "1.11"
+
+# Dev-dependency only. Module fixtures are checked in as `.wat` so a reviewer can see
+# what each one is testing, and assembled at test time. Version-matched to wasmparser
+# because both come from the wasm-tools workspace.
+wat = "1.255"
 
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.

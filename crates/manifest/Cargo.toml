@@ -14,12 +14,14 @@ repository.workspace = true
 eio-expr.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+wasmparser.workspace = true
 
 # Tests only. ABI §11.1 publishes the name and version rules as regexes so every
 # surface enforces one rule; `tests/name.rs` proves this crate's hand-written
 # validators accept exactly the language those regexes describe.
 [dev-dependencies]
 regex.workspace = true
+wat.workspace = true
 
 [lints]
 workspace = true

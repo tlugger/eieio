@@ -1,0 +1,18 @@
+(module
+  ;; Rejected on an ABI 1.0 host: the manifest declares ABI 2.0 (12).
+  (memory (export "memory") 1)
+  (func (export "eio_abi_version") (result i32)
+    i32.const 65536)
+  (func (export "eio_alloc") (param i32) (result i32)
+    i32.const 0)
+  (func (export "eio_free") (param i32 i32))
+  (func (export "eio_configure") (param i32 i32) (result i32)
+    i32.const 0)
+  (func (export "eio_start") (result i32)
+    i32.const 0)
+  (func (export "eio_stop") (result i32)
+    i32.const 0)
+  (func (export "eio_process_signals") (param i32 i32 i32) (result i32)
+    i32.const 0)
+  (@custom "eio:manifest" "{\"name\":\"probe\",\"version\":\"1.0.0\",\"abi\":{\"major\":2,\"minor\":0},\"capabilities\":[],\"inputs\":[{\"name\":\"in\"}]}")
+)

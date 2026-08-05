@@ -165,6 +165,18 @@ impl Abi {
         ((self.major as u32) << 16) | self.minor as u32
     }
 
+    /// Whether a host implementing `host` accepts a block built against this version
+    /// (ABI §12).
+    ///
+    /// Reject a `major` mismatch, accept any `minor` at or below the host's. That is
+    /// the whole policy, and it works because minor versions are purely additive: a
+    /// block built against 1.0 never imports a function 1.1 introduced, so a newer host
+    /// runs it unchanged. The reverse — a block built against 1.1 on a 1.0 host — is
+    /// refused because the block may import something the host does not have.
+    pub const fn accepted_by(self, host: Abi) -> bool {
+        self.major == host.major && self.minor <= host.minor
+    }
+
     /// The inverse of [`packed`](Self::packed).
     pub const fn from_packed(packed: u32) -> Self {
         Abi {

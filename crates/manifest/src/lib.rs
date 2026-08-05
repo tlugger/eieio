@@ -23,6 +23,19 @@
 //! - **Version compatibility.** `abi` is the claim a host checks against the
 //!   module's exported `eio_abi_version` (ABI §12).
 //!
+//! # The module cross-check
+//!
+//! [`validate`] is the other half: given a `.wasm` and optionally a registry manifest,
+//! it answers "can this module be loaded here, and under what manifest" (ABI §4). It
+//! checks that every import is an `eio:*` function that exists, that imports stay within
+//! the declared capabilities, that capability-paired callbacks are present — and absent
+//! when their capability is — that §4.1's exports exist with the right signatures, and
+//! that the embedded and registry manifests agree.
+//!
+//! It deliberately does not validate the WASM itself. MVP conformance (§1) is enforced
+//! by engine configuration, which is complete and which engines already track; a second
+//! partial gate in the loader would only invite the belief that it was checked here.
+//!
 //! # Strict on purpose
 //!
 //! [`parse`] refuses unknown fields, duplicate keys, `null` in place of a missing
@@ -75,13 +88,21 @@
 
 extern crate alloc;
 
+mod abi;
+mod check;
 mod error;
+mod module;
 mod name;
 mod parse;
 mod schema;
 mod validate;
 
-pub use error::{Error, NameSite};
+pub use abi::{
+    CORE_FUNCTIONS, CORE_NAMESPACE, ExportSpec, MEMORY_EXPORT, REQUIRED_EXPORTS, Signature, ValType,
+};
+pub use check::{validate, validate_against};
+pub use error::{Error, ModuleError, NameSite};
+pub use module::{Export, ExportKind, FuncType, Import, MANIFEST_SECTION, Module};
 pub use name::{
     MAX_NAME_BYTES, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN, is_port_name,
     is_ref_name, is_version,
