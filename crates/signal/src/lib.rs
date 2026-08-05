@@ -62,4 +62,4 @@ mod value;
 pub use batch::Batch;
 pub use error::DecodeError;
 pub use signal::Signal;
-pub use value::{MAX_DEPTH, Map, Value};
+pub use value::{MAX_DEPTH, MIN_DEPTH, Map, Value};

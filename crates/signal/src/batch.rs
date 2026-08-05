@@ -8,7 +8,7 @@ use minicbor::encode::{Encode, Encoder, Error as EncodeError, Write};
 
 use crate::error::DecodeError;
 use crate::signal::Signal;
-use crate::value::Value;
+use crate::value::{MAX_DEPTH, MIN_DEPTH, Value};
 
 /// An ordered sequence of signals, encoded as a CBOR array of maps.
 ///
@@ -118,8 +118,30 @@ impl Batch {
     /// Trailing bytes after the batch are an error — a truncated or concatenated
     /// payload is corruption, not a batch with extra data.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor_with_max_depth(bytes, MAX_DEPTH)
+    }
+
+    /// Decodes a batch, bounding nesting at `max_depth` instead of [`MAX_DEPTH`].
+    ///
+    /// The bound is host configuration, like every other budget in the system
+    /// (EXPR §9): a leaf host that runs its expression engine near the floors has
+    /// no reason to accept, and no stack for, the depth a daemon accepts.
+    ///
+    /// `max_depth` is **clamped up** to [`MIN_DEPTH`] rather than obeyed or
+    /// rejected. EXPR §9 defines that floor as what "a conforming expression may
+    /// rely on", making it a guarantee to expressions rather than advice to hosts —
+    /// so honouring a smaller request would break a promise the language makes.
+    /// Clamping cannot fail, and a [`DecodeError`] would be the wrong channel
+    /// anyway: too small a bound is a host misconfiguration, not a property of the
+    /// bytes being decoded.
+    ///
+    /// A host MUST NOT pass a bound below its own configured expression
+    /// `MAX_DEPTH`, or an expression could build a value this then refuses
+    /// (ABI §6.3.1 rule 9). That coupling is the host's to maintain: this crate
+    /// cannot see the expression budget.
+    pub fn from_cbor_with_max_depth(bytes: &[u8], max_depth: u32) -> Result<Self, DecodeError> {
         let mut d = Decoder::new(bytes);
-        let batch = Self::decode_from(&mut d)?;
+        let batch = Self::decode_from(&mut d, max_depth.max(MIN_DEPTH))?;
         if d.position() != bytes.len() {
             return Err(DecodeError::TrailingBytes);
         }
@@ -177,7 +199,7 @@ impl Batch {
     ///
     /// The typed counterpart to the [`Decode`] impl, which cannot carry a
     /// [`DecodeError`] because the trait fixes its error type.
-    fn decode_from(d: &mut Decoder<'_>) -> Result<Self, DecodeError> {
+    fn decode_from(d: &mut Decoder<'_>, max_depth: u32) -> Result<Self, DecodeError> {
         let start = d.position();
         match d.datatype()? {
             Type::Array => {}
@@ -196,7 +218,7 @@ impl Batch {
             .try_reserve(Value::reserve_hint(n))
             .map_err(|_| DecodeError::AllocationFailed)?;
         for _ in 0..n {
-            signals.push(Signal::decode_from(d)?);
+            signals.push(Signal::decode_from(d, max_depth)?);
         }
         Ok(Self { signals })
     }
@@ -204,6 +226,6 @@ impl Batch {
 
 impl<'b, C> Decode<'b, C> for Batch {
     fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
-        Self::decode_from(d).map_err(Into::into)
+        Self::decode_from(d, MAX_DEPTH).map_err(Into::into)
     }
 }

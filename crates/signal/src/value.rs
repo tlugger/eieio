@@ -17,16 +17,30 @@ use crate::error::DecodeError;
 /// order the expression language exposes (EXPR §2, and `(keys m)` in EXPR §7.5).
 pub type Map = BTreeMap<String, Value>;
 
-/// Maximum nesting depth accepted by [`Value`] decoding.
+/// Default maximum nesting depth accepted when decoding.
 ///
 /// Decoding is recursive, so without a bound a batch of deeply nested arrays
 /// would exhaust the host's stack — at a trust boundary, where the "traps are
-/// death" rule (ABI §1) offers no protection because the host, not the guest,
-/// is the one that dies.
+/// death" rule (ABI §1) offers no protection because the host, not the guest, is
+/// the one that dies.
 ///
-/// The value matches `MAX_DEPTH`'s reference default in EXPR §9 so that an
-/// expression can never construct a value this boundary then refuses.
+/// This is a *default*, not a fixed limit: the bound is host configuration, like
+/// every other budget in the system (EXPR §9). Pass your own to
+/// [`Batch::from_cbor_with_max_depth`](crate::Batch::from_cbor_with_max_depth).
+/// The value matches `MAX_DEPTH`'s reference default in EXPR §9.
+///
+/// A host MUST NOT decode with a bound below its own configured expression
+/// `MAX_DEPTH`, or an expression could construct a value this boundary then
+/// refuses (ABI §6.3.1 rule 9).
 pub const MAX_DEPTH: u32 = 128;
+
+/// Lowest nesting bound decoding will honour: EXPR §9's `MAX_DEPTH` floor.
+///
+/// EXPR §9 defines a floor as what "a conforming expression may rely on", so it is
+/// a guarantee made to expressions rather than a suggestion to hosts. A request
+/// below it is therefore clamped up rather than obeyed — see
+/// [`Batch::from_cbor_with_max_depth`](crate::Batch::from_cbor_with_max_depth).
+pub const MIN_DEPTH: u32 = 32;
 
 /// A CBOR value: exactly the type space of ABI §6.3.
 ///
@@ -186,8 +200,18 @@ impl Value {
     /// share one definition of "canonical" instead of each reimplementing the
     /// trailing-byte check.
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::from_cbor_with_max_depth(bytes, MAX_DEPTH)
+    }
+
+    /// Decodes one value, bounding nesting at `max_depth` instead of
+    /// [`MAX_DEPTH`].
+    ///
+    /// `max_depth` is clamped up to [`MIN_DEPTH`]; see
+    /// [`Batch::from_cbor_with_max_depth`](crate::Batch::from_cbor_with_max_depth)
+    /// for why a request below the floor is not honoured.
+    pub fn from_cbor_with_max_depth(bytes: &[u8], max_depth: u32) -> Result<Self, DecodeError> {
         let mut d = Decoder::new(bytes);
-        let value = Self::decode_at(&mut d, 0)?;
+        let value = Self::decode_at(&mut d, 0, max_depth.max(MIN_DEPTH))?;
         if d.position() != bytes.len() {
             return Err(DecodeError::TrailingBytes);
         }
@@ -195,8 +219,12 @@ impl Value {
     }
 
     /// Decodes one value, enforcing eieio's canonical form (ABI §6.3.1).
-    pub(crate) fn decode_at(d: &mut Decoder<'_>, depth: u32) -> Result<Self, DecodeError> {
-        if depth > MAX_DEPTH {
+    pub(crate) fn decode_at(
+        d: &mut Decoder<'_>,
+        depth: u32,
+        max_depth: u32,
+    ) -> Result<Self, DecodeError> {
+        if depth > max_depth {
             return Err(DecodeError::DepthExceeded);
         }
 
@@ -261,7 +289,7 @@ impl Value {
                     .try_reserve(Self::reserve_hint(n))
                     .map_err(|_| DecodeError::AllocationFailed)?;
                 for _ in 0..n {
-                    items.push(Self::decode_at(d, depth + 1)?);
+                    items.push(Self::decode_at(d, depth + 1, max_depth)?);
                 }
                 Ok(Value::Array(items))
             }
@@ -286,7 +314,7 @@ impl Value {
                     {
                         return Err(DecodeError::MapKeysUnordered);
                     }
-                    let value = Self::decode_at(d, depth + 1)?;
+                    let value = Self::decode_at(d, depth + 1, max_depth)?;
                     map.insert(key, value);
                 }
                 Ok(Value::Map(map))
@@ -421,6 +449,6 @@ impl<'b, C> Decode<'b, C> for Value {
     /// minicbor's, so the classification is flattened to text here; callers
     /// needing it use [`Value::from_cbor`].
     fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
-        Self::decode_at(d, 0).map_err(Into::into)
+        Self::decode_at(d, 0, MAX_DEPTH).map_err(Into::into)
     }
 }

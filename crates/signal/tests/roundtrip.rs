@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use eio_signal::{Batch, DecodeError, MAX_DEPTH, Map, Signal, Value};
+use eio_signal::{Batch, DecodeError, MAX_DEPTH, MIN_DEPTH, Map, Signal, Value};
 
 /// Wraps one value under the key `"v"` in a one-signal batch.
 fn batch_of(value: Value) -> Batch {
@@ -295,15 +295,6 @@ fn equality_is_exact_not_numeric() {
 /// rejection is an error, not a stack overflow.
 #[test]
 fn depth_limit_boundary() {
-    /// Builds `depth` nested arrays around a null.
-    fn nest(depth: u32) -> Value {
-        let mut value = Value::Null;
-        for _ in 0..depth {
-            value = Value::Array(vec![value]);
-        }
-        value
-    }
-
     // The signal's own map decodes at depth 0, so a value nested `k` deep has
     // its innermost item at depth `k + 1`. The boundary is therefore exactly
     // `MAX_DEPTH - 1` accepted / `MAX_DEPTH` rejected — pinned on both sides so
@@ -320,6 +311,80 @@ fn depth_limit_boundary() {
         matches!(err, DecodeError::DepthExceeded),
         "unexpected error: {err:?}"
     );
+}
+
+/// Builds `depth` nested arrays around a null.
+fn nest(depth: u32) -> Value {
+    let mut value = Value::Null;
+    for _ in 0..depth {
+        value = Value::Array(vec![value]);
+    }
+    value
+}
+
+/// The nesting bound is host configuration, not a fixed limit (ABI §6.3.1 rule 9).
+///
+/// A leaf host running its expression engine near EXPR §9's floors has neither
+/// reason nor stack for the depth a daemon accepts.
+#[test]
+fn depth_limit_is_configurable() {
+    // 40 levels: within the 128 default, past a requested bound of 34.
+    let bytes = batch_of(nest(40)).to_cbor();
+
+    assert!(
+        Batch::from_cbor(&bytes).is_ok(),
+        "40 levels is within the default bound"
+    );
+    assert!(
+        Batch::from_cbor_with_max_depth(&bytes, MAX_DEPTH).is_ok(),
+        "passing the default explicitly must match from_cbor"
+    );
+
+    let err = Batch::from_cbor_with_max_depth(&bytes, 34)
+        .expect_err("40 levels must exceed a requested bound of 34");
+    assert!(matches!(err, DecodeError::DepthExceeded), "{err:?}");
+
+    // A bare value takes the same bound.
+    let value_bytes = nest(40).to_cbor();
+    assert!(Value::from_cbor(&value_bytes).is_ok());
+    assert!(matches!(
+        Value::from_cbor_with_max_depth(&value_bytes, 34),
+        Err(DecodeError::DepthExceeded)
+    ));
+}
+
+/// A bound below EXPR §9's floor is clamped up, not honoured.
+///
+/// The floor is what "a conforming expression may rely on" (EXPR §9) — a promise
+/// to expressions, so a host cannot opt out of it. Pinned from both sides: MIN_DEPTH
+/// levels still decode however small the request, and one level past the floor
+/// still fails, which proves the clamp lands *on* the floor rather than above it.
+#[test]
+fn depth_limit_cannot_go_below_the_expr_floor() {
+    // The floor guarantees MIN_DEPTH levels of nesting are decodable. A value
+    // nested MIN_DEPTH - 1 deep sits at depth MIN_DEPTH once wrapped in its signal
+    // map, matching the accounting in depth_limit_boundary.
+    let at_floor = batch_of(nest(MIN_DEPTH - 1)).to_cbor();
+    for requested in [0, 1, 8, MIN_DEPTH - 1, MIN_DEPTH] {
+        assert!(
+            Batch::from_cbor_with_max_depth(&at_floor, requested).is_ok(),
+            "a requested bound of {requested} must be clamped up to MIN_DEPTH"
+        );
+    }
+
+    // One level deeper than the floor is refused when the clamp is what applies,
+    // so the clamp is not silently raising the bound further than claimed.
+    let past_floor = batch_of(nest(MIN_DEPTH)).to_cbor();
+    assert!(
+        matches!(
+            Batch::from_cbor_with_max_depth(&past_floor, 0),
+            Err(DecodeError::DepthExceeded)
+        ),
+        "the clamp must land on MIN_DEPTH, not above it"
+    );
+    // The same bytes decode fine under the default, confirming the refusal above
+    // is the requested bound and not a property of the input.
+    assert!(Batch::from_cbor(&past_floor).is_ok());
 }
 
 /// The accessor surface later consumers need (SDK-SPEC §2).

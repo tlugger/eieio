@@ -6,7 +6,7 @@ use minicbor::decode::{Decode, Decoder, Error as CborError};
 use minicbor::encode::{Encode, Encoder, Error as EncodeError, Write};
 
 use crate::error::DecodeError;
-use crate::value::{Map, Value};
+use crate::value::{MAX_DEPTH, Map, Value};
 
 /// One signal: a schemaless, dict-shaped CBOR map with text-string keys.
 ///
@@ -144,8 +144,8 @@ impl Signal {
     ///
     /// The typed counterpart to the [`Decode`] impl, which cannot carry a
     /// [`DecodeError`] because the trait fixes its error type.
-    pub(crate) fn decode_from(d: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match Value::decode_at(d, 0)? {
+    pub(crate) fn decode_from(d: &mut Decoder<'_>, max_depth: u32) -> Result<Self, DecodeError> {
+        match Value::decode_at(d, 0, max_depth)? {
             Value::Map(fields) => Ok(Self { fields }),
             _ => Err(DecodeError::SignalNotAMap),
         }
@@ -154,6 +154,6 @@ impl Signal {
 
 impl<'b, C> Decode<'b, C> for Signal {
     fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, CborError> {
-        Self::decode_from(d).map_err(Into::into)
+        Self::decode_from(d, MAX_DEPTH).map_err(Into::into)
     }
 }
