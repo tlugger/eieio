@@ -6,9 +6,10 @@
 //! Designer's expression editor. `no_std` (`alloc` permitted) is therefore a hard
 //! requirement.
 //!
-//! This crate currently provides the **lexer and parser** (EXPR §3). Static
-//! analysis (EXPR §10), the interpreter (EXPR §4–6), the builtin library (EXPR §7)
-//! and the evaluation budgets (EXPR §9) land in their own issues.
+//! This crate currently provides the **lexer and parser** (EXPR §3) and
+//! **configure-time static analysis** (EXPR §10). The interpreter (EXPR §4–6), the
+//! builtin library (EXPR §7) and the evaluation budgets (EXPR §9) land in their own
+//! issues.
 //!
 //! # What the language deliberately lacks
 //!
@@ -48,13 +49,17 @@
 
 extern crate alloc;
 
+mod analyze;
 mod ast;
+mod builtin;
 mod error;
 mod lex;
 mod parse;
 mod span;
 
+pub use analyze::{Analysis, analyze, analyze_source};
 pub use ast::{Expr, ExprKind};
+pub use builtin::{BUILTINS, SPECIAL_FORMS, is_builtin, is_special_form};
 pub use error::{Error, ErrorCode};
 pub use parse::{
     MAX_DEPTH, MAX_EXPR_BYTES, MIN_DEPTH, MIN_EXPR_BYTES, ParseLimits, parse, parse_with_limits,

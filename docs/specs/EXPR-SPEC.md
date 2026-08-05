@@ -122,7 +122,7 @@ Three arguments, always. `else` is mandatory — an expression must produce a va
 
 ### 5.2 `(let ((name expr) ...) body)`
 
-Sequential (`let*`-style) binding: each binding sees earlier ones. Bindings are **not** recursive — a binding's expression cannot reference its own name. Shadowing builtins is permitted; shadowing `true`/`false`/`null` is a parse error.
+Sequential (`let*`-style) binding: each binding sees earlier ones. Bindings are **not** recursive — a binding's expression cannot reference its own name. Rebinding a name already bound in the same binding list is ordinary `let*` and is permitted. Shadowing builtins is permitted; shadowing `true`/`false`/`null` is a parse error; shadowing one of the five special forms (§5) MUST be rejected by static analysis (§10). The last of those is not a style rule: §4 tests a list head against the special forms *before* resolving symbols, so a bound `if` would be inert in the one position that reads like a use of it.
 
 ### 5.3 `(and expr ...)` / `(or expr ...)`
 
@@ -130,7 +130,7 @@ Short-circuit. `and` returns the first falsy value or the last value; `or` retur
 
 ### 5.4 `(fn (param ...) body)`
 
-Anonymous function, lexical closure over the enclosing environment. Fixed arity; arity mismatch at application is an error.
+Anonymous function, lexical closure over the enclosing environment. Fixed arity; arity mismatch at application is an error. Parameters bind simultaneously, so a repeated parameter name MUST be rejected — unlike a `let` binding list, where sequential scoping makes rebinding meaningful. A parameter MUST NOT shadow a special form, for the reason given in §5.2.
 
 Functions exist so that `map`/`filter`/`reduce` exist (§7.5) — batch signals carry arrays, and per-element work without them forces logic back into custom blocks, which is the failure mode this language exists to prevent. Deliberate restrictions preserving termination:
 
@@ -273,7 +273,18 @@ At configure time (ABI §7.1), the host MUST parse every property expression and
 2. Compute **signal dependence**: an expression is signal-dependent iff any sigil (`$`, `$name`) appears in it. This is the constant-folding predicate required by ABI §7.1 — signal-independent expressions are evaluated once and cached.
 3. SHOULD reject statically-unbound symbols (every symbol resolvable to a binding form or builtin) at configure time rather than first evaluation. Catching typos at deploy, not at 2 a.m., is the point.
 
-Hosts MAY additionally constant-fold sub-expressions, arity-check statically, or compile to bytecode — all invisible if conformance vectors pass.
+Item 3 obliges more than a symbol-table lookup. Resolving symbols requires knowing what each binding form binds, so a host implementing item 3 MUST also validate the *shape* of the five special forms (§5) in order to do it at all: what `(let (x) x)` binds has no answer, and a host that guessed would accept an expression that cannot evaluate. Such a host MUST reject:
+
+- a `let` whose bindings are not a list of `(name expr)` pairs with a symbol in the name position, or which lacks exactly one body expression;
+- a `fn` whose parameters are not a list of symbols, which repeats a parameter name, or which lacks exactly one body expression;
+- an `if` with other than three arguments (§5.1);
+- a binding or parameter that shadows a special form (§5.2, §5.4);
+- a special form appearing anywhere but the head of a list, since §4 would then resolve it as an ordinary symbol and find nothing;
+- an empty list `()`, which has nothing to apply (§4).
+
+Diagnostics SHOULD be collected rather than reported one at a time: an expression editor (DESIGNER §5) shows every mistake at once, and a deploy that surfaces one typo per attempt wastes the operator's time. Which code a host attaches to each rejection is diagnostic rather than normative — hosts MUST agree on *whether* an expression is statically valid, not on how they describe a fault (cf. ABI §6.3.1).
+
+Hosts MAY additionally constant-fold sub-expressions, arity-check builtin applications, or compile to bytecode — all invisible if conformance vectors pass.
 
 ---
 
