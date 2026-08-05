@@ -34,9 +34,9 @@ nostd_targets := target_cortex_m4f + " " + target_esp32c3
 
 # The ★ crates, by package name (DAEMON-SPEC §1 maps directory → package).
 # Listed explicitly rather than globbed so a partially populated workspace still
-# passes. Each epic appends its own crate as it lands: eio-manifest (eieio-m7o),
-# eio-host-core (eieio-35h), eio-sdk (eieio-7d8).
-nostd_crates := "eio-signal eio-expr"
+# passes. Each epic appends its own crate as it lands: eio-host-core (eieio-35h),
+# eio-sdk (eieio-7d8).
+nostd_crates := "eio-signal eio-expr eio-manifest"
 
 # List the available recipes.
 default:

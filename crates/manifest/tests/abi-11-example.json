@@ -1,0 +1,20 @@
+{
+  "name": "filter",
+  "version": "1.2.0",
+  "abi": { "major": 1, "minor": 0 },
+  "description": "Route signals by predicate",
+  "capabilities": [],
+  "inputs":  [ { "name": "in" } ],
+  "outputs": [ { "name": "true" }, { "name": "false" } ],
+  "properties": [
+    {
+      "name": "predicate",
+      "type": "bool",
+      "description": "Evaluated per signal",
+      "default": "(true)",
+      "required": true
+    }
+  ],
+  "targets": [ "wasm32-unknown-unknown" ],
+  "aot": [ "esp32s3" ]
+}

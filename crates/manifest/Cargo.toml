@@ -1,0 +1,25 @@
+[package]
+name = "eio-manifest"
+description = "Block manifest schema types, parsing, and validation for eieio (ABI-SPEC §11)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Property defaults are expressions, and an unparsable default is an invalid
+# manifest (ABI §11.1), so the real parser and analyser are the only acceptable
+# validators — a second, approximate one would disagree eventually.
+eio-expr.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Tests only. ABI §11.1 publishes the name and version rules as regexes so every
+# surface enforces one rule; `tests/name.rs` proves this crate's hand-written
+# validators accept exactly the language those regexes describe.
+[dev-dependencies]
+regex.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,7 @@
 resolver = "3"
 # Crates are added by their own epics. This list grows; it is never a glob,
 # because a glob that matches nothing is a hard error in cargo.
-members = ["crates/expr", "crates/signal"]
+members = ["crates/expr", "crates/manifest", "crates/signal"]
 
 [workspace.package]
 version = "0.1.0"
@@ -24,12 +24,28 @@ repository = "https://github.com/tlugger/eieio"
 [workspace.dependencies]
 minicbor = { version = "2.3", default-features = false, features = ["alloc"] }
 
+# The manifest is JSON (ABI-SPEC §11) and `manifest` is a ★ crate, so its parser
+# has to run with `alloc` and no `std` — including on a target without atomics.
+# These two do (DAEMON-SPEC §1 records the choice and the alternatives). Pinned
+# here rather than per-crate for the same reason as minicbor: what a manifest
+# means must not vary by which crate read it.
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
 # Dev-dependency only. The ★ crates stay no_std, but their *tests* build for the
 # host, so a std-using test dependency is fine and `check-nostd` never sees it.
 proptest = "1.11"
 
+# Dev-dependency only, and specifically not a runtime one: ABI §11.1 states the
+# name and version rules as regexes so that every surface enforces the same rule,
+# and `manifest`'s hand-written validators have to be provably equivalent to them.
+# The proof needs a regex engine; the leaf runtime does not.
+regex = "1.11"
+
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.
+eio-expr = { path = "crates/expr", version = "0.1.0" }
+eio-manifest = { path = "crates/manifest", version = "0.1.0" }
 eio-signal = { path = "crates/signal", version = "0.1.0" }
 
 # Lint levels are shared here; the -D warnings escalation belongs to the `just
