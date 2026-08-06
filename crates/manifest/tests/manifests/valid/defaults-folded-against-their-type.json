@@ -1,0 +1,30 @@
+{
+  "name": "gate",
+  "version": "0.1.0",
+  "abi": {
+    "major": 1,
+    "minor": 0
+  },
+  "properties": [
+    {
+      "name": "promoted",
+      "type": "float",
+      "default": "(* 60 1000)"
+    },
+    {
+      "name": "exact-power-of-two",
+      "type": "float",
+      "default": "4611686018427387904"
+    },
+    {
+      "name": "cannot-evaluate",
+      "type": "int",
+      "default": "(/ 1 0)"
+    },
+    {
+      "name": "signal-dependent",
+      "type": "bytes",
+      "default": "$blob"
+    }
+  ]
+}

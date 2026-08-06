@@ -42,7 +42,10 @@ fn spec_example() {
     assert_eq!(property.name, "predicate");
     assert_eq!(property.ty, PropertyType::Bool);
     assert_eq!(property.description, "Evaluated per signal");
-    assert_eq!(property.default.as_deref(), Some("(true)"));
+    // `true`, not `(true)`: a list applies its head, and the literal `true` is not a
+    // function, so `(true)` is a TYPE error at evaluation (EXPR §4). §11's example said
+    // the latter until eieio-m7o.4 folded defaults and it stopped being theoretical.
+    assert_eq!(property.default.as_deref(), Some("true"));
     assert!(property.required);
 }
 

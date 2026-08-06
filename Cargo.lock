@@ -128,6 +128,7 @@ version = "0.1.0"
 dependencies = [
  "boon",
  "eio-expr",
+ "eio-signal",
  "regex",
  "serde",
  "serde_json",

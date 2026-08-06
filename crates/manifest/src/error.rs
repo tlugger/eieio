@@ -6,6 +6,7 @@ use core::fmt;
 use crate::abi::Signature;
 use crate::module::{ExportKind, FuncType};
 use crate::name::{MAX_NAME_BYTES, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN};
+use crate::schema::PropertyType;
 use crate::schema::{Abi, Capability};
 
 /// The reason a manifest was rejected.
@@ -78,6 +79,22 @@ pub enum Error {
         property: String,
         /// The expression error, whose span is a byte offset into the default.
         source: eio_expr::Error,
+    },
+
+    /// A signal-independent property `default` folded to a value its declared `type`
+    /// does not admit (ABI §11.1, default type-checking).
+    ///
+    /// Only ever reported for a default that evaluates *successfully* against no
+    /// signal. A signal-dependent default is not evaluated here, and one that fails to
+    /// evaluate is not a manifest defect — see `validate_expression`.
+    DefaultTypeMismatch {
+        /// The property whose default contradicts its own declaration.
+        property: String,
+        /// The type the property declares.
+        declared: PropertyType,
+        /// The type the default actually folded to. Spans the whole ABI §6.3 space, so
+        /// it may name `null`, `array` or `map` — types no `type` but `any` admits.
+        folded: &'static str,
     },
 }
 
@@ -163,6 +180,18 @@ impl fmt::Display for Error {
                 write!(
                     f,
                     "properties: default for {property:?} is invalid: {source}"
+                )
+            }
+            Error::DefaultTypeMismatch {
+                property,
+                declared,
+                folded,
+            } => {
+                write!(
+                    f,
+                    "properties: default for {property:?} evaluates to {folded}, \
+                     but the property declares {}",
+                    declared.as_str()
                 )
             }
         }

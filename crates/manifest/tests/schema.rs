@@ -8,10 +8,15 @@
 //!
 //! # The schema is deliberately a subset
 //!
-//! Four §11.1 rules cannot be expressed in JSON Schema draft 2020-12, so the fixture corpus
+//! Five §11.1 rules cannot be expressed in JSON Schema draft 2020-12, so the fixture corpus
 //! is classified by directory. The rules: uniqueness of port and property names, rejection
 //! of duplicate JSON object keys, whether a property `default` is a parseable expression,
+//! whether a signal-independent `default` evaluates to a value its declared `type` admits,
 //! and the document size bound.
+//!
+//! The fourth needs the expression interpreter, so it is not a limitation of JSON Schema so
+//! much as of anything that is not an eieio host: `"type": "int"` with `"default": "true"`
+//! is structurally impeccable and semantically impossible.
 //!
 //! The first one deserves its detail, because a `uniqueItems: true` on `inputs` looks like
 //! it would work — and today it would, since a `Port` has exactly one field, so two ports

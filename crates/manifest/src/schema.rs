@@ -17,6 +17,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use eio_signal::Value;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// A block manifest (ABI §11).
@@ -338,4 +339,80 @@ impl PropertyType {
             PropertyType::Any => "any",
         }
     }
+
+    /// Whether `value` satisfies this type (ABI §11.1, property types).
+    ///
+    /// **The one implementation of that rule.** A host checks every evaluated property
+    /// value against it (ABI §7.1) and this crate checks a folded default against it at
+    /// validation time; two implementations of "is this an acceptable float" would
+    /// eventually disagree, and the disagreement would be a manifest that one host
+    /// accepts and another rejects.
+    ///
+    /// The only implicit conversion is int → float, and only when it loses nothing:
+    /// [`is_exactly_a_float`] admits every power of two and refuses `2^53 + 1`, the
+    /// first integer `binary64` cannot represent. A float never satisfies `int`, and
+    /// above the boundary `(float n)` is how an expression asks for the rounding —
+    /// EXPR §7.3 is where that loss is documented, and this is not a second place for
+    /// it to happen quietly.
+    /// Matched on `self` rather than on the pair, so the compiler checks that every
+    /// property type has an answer. A `(self, value)` match would need forty-eight arms
+    /// or a catch-all, and a catch-all would silently answer "no" for a type added later
+    /// — a quiet wrong answer in the one place this rule exists.
+    pub fn accepts(self, value: &Value) -> bool {
+        match self {
+            PropertyType::Any => true,
+            PropertyType::Bool => matches!(value, Value::Bool(_)),
+            PropertyType::Int => matches!(value, Value::Int(_)),
+            PropertyType::Float => match value {
+                Value::Float(_) => true,
+                Value::Int(n) => is_exactly_a_float(*n),
+                _ => false,
+            },
+            PropertyType::String => matches!(value, Value::Str(_)),
+            PropertyType::Bytes => matches!(value, Value::Bytes(_)),
+        }
+    }
+
+    /// `value` as this type, or [`None`] if it does not satisfy it.
+    ///
+    /// What a host encodes for `prop` (ABI §7.1): an int reaching a `float` property
+    /// comes back as a float, so the guest decodes the type that was declared and never
+    /// has to handle both. Every other accepted value passes through untouched.
+    ///
+    /// Returns `Some` exactly when [`Self::accepts`] is true — `accepts` decides, this
+    /// applies what it licensed, and `conform_agrees_with_accepts` pins the pair.
+    pub fn conform(self, value: Value) -> Option<Value> {
+        if !self.accepts(&value) {
+            return None;
+        }
+        Some(match (self, value) {
+            (PropertyType::Float, Value::Int(n)) => Value::Float(n as f64),
+            (_, value) => value,
+        })
+    }
+}
+
+/// Whether `n` is exactly representable as a `binary64` float.
+///
+/// Counted in bits rather than tested by converting, for two reasons. `n as f64 as i64`
+/// looks like the obvious check and is wrong at exactly one value: `i64::MAX` rounds *up*
+/// to `2^63`, and Rust's float→int cast saturates, so it comes back as `i64::MAX` and the
+/// round trip reports an exactness that did not happen. And this way no float arithmetic
+/// runs at all, which matters on `riscv32imc` — a leaf target with no FPU, where every
+/// cast is a soft-float call.
+///
+/// A `binary64` significand holds 53 bits, and the exponent absorbs trailing zeros. So
+/// the question is how many bits lie between the highest set bit and the lowest: `2^62`
+/// is exact (one significant bit), `2^53 + 1` is not (fifty-four), and `i64::MIN` is
+/// exact for the same reason `2^62` is.
+const fn is_exactly_a_float(n: i64) -> bool {
+    // `unsigned_abs`, because negating `i64::MIN` overflows and its magnitude is the
+    // interesting case.
+    let magnitude = n.unsigned_abs();
+    if magnitude == 0 {
+        // Zero has no significant bits, and the arithmetic below would underflow.
+        return true;
+    }
+    let significant = 64 - magnitude.leading_zeros() - magnitude.trailing_zeros();
+    significant <= 53
 }

@@ -12,6 +12,10 @@ repository.workspace = true
 # manifest (ABI §11.1), so the real parser and analyser are the only acceptable
 # validators — a second, approximate one would disagree eventually.
 eio-expr.workspace = true
+# A property `type` is a constraint on an evaluated `Value` (ABI §11.1), and
+# `PropertyType::accepts` names that type in this crate's public API — so the
+# dependency is direct rather than borrowed through `eio-expr`.
+eio-signal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wasmparser.workspace = true

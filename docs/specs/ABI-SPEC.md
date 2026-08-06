@@ -210,7 +210,7 @@ Properties are always expressions, evaluated **host-side, per-signal, on demand*
 `prop(prop_id, signal_idx, buf, cap) -> i32`
 
 - `signal_idx` identifies a signal **within the batch of the current `eio_process_signals` call**, explicitly — no hidden cursor. Outside `process_signals`, or for signal-independent evaluation, pass `SIGNAL_NONE`.
-- Result is the CBOR-encoded evaluated value, written to `(buf, cap)`.
+- Result is the CBOR-encoded evaluated value, written to `(buf, cap)`. The value MUST satisfy the property's declared `type` (§11.1) and MUST be encoded as that type — an int promoted to a `float` property is encoded as a float, so the guest decodes what was declared. A value that does not satisfy it is `RESULT_TYPE` (EXPR §8), returned as `ERR_EXPR`.
 - Return convention (§8): `0..=cap` bytes written; `> cap` = required size, nothing written, guest grows buffer and retries; `< 0` = error.
 - The host MUST cache evaluation results keyed by `(instance, prop_id, signal_idx)` for the duration of the current callback, so the grow-and-retry path does not re-evaluate.
 - **Constant folding:** the host MUST parse all property expressions at configure time and SHOULD detect signal-independence statically; signal-independent expressions are evaluated once and served from cache regardless of `signal_idx`.
@@ -336,7 +336,7 @@ JSON. Published in the registry alongside the OCI artifact (SCOPE §3.6) and emb
       "name": "predicate",
       "type": "bool",
       "description": "Evaluated per signal",
-      "default": "(true)",
+      "default": "true",
       "required": true
     }
   ],
@@ -347,7 +347,7 @@ JSON. Published in the registry alongside the OCI artifact (SCOPE §3.6) and emb
 
 Notes:
 
-- **Every property is an expression** (design discussion §4, option (b)). There is no static/expression kind split. `type` declares what the expression must evaluate to (`bool | int | float | string | bytes | any`); the host type-checks the evaluated value and returns `ERR_EXPR` on mismatch. Constants are trivial expressions; the Designer MAY render simple literals as plain input fields — a UI affordance, not an ABI distinction.
+- **Every property is an expression** (design discussion §4, option (b)). There is no static/expression kind split. `type` declares what the expression must evaluate to (`bool | int | float | string | bytes | any`); the host type-checks the evaluated value and returns `ERR_EXPR` on mismatch. §11.1 says which values satisfy which type, and is where the one implicit conversion — int to float, when exact — is stated. Constants are trivial expressions; the Designer MAY render simple literals as plain input fields — a UI affordance, not an ABI distinction.
 - `default` is an expression string in the platform's micro-Lisp (SCOPE §3.5; expression language grammar is specified separately).
 - `capabilities` ⊇ imported `eio:*` namespaces minus `eio:core` (§4.3).
 - Port order in `inputs`/`outputs` defines port indices (§5.2).
@@ -356,7 +356,7 @@ Notes:
 
 The JSON Schema for the manifest ships in the repo as **`schemas/manifest.schema.json`** (draft 2020-12), beside the schemas of the other published formats. It lives at the repository root rather than inside a crate because its consumers are not Rust: the Designer's config panels, agent tooling, and editor autocomplete all read it directly.
 
-**This section and §11.1 are the normative prose; the schema is a structural gate derived from them.** Four §11.1 rules cannot be expressed in JSON Schema and the schema therefore does not enforce them: uniqueness of port and property names — `uniqueItems` compares whole items rather than a chosen property, so it would coincidentally catch two *identical* ports and stop doing so as soon as a port carries a second field; rejection of duplicate JSON object keys; whether a property `default` parses as an expression; and the document size bound. A manifest that validates against the schema MAY still be rejected for one of those, and a host MUST apply the prose regardless of whether a document validated. The repository tests the boundary in both directions, so the subset stays a documented one rather than an unnoticed gap.
+**This section and §11.1 are the normative prose; the schema is a structural gate derived from them.** Five §11.1 rules cannot be expressed in JSON Schema and the schema therefore does not enforce them: uniqueness of port and property names — `uniqueItems` compares whole items rather than a chosen property, so it would coincidentally catch two *identical* ports and stop doing so as soon as a port carries a second field; rejection of duplicate JSON object keys; whether a property `default` parses as an expression; whether a signal-independent `default` evaluates to a value its declared `type` admits; and the document size bound. A manifest that validates against the schema MAY still be rejected for one of those, and a host MUST apply the prose regardless of whether a document validated. The repository tests the boundary in both directions, so the subset stays a documented one rather than an unnoticed gap.
 
 The manifest is also the Designer's config-panel source and the agent-tooling surface (SCOPE §4) — descriptions are user-facing documentation and SHOULD be written as such, in the schema as much as in the manifest.
 
@@ -398,6 +398,30 @@ These are stated as regexes so that one rule reaches every surface: `manifest.sc
 **Targets.** `targets` MUST contain `wasm32-unknown-unknown`. Every block ships the portable module (§1); `aot` entries are additions published alongside it, never replacements for it.
 
 **Default expressions.** A `default`, when present, MUST parse and MUST pass static analysis (EXPR §10) — the same configure-time gate a service-supplied expression gets, so a manifest cannot ship a default naming a function that does not exist. A default MAY be signal-dependent; it is an expression like any other property value, not a constant.
+
+**Property types.** A property's declared `type` is a constraint on the *evaluated* value, checked every time the expression is evaluated (§7.1). These values satisfy it:
+
+|`type`|Satisfied by|
+|---|---|
+|`bool`|a bool|
+|`int`|an int|
+|`float`|a float, **or an int whose value is exactly representable in `binary64`**|
+|`string`|a text string|
+|`bytes`|a byte string|
+|`any`|any value in the §6.3 space|
+
+A host MUST encode a promoted int as a float, so a guest reading a `float` property always decodes a float and never has to handle both. Failure is `RESULT_TYPE` (EXPR §8), surfaced through the ABI as `ERR_EXPR` (§7.1).
+
+Promotion goes one way and only when it is exact. A float never satisfies `int`: the conversion loses the fractional part, and `(int x)` is how an expression asks for it. An int satisfies `float` only when no information is lost, which is a question about significant bits rather than about magnitude — a `binary64` significand holds 53 of them and the exponent absorbs trailing zeros, so `2^62` is exactly representable while `2^53 + 1` is not. Hosts MUST decide it that way rather than by converting and converting back: `i64::MAX` rounds up to `2^63`, which a saturating float→int conversion returns as `i64::MAX`, reporting an exactness that did not happen. Where an int is not exactly a float, `(float n)` is how an expression asks for the rounding, which is where EXPR §7.3 documents the loss. This is the same shape as every other conversion decision in EXPR §7.8: one implicit rule, exact, with the lossy reading spelled out by hand.
+
+**Default type-checking.** A `default` that is **signal-independent** (EXPR §10) MUST be evaluated at manifest-validation time, and its value MUST satisfy the declared `type`; a manifest whose folded default contradicts its own declaration MUST be rejected. `"type": "int"` with `"default": "true"` cannot ever produce an int, so it is a defect in the document rather than a configuration failure waiting to happen.
+
+Two limits on that, both deliberate:
+
+- A **signal-dependent** default MUST NOT be evaluated — there is no signal to evaluate it against — and is checked per signal at run time like any other property expression.
+- A default that **fails to evaluate** is NOT a manifest defect. An evaluation failure is a per-signal outcome (§7.1), and budgets are host configuration (EXPR §9), so rejecting a manifest for one would make a document's validity depend on which host read it — two hosts MUST agree on whether a manifest is valid. `"default": "(/ 1 0)"` is therefore a valid declaration that fails with `ERR_EXPR` at configure time.
+
+One consequence follows from EXPR rather than from anything here: the expression language has no `bytes` literal and no builtin that produces one (EXPR §3.2, §7), so a `bytes` property cannot have a signal-independent default at all. Its default, if it has one, reads the signal.
 
 **`required` and `default`.** `default` is the value the property takes when the service does not supply one; it is what makes an instance configurable without the deployer touching every field. `required: true` means configuration MUST fail when the property has no value at configure time — from the service file or from `default`, either satisfies it. `required` is therefore the enforceable half of the pair and the two do not constrain each other in the manifest: any combination of `required` and `default` is a valid declaration, including both (a required property with a suggested starting value, as in the example above).
 
