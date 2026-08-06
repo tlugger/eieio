@@ -18,7 +18,7 @@ use eio_signal::{Map, Value};
 use crate::error::ErrorCode;
 use crate::eval::Evaluator;
 use crate::num::{self, Num};
-use crate::operand::{Function, Operand};
+use crate::operand::{Function, Operand, Shared};
 
 use super::{Built, Call, boolean};
 
@@ -57,9 +57,12 @@ pub(super) fn dict<'a>(ev: &mut Evaluator<'a>, args: &[Operand<'a>], call: &Call
 }
 
 /// `(get c k)` — a missing key or an out-of-range index is `MISSING` (EXPR §7.5).
+///
+/// Shares rather than copies: `(get $ k)` hands back a borrow of the signal's own
+/// attribute, so reading one attribute of a hundred costs one pointer.
 pub(super) fn get<'a>(_ev: &mut Evaluator<'a>, args: &[Operand<'a>], call: &Call<'a>) -> Built<'a> {
-    match element(call.value(args, 0)?, call.value(args, 1)?) {
-        Lookup::Found(value) => Ok(Operand::Data(value.clone())),
+    match element(call.shared(args, 0)?, call.value(args, 1)?) {
+        Lookup::Found(value) => Ok(Operand::Data(value)),
         Lookup::Absent => Err(call.arg_error(1, ErrorCode::Missing, ABSENT)),
         Lookup::WrongKey => Err(call.arg_error(1, ErrorCode::Type, WRONG_KEY)),
     }
@@ -76,9 +79,9 @@ pub(super) fn get_or<'a>(
 ) -> Built<'a> {
     // Checked before the lookup, so `(get-or m k abs)` is refused either way rather
     // than only when the key turns out to be absent.
-    let default = call.value(args, 2)?;
-    match element(call.value(args, 0)?, call.value(args, 1)?) {
-        Lookup::Found(value) => Ok(Operand::Data(value.clone())),
+    let default = call.shared(args, 2)?;
+    match element(call.shared(args, 0)?, call.value(args, 1)?) {
+        Lookup::Found(value) => Ok(Operand::Data(value)),
         Lookup::Absent => Ok(Operand::Data(default.clone())),
         Lookup::WrongKey => Err(call.arg_error(1, ErrorCode::Type, WRONG_KEY)),
     }
@@ -90,28 +93,34 @@ pub(super) fn get_in<'a>(
     args: &[Operand<'a>],
     call: &Call<'a>,
 ) -> Built<'a> {
-    let mut current = call.value(args, 0)?;
+    // Cloned so the walk can rebind it, which costs a pointer rather than the container:
+    // each step projects into the one before it.
+    let mut current = call.shared(args, 0)?.clone();
     let path = call.array(args, 1)?;
     ev.spend_each(call.span(), path.len())?;
 
     for key in path {
-        current = match element(current, key) {
+        current = match element(&current, key) {
             Lookup::Found(value) => value,
             Lookup::Absent => return Err(call.arg_error(1, ErrorCode::Missing, ABSENT)),
             Lookup::WrongKey => return Err(call.arg_error(1, ErrorCode::Type, WRONG_KEY)),
         };
     }
     // An empty path is the container itself, which is what a fold over no steps means.
-    Ok(Operand::Data(current.clone()))
+    Ok(Operand::Data(current))
 }
 
 /// `(has? c k)` — membership: a map key, or a valid array index (EXPR §7.5).
 pub(super) fn has<'a>(_ev: &mut Evaluator<'a>, args: &[Operand<'a>], call: &Call<'a>) -> Built<'a> {
-    match element(call.value(args, 0)?, call.value(args, 1)?) {
-        Lookup::Found(_) => boolean(true),
-        Lookup::Absent => boolean(false),
-        Lookup::WrongKey => Err(call.arg_error(1, ErrorCode::Type, WRONG_KEY)),
+    let container = call.value(args, 0)?;
+    let key = call.value(args, 1)?;
+    if !keyable(container, key) {
+        return Err(call.arg_error(1, ErrorCode::Type, WRONG_KEY));
     }
+    // Answers from a borrow rather than through [`element`], which would share out a
+    // value only to drop it — and sharing out of a *constructed* container copies the
+    // element it finds.
+    boolean(pick(container, key).is_some())
 }
 
 /// `(first a)` — empty is `MISSING` (EXPR §7.5, §8).
@@ -225,19 +234,25 @@ pub(super) fn range<'a>(
 /// `(map f a)` — `f` unary (EXPR §7.5).
 pub(super) fn map<'a>(ev: &mut Evaluator<'a>, args: &[Operand<'a>], call: &Call<'a>) -> Built<'a> {
     let function = call.func(args, 0)?.clone();
-    let items = call.array(args, 1)?;
-    ev.spend_each(call.span(), items.len())?;
+    let length = call.array(args, 1)?.len();
+    let source = call.shared(args, 1)?.clone();
+    ev.spend_each(call.span(), length)?;
 
-    let mut out = Vec::with_capacity(items.len());
-    for item in items {
-        match apply_one(ev, &function, item.clone(), call)? {
-            Operand::Data(value) => out.push(value),
+    let mut out = Vec::with_capacity(length);
+    // `element` bounds the walk, so there is no index that has to be trusted: past the
+    // end it is `None`, and each element is shared out of the array rather than copied
+    // into the argument.
+    let mut index = 0;
+    while let Some(item) = source.element(index) {
+        match apply_one(ev, &function, item, call)? {
+            Operand::Data(value) => out.push(value.into_value()),
             // A mapped function would have to be stored in the result array, which
             // EXPR §2 does not allow.
             Operand::Function(_) => {
                 return Err(call.error(ErrorCode::Type, "a function cannot be stored in an array"));
             }
         }
+        index += 1;
     }
     ev.constructed(call.span(), Value::Array(out))
 }
@@ -249,14 +264,19 @@ pub(super) fn filter<'a>(
     call: &Call<'a>,
 ) -> Built<'a> {
     let function = call.func(args, 0)?.clone();
-    let items = call.array(args, 1)?;
-    ev.spend_each(call.span(), items.len())?;
+    let length = call.array(args, 1)?.len();
+    let source = call.shared(args, 1)?.clone();
+    ev.spend_each(call.span(), length)?;
 
     let mut out = Vec::new();
-    for item in items {
+    let mut index = 0;
+    while let Some(item) = source.element(index) {
+        // The predicate gets a share of the element and the result array gets a copy of
+        // it — the copy is the one being *kept*, and a `Value`'s elements are `Value`s.
         if apply_one(ev, &function, item.clone(), call)?.is_truthy() {
-            out.push(item.clone());
+            out.push(item.into_value());
         }
+        index += 1;
     }
     ev.constructed(call.span(), Value::Array(out))
 }
@@ -268,19 +288,24 @@ pub(super) fn reduce<'a>(
     call: &Call<'a>,
 ) -> Built<'a> {
     let function = call.func(args, 0)?.clone();
+    // A refcount bump per round rather than a copy of the accumulator, which is what
+    // makes `(reduce (fn (acc x) (concat acc (arr x))) (arr) $samples)` affordable.
     let mut accumulator = args[1].clone();
-    let items = call.array(args, 2)?;
-    ev.spend_each(call.span(), items.len())?;
+    let length = call.array(args, 2)?.len();
+    let source = call.shared(args, 2)?.clone();
+    ev.spend_each(call.span(), length)?;
 
-    for item in items {
-        let arguments = [accumulator, Operand::Data(item.clone())];
+    let mut index = 0;
+    while let Some(item) = source.element(index) {
+        let arguments = [accumulator, Operand::Data(item)];
         accumulator = ev.apply(&function, &arguments, &Call::new(call.span(), None))?;
+        index += 1;
     }
     match accumulator {
         // The accumulator is checked once at the end rather than each round: it is the
         // only value that survives, and a partial fold's intermediate size is bounded
         // by whatever built it.
-        Operand::Data(value) => ev.constructed(call.span(), value),
+        Operand::Data(value) => ev.accept(call.span(), value),
         Operand::Function(_) => Ok(accumulator),
     }
 }
@@ -334,31 +359,50 @@ const ABSENT: &str = "no such key or index";
 const WRONG_KEY: &str = "a map takes a string key and an array takes an integer index";
 
 /// The three outcomes of resolving a key against a container.
-enum Lookup<'v> {
-    /// The container has it.
-    Found(&'v Value),
+enum Lookup<'a> {
+    /// The container has it, shared out of the container.
+    Found(Shared<'a>),
     /// The container could have it and does not — `MISSING`, or a default.
     Absent,
     /// The key could not belong to this container at all — `TYPE`.
     WrongKey,
 }
 
-/// Resolves `key` in `container` (EXPR §7.5).
+/// Resolves `key` in `container`, sharing what it finds (EXPR §7.5).
 ///
 /// A negative index is `Absent` rather than `WrongKey`: it is an integer, which is the
 /// right kind of key for an array, and out of range is what it is. There is no
 /// from-the-end indexing in v1, so `-1` means what it says.
-fn element<'v>(container: &'v Value, key: &Value) -> Lookup<'v> {
-    let found = match (container, key) {
+fn element<'a>(container: &Shared<'a>, key: &Value) -> Lookup<'a> {
+    // Classified before the lookup, because "this key cannot belong to this container"
+    // and "this container does not have this key" are different errors, and `pick`
+    // answers `None` to both.
+    if !keyable(container, key) {
+        return Lookup::WrongKey;
+    }
+    match container.project(|container| pick(container, key)) {
+        Some(value) => Lookup::Found(value),
+        None => Lookup::Absent,
+    }
+}
+
+/// Whether `key` is the right *kind* of key for `container` — a string for a map, an
+/// integer for an array. Anything else is `TYPE` rather than absence.
+fn keyable(container: &Value, key: &Value) -> bool {
+    matches!(
+        (container, key),
+        (Value::Map(_), Value::Str(_)) | (Value::Array(_), Value::Int(_))
+    )
+}
+
+/// The one definition of what element a key names, over both container kinds.
+fn pick<'v>(container: &'v Value, key: &Value) -> Option<&'v Value> {
+    match (container, key) {
         (Value::Map(entries), Value::Str(name)) => entries.get(name.as_str()),
         (Value::Array(items), Value::Int(index)) => usize::try_from(*index)
             .ok()
             .and_then(|index| items.get(index)),
-        _ => return Lookup::WrongKey,
-    };
-    match found {
-        Some(value) => Lookup::Found(value),
-        None => Lookup::Absent,
+        _ => None,
     }
 }
 
@@ -368,9 +412,15 @@ fn end<'a>(
     call: &Call<'a>,
     pick: fn(&[Value]) -> Option<&Value>,
 ) -> Built<'a> {
-    let items = call.array(args, 0)?;
-    match pick(items) {
-        Some(value) => Ok(Operand::Data(value.clone())),
+    // For the `TYPE` error on a non-array; the element itself comes out of the `Shared`,
+    // so that `(first $samples)` borrows the signal's element rather than copying it.
+    call.array(args, 0)?;
+    let source = call.shared(args, 0)?;
+    match source.project(|value| match value {
+        Value::Array(items) => pick(items),
+        _ => None,
+    }) {
+        Some(value) => Ok(Operand::Data(value)),
         None => Err(call.arg_error(0, ErrorCode::Missing, "array is empty")),
     }
 }
@@ -383,13 +433,16 @@ fn quantify<'a>(
     stop_on: bool,
 ) -> Built<'a> {
     let function = call.func(args, 0)?.clone();
-    let items = call.array(args, 1)?;
-    ev.spend_each(call.span(), items.len())?;
+    let length = call.array(args, 1)?.len();
+    let source = call.shared(args, 1)?.clone();
+    ev.spend_each(call.span(), length)?;
 
-    for item in items {
-        if apply_one(ev, &function, item.clone(), call)?.is_truthy() == stop_on {
+    let mut index = 0;
+    while let Some(item) = source.element(index) {
+        if apply_one(ev, &function, item, call)?.is_truthy() == stop_on {
             return boolean(stop_on);
         }
+        index += 1;
     }
     // Nothing stopped it: `any?` over no truthy element is false, `all?` over no falsy
     // element is true — including over an empty array, where both are vacuous.
@@ -400,7 +453,7 @@ fn quantify<'a>(
 fn apply_one<'a>(
     ev: &mut Evaluator<'a>,
     function: &Function<'a>,
-    item: Value,
+    item: Shared<'a>,
     call: &Call<'a>,
 ) -> Built<'a> {
     // `None` for the argument spans: the element was never written down, so an error

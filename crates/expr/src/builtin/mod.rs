@@ -28,7 +28,7 @@ use crate::ast::Expr;
 use crate::error::{Error, ErrorCode};
 use crate::eval::Evaluator;
 use crate::num::Num;
-use crate::operand::{Function, Operand};
+use crate::operand::{Function, Operand, Shared};
 use crate::span::Span;
 
 /// The five special forms of EXPR §5.
@@ -181,6 +181,10 @@ impl<'a> Call<'a> {
     /// through this or one of the typed accessors below. That is how "functions cannot
     /// be stored in collections, or compared" holds without each builtin having to
     /// remember it.
+    ///
+    /// Reading an argument is uniform however the value is held ([`Shared`] derefs), so
+    /// none of these accessors care — only a builtin passing a value *on* does, and that
+    /// is what [`Self::shared`] is for.
     pub(crate) fn value<'v>(
         &self,
         args: &'v [Operand<'a>],
@@ -188,6 +192,26 @@ impl<'a> Call<'a> {
     ) -> Result<&'v Value, Error> {
         match args[index].as_data() {
             Some(value) => Ok(value),
+            None => Err(self.arg_error(
+                index,
+                ErrorCode::Type,
+                "a function is not a value and cannot be used as one",
+            )),
+        }
+    }
+
+    /// Argument `index` as it is held, refusing a function.
+    ///
+    /// What a builtin that returns a value it did not construct — `get`, `first`,
+    /// `map`'s per-element argument — reaches for, so it can share the argument or
+    /// project into it instead of copying (EXPR §7.5).
+    pub(crate) fn shared<'v>(
+        &self,
+        args: &'v [Operand<'a>],
+        index: usize,
+    ) -> Result<&'v Shared<'a>, Error> {
+        match args[index].shared() {
+            Some(shared) => Ok(shared),
             None => Err(self.arg_error(
                 index,
                 ErrorCode::Type,
@@ -268,17 +292,17 @@ impl<'a> Call<'a> {
 
 /// A `bool` result.
 fn boolean<'a>(value: bool) -> Built<'a> {
-    Ok(Operand::Data(Value::Bool(value)))
+    Ok(Operand::data(Value::Bool(value)))
 }
 
 /// An `int` result.
 fn integer<'a>(value: i64) -> Built<'a> {
-    Ok(Operand::Data(Value::Int(value)))
+    Ok(Operand::data(Value::Int(value)))
 }
 
 /// A number result, whichever of the two kinds it turned out to be.
 fn number<'a>(value: Num) -> Built<'a> {
-    Ok(Operand::Data(value.into_value()))
+    Ok(Operand::data(value.into_value()))
 }
 
 /// Every builtin of EXPR §7, sorted by name.

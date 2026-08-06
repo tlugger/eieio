@@ -91,7 +91,7 @@ pub use budget::{
 pub use builtin::{Arity, BUILTINS, Builtin, SPECIAL_FORMS, is_builtin, is_special_form};
 pub use error::{Error, ErrorCode};
 pub use eval::{Evaluator, eval, eval_source, eval_with_limits};
-pub use operand::{Closure, Function, Operand};
+pub use operand::{Closure, Function, Operand, Shared};
 pub use parse::{
     MAX_DEPTH, MAX_EXPR_BYTES, MIN_DEPTH, MIN_EXPR_BYTES, ParseLimits, parse, parse_with_limits,
 };

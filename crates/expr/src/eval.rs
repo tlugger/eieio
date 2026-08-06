@@ -19,13 +19,20 @@
 //! - **Constructed values** are bounded by that budget too ([`Evaluator::constructed`]),
 //!   which is what keeps *dropping* a value from recursing further than evaluating one.
 //!
-//! # Copies
+//! # What is not copied
 //!
-//! Reading `$` clones the signal's map, and resolving a binding clones the operand it
-//! holds. Both are honest costs of a value language with no interior mutability, and
-//! both are bounded by `MAX_VALUE_BYTES`. Sharing them behind a reference count would
-//! be a worthwhile optimisation later; it is not a correctness question, so it is not
-//! this issue's.
+//! Nothing an expression reads is copied to read it. `$`, `$name` and a literal borrow
+//! the signal and the parsed expression, which both outlive the evaluation; a constructed
+//! value is shared behind a reference count, so binding it, capturing it in a closure and
+//! passing it to a function cost a refcount bump rather than a copy of an array
+//! ([`Shared`]). Values are immutable (EXPR §1), so none of this is observable in the
+//! language — the only thing that changes is what an evaluation costs on a node with 16
+//! KiB of stack and no allocator to spare.
+//!
+//! A copy remains where one is genuinely being made: a builtin that *constructs* a
+//! collection — `arr`, `assoc`, `sort`, `concat` — copies the elements into it, because
+//! a [`Value`]'s elements are `Value`s and nothing about that is shareable. Those are
+//! bounded by `MAX_VALUE_BYTES` (EXPR §9).
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
@@ -38,7 +45,7 @@ use crate::builtin::{self, Call};
 use crate::env::{self, Env};
 use crate::error::{Error, ErrorCode};
 use crate::form;
-use crate::operand::{Closure, Function, Operand};
+use crate::operand::{Closure, Function, Operand, Shared};
 use crate::parse::parse;
 use crate::span::Span;
 
@@ -118,8 +125,18 @@ impl<'a> Evaluator<'a> {
     /// functions out of the value space, so there would be nothing to encode and hand
     /// back through `prop` (ABI §7.1).
     pub fn eval(&mut self, expr: &'a Expr) -> Result<Value, Error> {
+        Ok(self.eval_shared(expr)?.into_value())
+    }
+
+    /// Evaluates `expr` to its result *as shared*, without taking ownership of it.
+    ///
+    /// [`Self::eval`] is this plus [`Shared::into_value`]. Prefer this one when the
+    /// result is about to be read rather than kept: `$temp` and `(get $ k)` return a
+    /// borrow of the signal, so a host encoding a property result for `prop` (ABI §7.1)
+    /// can write those bytes without the value ever being copied.
+    pub fn eval_shared(&mut self, expr: &'a Expr) -> Result<Shared<'a>, Error> {
         match self.eval_operand(expr, &None)? {
-            Operand::Data(value) => Ok(value),
+            Operand::Data(shared) => Ok(shared),
             Operand::Function(_) => Err(Error::new(
                 ErrorCode::Type,
                 expr.span,
@@ -176,6 +193,14 @@ impl<'a> Evaluator<'a> {
     ///   is what makes every recursion over a `Value` in this crate, and in
     ///   `eio_signal`, provably shallow.
     pub(crate) fn constructed(&self, span: Span, value: Value) -> Result<Operand<'a>, Error> {
+        self.accept(span, Shared::from_value(value))
+    }
+
+    /// [`Self::constructed`], for a value that is already shared.
+    ///
+    /// `reduce`'s accumulator arrives this way: it is checked once at the end, and
+    /// unwrapping it to re-share it would be an allocation to say nothing.
+    pub(crate) fn accept(&self, span: Span, value: Shared<'a>) -> Result<Operand<'a>, Error> {
         // Depth first, and the order is not cosmetic. `encoded_len` recurses to the
         // value's *actual* depth, while `nests_deeper_than` stops at the budget — so on
         // a host whose decode bound is looser than its expression `MAX_DEPTH` (ABI
@@ -231,7 +256,10 @@ impl<'a> Evaluator<'a> {
 
     fn eval_node(&mut self, expr: &'a Expr, env: &Env<'a>) -> Result<Operand<'a>, Error> {
         match &expr.kind {
-            ExprKind::Literal(value) => Ok(Operand::Data(value.clone())),
+            // Borrowed from the parsed expression, which outlives the evaluation. A host
+            // parses once at configure time and evaluates per signal (ABI §7.1), so a
+            // long string literal is read a great many times and copied never.
+            ExprKind::Literal(value) => Ok(Operand::borrowed(value)),
             ExprKind::Symbol(name) => self.resolve(name, expr.span, env),
             ExprKind::Signal => self.signal_map(expr.span),
             ExprKind::Attr(name) => self.attribute(name, expr.span),
@@ -253,6 +281,8 @@ impl<'a> Evaluator<'a> {
     /// A symbol: innermost binding, then the builtin table (EXPR §4).
     fn resolve(&self, name: &str, span: Span, env: &Env<'a>) -> Result<Operand<'a>, Error> {
         if let Some(operand) = env::lookup(env, name) {
+            // A refcount bump or a pointer copy, whatever the binding holds — never a
+            // copy of the array or map it holds.
             return Ok(operand.clone());
         }
         if let Some(builtin) = builtin::lookup(name) {
@@ -272,9 +302,13 @@ impl<'a> Evaluator<'a> {
     }
 
     /// `$` — the whole signal (EXPR §6).
+    ///
+    /// Borrowed, not copied. `Signal` stores its attributes as a `Value` precisely so
+    /// that this is a pointer rather than a copy of every attribute, per sigil, per
+    /// signal.
     fn signal_map(&self, span: Span) -> Result<Operand<'a>, Error> {
         match self.signal {
-            Some(signal) => Ok(Operand::Data(Value::Map(signal.as_map().clone()))),
+            Some(signal) => Ok(Operand::borrowed(signal.as_value())),
             None => Err(no_signal(span)),
         }
     }
@@ -285,7 +319,7 @@ impl<'a> Evaluator<'a> {
             return Err(no_signal(span));
         };
         match signal.get(name) {
-            Some(value) => Ok(Operand::Data(value.clone())),
+            Some(value) => Ok(Operand::borrowed(value)),
             // EXPR §6: a missing attribute is an error, not null. `(get-or $ "x" 0)`
             // and `(has? $ "x")` are how a caller asks for the graceful reading.
             None => Err(Error::new(
@@ -491,7 +525,7 @@ impl<'a> Evaluator<'a> {
     /// `(and expr ...)` — first falsy value, or the last value; `(and)` is `true`
     /// (EXPR §5.3).
     fn eval_and(&mut self, items: &'a [Expr], env: &Env<'a>) -> Result<Operand<'a>, Error> {
-        let mut last = Operand::Data(Value::Bool(true));
+        let mut last = Operand::data(Value::Bool(true));
         for item in &items[1..] {
             last = self.eval_operand(item, env)?;
             if !last.is_truthy() {
@@ -504,7 +538,7 @@ impl<'a> Evaluator<'a> {
     /// `(or expr ...)` — first truthy value, or the last value; `(or)` is `false`
     /// (EXPR §5.3).
     fn eval_or(&mut self, items: &'a [Expr], env: &Env<'a>) -> Result<Operand<'a>, Error> {
-        let mut last = Operand::Data(Value::Bool(false));
+        let mut last = Operand::data(Value::Bool(false));
         for item in &items[1..] {
             last = self.eval_operand(item, env)?;
             if last.is_truthy() {

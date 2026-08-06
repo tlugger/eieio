@@ -5,7 +5,10 @@
 //!
 //! - A closure captures its environment by cloning one [`Rc`], not by copying
 //!   bindings. Values here can be whole signal maps, so copying would be the
-//!   expensive part of `(map (fn (x) (+ x offset)) $samples)`.
+//!   expensive part of `(map (fn (x) (+ x offset)) $samples)`. Resolving a binding is
+//!   likewise a share and not a copy, because that is what an
+//!   [`Operand`](crate::Operand) holds — see
+//!   [`Shared`](crate::Shared).
 //! - Extending is non-destructive, so `let`'s sequential scoping (EXPR §5.2) and a
 //!   closure's captured scope cannot interfere: binding *n* builds a new link over the
 //!   environment binding *n−1* left behind, and the closure that captured the shorter

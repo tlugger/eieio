@@ -154,7 +154,7 @@ pub(super) fn to_float<'a>(
             ));
         }
     };
-    Ok(Operand::Data(Value::Float(converted)))
+    Ok(Operand::data(Value::Float(converted)))
 }
 
 /// `(string x)` — canonical rendering of any non-function value (EXPR §7.3, §7.6).

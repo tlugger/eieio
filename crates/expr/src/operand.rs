@@ -6,9 +6,18 @@
 //! one" type, and its shape is what enforces §2's restriction structurally: a
 //! collection holds [`Value`]s, so there is nowhere for a function to be stored. A
 //! builtin that must refuse one has to ask, and cannot forget to.
+//!
+//! # Sharing, not copying
+//!
+//! An operand does not own its value: [`Shared`] holds it inline, borrowed, or behind a
+//! reference count, whichever costs least. That is what keeps `$` from copying the whole
+//! signal map and a `let` binding from copying the array it holds — see [`Shared`] for
+//! which case is which. Values are immutable (EXPR §1), so sharing them is invisible to
+//! the language.
 
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::ops::Deref;
 
 use eio_signal::Value;
 
@@ -16,6 +25,109 @@ use crate::ast::Expr;
 use crate::builtin::Builtin;
 use crate::env::Env;
 use crate::num::{self, Num};
+
+/// A value, held whichever way is cheapest for where it came from.
+///
+/// Every value an expression touches arrives in one of three ways, and each wants a
+/// different representation:
+///
+/// - **[`Borrowed`](Shared::Borrowed)** — it was already in memory and outlives the
+///   evaluation: an attribute of the signal, the whole signal map (EXPR §6), or a
+///   literal in the parsed expression. Reading one costs a pointer. This is what makes
+///   `$`, `$name` and `(get $ k)` free rather than a copy of the signal per sigil.
+/// - **[`Owned`](Shared::Owned)** — a builtin constructed it, so nothing outside the
+///   evaluation holds it. Behind an [`Rc`], so binding it, capturing it in a closure and
+///   passing it to a function are refcount bumps rather than deep copies of an array.
+/// - **[`Inline`](Shared::Inline)** — a scalar. Cloning one touches no heap, so an
+///   `Rc` would be a *net* allocation per arithmetic result where today there is none.
+///   On the leaf tier that is the difference this type exists to avoid, in the other
+///   direction.
+///
+/// [`Rc`], not `Arc`: the leaf tier includes `riscv32imc`, which has no atomic
+/// compare-and-swap, so `alloc::sync` does not exist there. Nothing needs it — a `Shared`
+/// lives inside one evaluation on one thread, while [`Value`] itself, which is what
+/// crosses threads, stays `Send + Sync`.
+///
+/// These reference counts cannot leak, and for a stronger reason than [`Closure`]'s: a
+/// [`Value`] is plain data with no `Shared` anywhere inside it, so a cycle is not
+/// expressible at all.
+#[derive(Debug, Clone)]
+pub enum Shared<'a> {
+    /// A scalar, held directly. Use [`Shared::from_value`] rather than constructing this
+    /// for a value with a heap allocation in it, which would then be deep-copied.
+    Inline(Value),
+    /// A value that outlives the evaluation: the signal's, or the expression's.
+    Borrowed(&'a Value),
+    /// A value the evaluation constructed, shared by reference count.
+    Owned(Rc<Value>),
+}
+
+impl<'a> Shared<'a> {
+    /// Takes ownership of `value`, inline if it is a scalar and behind an [`Rc`]
+    /// otherwise.
+    ///
+    /// The one place that decision is made, so a new call site cannot get it wrong.
+    pub fn from_value(value: Value) -> Self {
+        match value {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => Shared::Inline(value),
+            // Str, Bytes, Array, Map: each already owns a heap allocation, so an `Rc`
+            // header is one allocation against a copy that is O(size).
+            _ => Shared::Owned(Rc::new(value)),
+        }
+    }
+
+    /// The value as an owned [`Value`], copying only if it has to.
+    ///
+    /// A uniquely-held [`Owned`](Shared::Owned) — the usual case for a constructed
+    /// result — moves out of its [`Rc`] rather than being copied.
+    pub fn into_value(self) -> Value {
+        match self {
+            Shared::Inline(value) => value,
+            Shared::Borrowed(value) => value.clone(),
+            Shared::Owned(rc) => Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone()),
+        }
+    }
+
+    /// Shares a subvalue that `pick` selects — an array element, a map entry.
+    ///
+    /// Free when this value is borrowed: the subvalue of something that outlives the
+    /// evaluation outlives it too, so the projection is another borrow. When this value
+    /// is owned the *subvalue* is copied, which is still not the parent: reading one
+    /// element of a constructed array does not duplicate the array.
+    pub fn project<F>(&self, pick: F) -> Option<Shared<'a>>
+    where
+        F: for<'v> Fn(&'v Value) -> Option<&'v Value>,
+    {
+        match self {
+            Shared::Borrowed(value) => pick(value).map(Shared::Borrowed),
+            Shared::Inline(value) => pick(value).map(|found| Shared::from_value(found.clone())),
+            Shared::Owned(rc) => pick(rc).map(|found| Shared::from_value(found.clone())),
+        }
+    }
+
+    /// Shares element `index`, or `None` if this is not an array with one there.
+    pub fn element(&self, index: usize) -> Option<Shared<'a>> {
+        self.project(|value| match value {
+            Value::Array(items) => items.get(index),
+            _ => None,
+        })
+    }
+}
+
+impl Deref for Shared<'_> {
+    type Target = Value;
+
+    /// Reading is uniform across the three variants, which is why every builtin that
+    /// takes an argument through the typed `Call` accessors is unaffected by how the
+    /// value is held.
+    fn deref(&self) -> &Value {
+        match self {
+            Shared::Inline(value) => value,
+            Shared::Borrowed(value) => value,
+            Shared::Owned(rc) => rc,
+        }
+    }
+}
 
 /// What a subexpression evaluates to.
 ///
@@ -25,16 +137,37 @@ use crate::num::{self, Num};
 #[derive(Debug, Clone)]
 pub enum Operand<'a> {
     /// A value in EXPR §2's sense — anything that can cross the ABI boundary.
-    Data(Value),
+    Data(Shared<'a>),
     /// A function: evaluation-time only, never a value.
     Function(Function<'a>),
 }
 
 impl<'a> Operand<'a> {
+    /// An operand owning `value`, shared per [`Shared::from_value`].
+    pub fn data(value: Value) -> Self {
+        Operand::Data(Shared::from_value(value))
+    }
+
+    /// An operand borrowing a value that outlives the evaluation.
+    pub fn borrowed(value: &'a Value) -> Self {
+        Operand::Data(Shared::Borrowed(value))
+    }
+
     /// The value inside, or `None` for a function.
     pub fn as_data(&self) -> Option<&Value> {
         match self {
-            Operand::Data(value) => Some(value),
+            Operand::Data(shared) => Some(shared),
+            Operand::Function(_) => None,
+        }
+    }
+
+    /// How the value inside is held, or `None` for a function.
+    ///
+    /// What a builtin uses to pass a value on without copying it — [`Shared::project`]
+    /// for a subvalue, or a clone of the `Shared` itself for the whole thing.
+    pub fn shared(&self) -> Option<&Shared<'a>> {
+        match self {
+            Operand::Data(shared) => Some(shared),
             Operand::Function(_) => None,
         }
     }
@@ -44,7 +177,10 @@ impl<'a> Operand<'a> {
     /// Only `false` and `null` are falsy — `0`, `""` and the empty collections are all
     /// truthy, and so is a function, which is neither of the two falsy values.
     pub fn is_truthy(&self) -> bool {
-        !matches!(self, Operand::Data(Value::Bool(false) | Value::Null))
+        match self {
+            Operand::Data(shared) => !matches!(**shared, Value::Bool(false) | Value::Null),
+            Operand::Function(_) => true,
+        }
     }
 
     /// Deep structural equality (EXPR §4.2), or `None` if either side is a function.
