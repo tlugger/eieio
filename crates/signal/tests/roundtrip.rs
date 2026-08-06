@@ -425,6 +425,38 @@ fn signal_accessors() {
     assert_eq!(Signal::from(signal.as_map().clone()), signal);
 }
 
+/// `as_value` is the signal *as* a map value, borrowed rather than built (EXPR §6's `$`).
+#[test]
+fn signal_borrows_as_a_map_value() {
+    let mut signal = Signal::new();
+    assert_eq!(
+        signal.as_value(),
+        &Value::Map(Map::new()),
+        "an empty signal is the empty map, not null"
+    );
+
+    signal.set("temp", Value::Float(21.5));
+    signal.set("unit", Value::Str("C".into()));
+
+    // The same map the other accessors expose, and it survives mutation: `set` and
+    // `remove` maintain the map-shaped invariant the borrow depends on.
+    assert_eq!(signal.as_value(), &Value::Map(signal.as_map().clone()));
+    signal.remove("unit");
+    assert_eq!(signal.as_value(), &Value::Map(signal.as_map().clone()));
+    assert_eq!(signal.len(), 1);
+
+    // A borrow, not a copy: `expr` reads `$` through this on every signal, and the whole
+    // point is that no attribute is duplicated to do it.
+    let Value::Map(borrowed) = signal.as_value() else {
+        panic!("a signal's value is always a map");
+    };
+    assert!(std::ptr::eq(borrowed, signal.as_map()));
+
+    // And it is the encoding, so the two lengths cannot drift apart.
+    assert_eq!(signal.encoded_len(), signal.as_value().encoded_len());
+    assert_eq!(signal.as_value().to_cbor().len(), signal.encoded_len());
+}
+
 /// The batch builder surface, including the capacity hint `ctx.batch()` needs
 /// (SDK-SPEC §2).
 #[test]
