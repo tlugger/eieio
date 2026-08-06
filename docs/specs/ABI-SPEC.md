@@ -304,9 +304,9 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 2. **Inbound payloads** (`eio_configure`, `eio_process_signals`, `eio_on_http`): host allocates, guest owns after the call begins, guest MUST free.
 3. **Outbound payloads** (`emit`, `state_put`, `i2c_write`, `http_request`, `log`, `error`): guest allocates, host copies out during the call, guest owns and frees afterward. Host MUST NOT retain guest pointers past the call.
 4. **Guest-supplied out-buffers** (`prop`, `state_get`, `i2c_read`): guest allocates `(buf, cap)`; grow-and-retry per §8.
-5. `eio_alloc` returning 0 = allocation failure; a guest failing to allocate SHOULD return an error status rather than trap where possible.
-6. Alignment: `eio_alloc` MUST return 8-byte-aligned pointers.
-7. `max_payload` (instance descriptor): host rejects `emit` beyond it with `ERR_LIMIT` and never delivers batches beyond it. Discoverable, so MCU limits are visible to blocks and to deploy-time validation.
+5. `eio_alloc` returning 0 = allocation failure; a guest failing to allocate SHOULD return an error status rather than trap where possible. The same applies in the other direction: a host that cannot allocate an **inbound** payload because the guest refused MUST NOT kill the instance. The delivery fails and is reported as `ERR_LIMIT`, counted like any other block-level error (§8) — a guest that is briefly out of memory has told the truth about itself, and killing it for that would make a transient memory spike fatal.
+6. Alignment: `eio_alloc` MUST return 8-byte-aligned pointers. A pointer that is misaligned, zero-but-nonzero-length, or outside linear memory is a *different* matter from a refusal: the guest has told the host something untrue about its own memory, nothing the host does next is trustworthy, and the instance MUST be discarded.
+7. `max_payload` (instance descriptor): host rejects `emit` beyond it with `ERR_LIMIT` and never delivers batches beyond it. Discoverable, so MCU limits are visible to blocks and to deploy-time validation. Both it and `max_batch` are host configuration with **no floor**: a block reads them from its descriptor and may assume nothing about their size (SCOPE §3.4 OPEN).
 
 ---
 

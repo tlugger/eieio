@@ -1,0 +1,26 @@
+[package]
+name = "eio-host-core"
+description = "The engine-agnostic host side of the eieio block ABI: lifecycle, memory conventions, status protocol (ABI-SPEC)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Batches and the instance descriptor are CBOR (ABI §5.2, §6.3), and this crate
+# builds one and delivers the other.
+eio-signal.workspace = true
+
+# Deliberately absent: wasmtime, and anything else engine-shaped. This crate is
+# the half of the host that the MCU leaf runtime also compiles (DAEMON-SPEC §1),
+# so an engine reaches it through the `Engine` trait or not at all. The daemon
+# binds wasmtime (eieio-35h.3); nothing here knows that exists.
+
+[dev-dependencies]
+# The tests drive a mock engine — a pure-Rust fake guest in `tests/mock.rs`. No
+# WASM engine is involved, which is what keeps this crate's tests runnable on a
+# target that has no engine to offer.
+
+[lints]
+workspace = true

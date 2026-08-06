@@ -123,6 +123,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "eio-host-core"
+version = "0.1.0"
+dependencies = [
+ "eio-signal",
+]
+
+[[package]]
 name = "eio-manifest"
 version = "0.1.0"
 dependencies = [

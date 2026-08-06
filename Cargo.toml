@@ -4,7 +4,7 @@
 resolver = "3"
 # Crates are added by their own epics. This list grows; it is never a glob,
 # because a glob that matches nothing is a hard error in cargo.
-members = ["crates/expr", "crates/manifest", "crates/signal"]
+members = ["crates/expr", "crates/host-core", "crates/manifest", "crates/signal"]
 
 [workspace.package]
 version = "0.1.0"
@@ -67,6 +67,7 @@ wat = "1.255"
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.
 eio-expr = { path = "crates/expr", version = "0.1.0" }
+eio-host-core = { path = "crates/host-core", version = "0.1.0" }
 eio-manifest = { path = "crates/manifest", version = "0.1.0" }
 eio-signal = { path = "crates/signal", version = "0.1.0" }
 

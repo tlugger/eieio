@@ -96,6 +96,7 @@ Memory/ownership conventions for buffer passing across the boundary are part of 
 - Single serialization everywhere — on the wire and across the WASM boundary: **CBOR** (`minicbor` for `no_std` compatibility). A leaf node's block and a Pi daemon's block are byte-identical consumers.
 - Schemaless by default (dict-shaped), schemas optional/later.
 - **OPEN:** delivery guarantees (at-most-once vs at-least-once), ordering, and backpressure policy for cross-device flow.
+- **OPEN:** normative floors and reference defaults for `max_payload` and `max_batch` (ABI §5.2, §9.7). They are host configuration and discoverable from the instance descriptor, which is settled; what is not settled is whether a *floor* exists — the guarantee that lets a block author assume a batch of at least some size will be delivered, as EXPR §9's budget floors do for expressions. Deferred deliberately until there is a real workload to size them against: a floor is a promise to every block ever written, and the embedded tier pays for it twice, since host and guest each hold a copy during delivery. Until then hosts supply both values explicitly and blocks may assume nothing.
 
 ### 3.5 Expression language: a purpose-built micro-Lisp
 

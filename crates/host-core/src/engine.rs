@@ -1,0 +1,269 @@
+//! What this crate needs from a WASM engine (DAEMON-SPEC §1).
+//!
+//! # Why the trait is this small
+//!
+//! `host-core` is the half of the host that the MCU leaf runtime also compiles, so the
+//! same driver runs over wasmtime on a Pi and over WAMR or wasm3 on an ESP32 — and
+//! "divergence between the two hosts is a conformance bug by definition" (ABI §13) only
+//! holds if there is one driver rather than two. Every capability this trait grows is a
+//! capability the leaf engine must also provide, so the trait carries exactly four things:
+//! call an export, read memory, write memory, register a host function.
+//!
+//! Notably **not** here:
+//!
+//! - **Instantiation.** wasmtime wants a `Store` and a linker; wasm3 wants a parsed
+//!   module and a stack. A caller instantiates however its engine does and hands the
+//!   result to this crate as an [`Engine`]. Validation of exports, imports and the ABI
+//!   version (ABI §4, §12) is likewise the caller's, because it happens before there is
+//!   anything to drive.
+//! - **Budgets.** Fuel, epoch interruption and watchdogs are engine-specific and are host
+//!   configuration, not ABI constants (ABI §10). The engine enforces them; this trait only
+//!   needs to hear about the outcome, which arrives as [`TrapKind::Fuel`] or
+//!   [`TrapKind::Deadline`].
+//! - **Async.** No `async` anywhere: this crate is `no_std`, and one instance is driven by
+//!   one caller at a time (ABI §1.2). The daemon runs each instance in its own task
+//!   (DAEMON §5), so a synchronous call is exactly what that task wants.
+//!
+//! # Types crossing the boundary
+//!
+//! Pointers and lengths are `u32` here rather than ABI §3's `i32`. §3's `i32` is a
+//! statement about the *WASM* signature, where there is no unsigned type, and it says
+//! those values are "interpreted as unsigned offsets". Carrying them as `u32` on this side
+//! means the interpretation happens once, at the engine boundary, instead of at every
+//! comparison — and a `ptr < 0` bug becomes unwriteable.
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::fmt;
+
+/// A live guest instance, as much of one as this crate needs.
+///
+/// One instance, one linear memory, one caller at a time (ABI §1.2). Implementations are
+/// not required to be `Send`: the daemon owns an instance inside a single task, and the
+/// leaf runtime has no threads at all.
+pub trait Engine {
+    /// Calls an exported function with `i32` arguments, returning its single `i32`.
+    ///
+    /// Every ABI export is `(i32, ...) -> i32` or `() -> i32` (ABI §4.1), so one signature
+    /// covers them all and there is no need for the trait to be generic over arity. The
+    /// return value is raw: decoding it is [`Status`](crate::Status)'s job, and which
+    /// convention applies depends on the call, not on the engine.
+    ///
+    /// `Err` means the instance is gone — see [`Trap`].
+    fn call(&mut self, export: &str, args: &[i32]) -> Result<i32, Trap>;
+
+    /// Whether the guest exports `export` (ABI §4.2's optional callbacks).
+    ///
+    /// The driver asks before invoking `eio_on_timer` and friends: a block without the
+    /// `timer` capability does not export it, and calling a missing export is a host bug
+    /// rather than a guest one.
+    fn has_export(&self, export: &str) -> bool;
+
+    /// Copies `len` bytes out of guest memory at `ptr`.
+    ///
+    /// Out of range is [`EngineError::OutOfBounds`], never a panic and never a truncated
+    /// read: the range came from a guest, which makes it untrusted input (ABI §9.1).
+    fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError>;
+
+    /// Copies `bytes` into guest memory at `ptr`.
+    ///
+    /// The caller has already established that it may write there — the range is either
+    /// one this crate just obtained from `eio_alloc`, or an out-buffer the guest passed in
+    /// the current call (ABI §9.1). The engine's job is only to refuse a range that is not
+    /// inside the memory.
+    fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError>;
+
+    /// Registers a host function the guest may import as `namespace`.`name`.
+    ///
+    /// The seam, and no more than that. What the eight `eio:core` functions and the
+    /// capability namespaces of ABI §7 *do* is not here and not in this crate yet:
+    /// `prop` arrives with the property protocol, `emit` with the router, `state_*` with
+    /// the state store. What is settled here is the shape they all have — a
+    /// [`HostFn`] over a [`HostCall`], returning the `i32` the guest sees.
+    ///
+    /// Registration happens before the guest runs, so a duplicate name is a host bug and
+    /// an [`EngineError::DuplicateImport`].
+    fn register(&mut self, namespace: &str, name: &str, f: HostFn) -> Result<(), EngineError>;
+}
+
+/// A host function's implementation (ABI §7).
+///
+/// Boxed rather than generic so that a host can build its import table at runtime from a
+/// block's declared capabilities — which is the only way it can be built, since the set
+/// depends on the manifest (ABI §4.3).
+pub type HostFn = Box<dyn FnMut(HostCall<'_>) -> i32>;
+
+/// One guest→host call, as the handler sees it.
+///
+/// Carries the raw `i32` arguments and a way back into guest memory, because that is what
+/// every ABI §7 function needs and nothing more: `log` reads a `(ptr, len)`, `emit` reads
+/// one and enforces `max_payload`, `prop` writes into a guest-supplied `(buf, cap)`.
+/// Handlers return the `i32` the guest receives, under whichever §8 convention their entry
+/// in §7 specifies.
+pub struct HostCall<'a> {
+    /// The arguments, in declaration order.
+    pub args: &'a [i32],
+    /// Guest memory, for the duration of this call only.
+    ///
+    /// ABI §9.3 is the reason this is a borrow: the host copies out *during* the call and
+    /// MUST NOT retain a guest pointer past it. A handler that wants the bytes afterwards
+    /// has to own a copy, and the borrow checker is what says so.
+    pub memory: &'a mut dyn Memory,
+}
+
+impl fmt::Debug for HostCall<'_> {
+    /// Without the memory, which has no useful rendering and could be megabytes.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostCall")
+            .field("args", &self.args)
+            .finish()
+    }
+}
+
+/// Guest linear memory, as a host function handler sees it.
+///
+/// The read/write half of [`Engine`], split out so a handler can be given memory access
+/// without being given the ability to call back into the guest — which ABI §1.2 forbids
+/// outright ("guest→host calls MUST NOT re-enter the guest"). The restriction is
+/// structural here rather than documented: there is no `call` on this trait.
+pub trait Memory {
+    /// Copies `len` bytes out of guest memory at `ptr`.
+    fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError>;
+
+    /// Copies `bytes` into guest memory at `ptr`.
+    fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError>;
+}
+
+/// Why an instance died (ABI §5.1, §8, §10).
+///
+/// A trap is the *only* kind of failure that kills an instance. A non-zero callback
+/// return is [`Status::Failed`](crate::Status::Failed) and lives in a different type, so
+/// "the block reported an error" and "the block is gone" cannot be swapped by accident —
+/// which is ABI §8's "traps are death, status codes are life" enforced rather than
+/// restated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trap {
+    /// What kind of death this was.
+    pub kind: TrapKind,
+    /// The engine's description, for the log. Empty when the engine offers none.
+    ///
+    /// Owned, because the instance it came from is about to be discarded.
+    pub detail: String,
+}
+
+impl Trap {
+    /// A trap of `kind` with no detail.
+    pub fn new(kind: TrapKind) -> Trap {
+        Trap {
+            kind,
+            detail: String::new(),
+        }
+    }
+
+    /// A trap of `kind` with an engine-supplied description.
+    pub fn with_detail(kind: TrapKind, detail: impl Into<String>) -> Trap {
+        Trap {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for Trap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.detail.is_empty() {
+            write!(f, "{}", self.kind)
+        } else {
+            write!(f, "{}: {}", self.kind, self.detail)
+        }
+    }
+}
+
+impl core::error::Error for Trap {}
+
+/// The three ways ABI §5.1 admits an instance can die, plus the engine's own failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrapKind {
+    /// A WASM trap: unreachable, out-of-bounds access, integer division by zero,
+    /// a failed `unwrap` in the guest.
+    Trap,
+    /// The execution budget ran out (ABI §10). wasmtime calls this fuel.
+    Fuel,
+    /// The callback overran its wall-clock deadline (ABI §10): epoch interruption on
+    /// wasmtime, a watchdog on the leaf tier.
+    Deadline,
+    /// The engine itself failed — a memory range outside linear memory, a host function
+    /// that panicked, an engine-internal error.
+    ///
+    /// Death all the same. The instance's memory may be in any state, and ABI §5.1 has no
+    /// state to return to that is not "discard it".
+    Engine,
+}
+
+impl fmt::Display for TrapKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            TrapKind::Trap => "the guest trapped",
+            TrapKind::Fuel => "the guest exhausted its execution budget",
+            TrapKind::Deadline => "the guest overran its deadline",
+            TrapKind::Engine => "the engine failed",
+        })
+    }
+}
+
+/// A failure that is the *host's* fault, or the engine's (ABI §9).
+///
+/// Distinct from [`Trap`] because these are recoverable at the point they happen: an
+/// out-of-bounds read while validating a guest's `(ptr, len)` is answered with
+/// `ERR_INVALID_ARG` to the guest, not with the instance's death. A driver that cannot
+/// continue converts one into a [`Trap`] deliberately — see
+/// [`Trap`]'s [`TrapKind::Engine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineError {
+    /// A `(ptr, len)` range lies outside guest linear memory.
+    OutOfBounds {
+        /// Start of the range.
+        ptr: u32,
+        /// Length of the range.
+        len: u32,
+    },
+    /// A host function was registered twice under one name.
+    DuplicateImport {
+        /// The namespace, e.g. `eio:core`.
+        namespace: String,
+        /// The function name within it.
+        name: String,
+    },
+    /// The engine refused for a reason of its own.
+    Engine(String),
+}
+
+impl fmt::Display for EngineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EngineError::OutOfBounds { ptr, len } => write!(
+                f,
+                "guest memory range ({ptr}, {len}) lies outside linear memory"
+            ),
+            EngineError::DuplicateImport { namespace, name } => {
+                write!(f, "host function {namespace} {name} is already registered")
+            }
+            EngineError::Engine(detail) => write!(f, "engine error: {detail}"),
+        }
+    }
+}
+
+impl core::error::Error for EngineError {}
+
+impl From<EngineError> for Trap {
+    /// An engine failure the driver cannot answer becomes the instance's death.
+    ///
+    /// Used where there is no guest to return a code to — writing the instance descriptor
+    /// into a buffer `eio_alloc` just handed over, for instance. If that range is out of
+    /// bounds, the allocator lied (ABI §13.2's allocator-liar block), and there is nothing
+    /// left to do but discard the instance.
+    fn from(error: EngineError) -> Trap {
+        Trap::with_detail(TrapKind::Engine, alloc::format!("{error}"))
+    }
+}
