@@ -19,6 +19,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # On demand, because a push is otherwise the only way to ask. During the Actions
+  # outage of 2026-08-06 two pushes to main produced no runs at all and a third sat
+  # queued for a day, which left `main` unverified with nothing to do about it but
+  # commit something. `gh workflow run ci.yml` is that missing button.
+  workflow_dispatch:
 
 # A newer push to the same ref supersedes an in-flight run; the older answer is about code
 # nobody is looking at any more.
