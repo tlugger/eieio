@@ -81,9 +81,13 @@ Then go straight to step 4.
 - `bd update <id> --notes "..."` with the evidence: commands run, exit codes, negative tests, and every review dismissal with its reason.
 - Delete all `*.eio-plan.md` files.
 
-## Step 6 — Review the diff
+## Step 6 — Self-review the diff
 
-Run the `/code-review` skill on the working diff if it is installed; if it isn't, review the diff yourself with the same rigor and say which you did. Fix what matters for this feature. Dismiss what is out of scope, planned elsewhere, or wrong — but **record every dismissal** in the bead notes or as a filed bead. Nothing is silently dropped.
+Run the `/simplify` skill on the **uncommitted working diff** (`git diff HEAD` plus untracked files in scope). This repo commits straight to `main`, so there is no pull request and no reviewer downstream — this pass is the only review the code gets before it lands, and it is not optional.
+
+`/simplify` covers reuse, simplification, efficiency, and altitude. It deliberately does **not** hunt for correctness bugs, so pair it with your own read of the diff for spec conformance and correctness: every ABI/EXPR `MUST` the change touches, the ★ crates' `no_std` boundary, and the invariants in CLAUDE.md's "Invariants worth stating twice". Say in your report which findings came from `/simplify` and which from your own read.
+
+Fix what matters for this feature. Dismiss what is out of scope, planned elsewhere, or wrong — but **record every dismissal** in the bead notes or as a filed bead. Nothing is silently dropped.
 
 ## Step 7 — Commit and push (no gate)
 
