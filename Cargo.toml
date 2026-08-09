@@ -85,9 +85,10 @@ wat = "1.255"
 #   cranelift  the compiler. Required to compile a `.wasm` at all.
 #   runtime    the executor. Required to run one.
 #   std        rustix-backed platform layer; the daemon is a std binary (DAEMON §1).
-#   anyhow     makes `wasmtime::Error` an alias for `anyhow::Error`. Without it
-#              wasmtime's own error type does not implement `std::error::Error`, and
-#              every `?` in the daemon would need a hand-written conversion.
+#   anyhow     gives `wasmtime::Error` its `From` conversion into `anyhow::Error`, so
+#              every `?` in the daemon works without a hand-written one. It is a
+#              conversion and not an alias: `anyhow::Context` does not apply to a
+#              wasmtime result, so a wasmtime error is given context by converting it.
 #   backtrace  guest backtraces on a trap. A trap is an instance's death (ABI §8) and
 #              the log line is all anyone gets, so it should say where.
 wasmtime = { version = "47.0", default-features = false, features = [
@@ -98,10 +99,15 @@ wasmtime = { version = "47.0", default-features = false, features = [
     "backtrace",
 ] }
 
-# One task per block instance (DAEMON §5). `rt` and `macros` only: the executor and
-# the management API arrive with their own epics, and a feature enabled early is a
-# feature nobody remembers to justify.
-tokio = { version = "1.53", default-features = false, features = ["rt", "macros"] }
+# One task per block instance (DAEMON §5): `rt` for the per-instance current-thread
+# runtime, `sync` for the bounded mailbox that feeds it, `macros` for `#[tokio::main]`.
+# Nothing further: the management API arrives with its own epic, and a feature enabled
+# early is a feature nobody remembers to justify.
+tokio = { version = "1.53", default-features = false, features = [
+    "rt",
+    "sync",
+    "macros",
+] }
 
 # Structured logging, with guest `log` calls tagged (service, instance) (DAEMON §11).
 tracing = { version = "0.1", default-features = false, features = ["std"] }

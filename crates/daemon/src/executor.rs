@@ -1,0 +1,422 @@
+//! The executor (DAEMON-SPEC §5): one thread, one task, one mailbox per block instance.
+//!
+//! ABI §1.2 gives an instance one caller at a time and forbids a host from calling into a
+//! guest that is mid-call. This module is that rule as an architecture rather than as a
+//! lock: an instance lives on a thread nothing else runs on, reachable only through a
+//! [`Mailbox`], and the loop that drains the mailbox is the only thing that ever enters the
+//! guest. Serialization is not enforced anywhere, because there is no second caller to
+//! serialize against.
+//!
+//! # Why a thread each, and not a shared `LocalSet`
+//!
+//! DAEMON §5.1 left the choice open ("a `LocalSet` or a thread each, never a work-stealing
+//! pool"). It is a thread each, and the deciding case is the hostile block: a guest that
+//! spins holds its thread until a budget kills it (ABI §10), and on a shared `LocalSet` that
+//! is every other instance and the management API held with it. One thread per instance
+//! makes "a spinning guest cannot stall the daemon" true rather than true-up-to-the-
+//! deadline, and the blast radius of a hostile block is exactly the block.
+//!
+//! The thread is not an alternative to the task — it carries one. Each instance thread runs
+//! a current-thread tokio runtime with a [`LocalSet`](tokio::task::LocalSet) and spawns the
+//! instance onto it, which is DAEMON §5's "one tokio task per block instance" literally, and
+//! leaves the instance somewhere to `await` the capability completions (§7.3, §7.6) that
+//! post back into its mailbox.
+//!
+//! Placement is not really a preference either way: `Store<State>` is `!Send`, because
+//! `eio_host_core`'s host functions are `Rc`-shared boxed closures (ABI §1.2 again). An
+//! instance therefore has to be *built* on the thread it will live on, which is why
+//! [`Executor::spawn`] hands a thread the ingredients rather than the instance.
+//!
+//! # Two channels, deliberately different
+//!
+//! **Inbound work is bounded.** [`Mailbox`] is a bounded queue, and a sender chooses how it
+//! handles a full one: [`Mailbox::send`] waits for capacity — natural backpressure, which
+//! propagates up the graph to whoever is producing too fast — and [`Mailbox::try_send`]
+//! refuses immediately, for a sender that cannot wait. Which of the two a *connection* uses
+//! is the router's overflow policy (DAEMON §6, eieio-35h.5), and the cross-device question
+//! stays OPEN (SCOPE §3.4); the executor's part is to have a bound at all and to offer both
+//! answers to a full one.
+//!
+//! **Outbound events are unbounded.** [`Event`]s are what the instance observed — statuses,
+//! `error` details, expression failures, emissions, death — and an observer that could stall
+//! a guest by reading slowly would be a worse defect than a queue that grows. Backpressure
+//! belongs on the inbound side, where it can actually slow the producer down. When the
+//! router lands, routed emissions travel through the *destination's* bounded mailbox, which
+//! is where a slow consumer should be felt.
+
+use std::sync::Arc;
+
+use eio_host_core::{PropFailure, Status, Trap};
+use eio_signal::Batch;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::core_fns::{Detail, Emission};
+use crate::engine::{Budgets, Runtime};
+use crate::instance::{InstanceSpec, run_instance};
+
+/// One item of work for an instance (DAEMON §5).
+///
+/// Everything that can make a host enter a guest, and nothing else. Each variant carries its
+/// payload by value because it crossed a thread to get here — an `Rc` would not have made
+/// the trip, and a borrow would tie the sender's lifetime to the instance's.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Work {
+    /// A batch arrived on an input port (ABI §6.1).
+    Deliver {
+        /// The port index, as the descriptor's `inputs` numbers it.
+        input_port: u32,
+        /// The batch, already decoded and within this instance's limits or not — the
+        /// instance checks (ABI §9.7).
+        batch: Batch,
+    },
+    /// A timer fired (ABI §7.3). Unproducible today, for the reason [`Work::GpioEdge`]
+    /// gives.
+    #[expect(
+        dead_code,
+        reason = "produced once the timer capability exists (ABI §7.3); see Work::GpioEdge"
+    )]
+    Timer {
+        /// The id `timer_set` handed the guest.
+        timer_id: u32,
+    },
+    /// A watched GPIO line changed (ABI §7.4).
+    ///
+    /// Nothing can produce one yet: the daemon refuses a block declaring the `gpio`
+    /// capability at load time. It is here because DAEMON §5's work-item set is what the
+    /// mailbox is, and a set with holes in it would be a different design that happens to
+    /// compile.
+    #[expect(
+        dead_code,
+        reason = "produced once the gpio capability exists (ABI §7.4); the executor handles \
+                  it today so the capability epic adds a producer and nothing else"
+    )]
+    GpioEdge {
+        /// The id `gpio_watch` handed the guest.
+        watch_id: u32,
+        /// The line's new level.
+        value: i32,
+    },
+    /// An HTTP response arrived (ABI §7.6). Unproducible today, for the reason
+    /// [`Work::GpioEdge`] gives.
+    #[expect(
+        dead_code,
+        reason = "produced once the http capability exists (ABI §7.6); see Work::GpioEdge"
+    )]
+    HttpDone {
+        /// The id `http_request` handed the guest.
+        req_id: u32,
+        /// The response status code.
+        status_code: i32,
+        /// The response body.
+        body: Vec<u8>,
+    },
+    /// Run `eio_stop` and end the instance (ABI §5.1 step 5).
+    Stop,
+}
+
+/// Work that did not reach an instance, handed back to its sender.
+///
+/// The work comes back rather than being dropped, because the two reasons want different
+/// answers and both of them need the payload: a full mailbox may be worth retrying or
+/// routing elsewhere, and a gone instance is a connection the router should tear down.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Undelivered {
+    /// The mailbox is full. Only [`Mailbox::try_send`] produces this; [`Mailbox::send`]
+    /// waits instead.
+    Full(Work),
+    /// The instance is gone — stopped, or dead (ABI §5.1).
+    Gone(Work),
+}
+
+/// The way in to an instance: a bounded queue of [`Work`].
+///
+/// Cloneable, so several senders can feed one instance — which is what fan-in to a block
+/// with one input port is.
+#[derive(Debug, Clone)]
+pub struct Mailbox {
+    tx: mpsc::Sender<Work>,
+}
+
+impl Mailbox {
+    /// Enqueues `work`, waiting while the mailbox is full.
+    ///
+    /// The backpressure answer: a sender that cannot get in slows down, and so does whatever
+    /// is feeding *it*. Fails only when the instance is gone, which waiting cannot fix.
+    pub async fn send(&self, work: Work) -> Result<(), Undelivered> {
+        self.tx
+            .send(work)
+            .await
+            .map_err(|error| Undelivered::Gone(error.0))
+    }
+
+    /// Enqueues `work` if there is room, and refuses immediately if there is not.
+    ///
+    /// The other answer to a full mailbox, for a sender with something better to do than
+    /// wait — a drop-oldest connection, or a host callback that must not block (ABI §1.2:
+    /// a guest→host call must never re-enter the guest, and waiting on a mailbox the guest
+    /// itself is draining would be a way to try).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the router (eieio-35h.5) is the first caller; the full-mailbox contract \
+                      is defined and tested now because the bound is meaningless without it"
+        )
+    )]
+    pub fn try_send(&self, work: Work) -> Result<(), Undelivered> {
+        self.tx.try_send(work).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(work) => Undelivered::Full(work),
+            mpsc::error::TrySendError::Closed(work) => Undelivered::Gone(work),
+        })
+    }
+}
+
+/// Something an instance did, as everything outside its thread sees it.
+///
+/// The whole observable surface of a running instance. Today `dev run-block` collects these
+/// into a report and the daemon logs them; the router (eieio-35h.5) takes
+/// [`Event::Emitted`], and supervision (DAEMON §8) takes [`Event::Died`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// A callback returned (ABI §8). `Status::Ok` or a block-level error — either way the
+    /// instance lives.
+    Status {
+        /// The callback that returned, by its ABI §4 export name minus the `eio_` prefix.
+        callback: &'static str,
+        /// What it returned, decoded.
+        status: Status,
+    },
+    /// The guest called `error` (ABI §7.0) during `callback`.
+    Detail {
+        /// The callback the detail belongs to.
+        callback: &'static str,
+        /// The code and message the guest passed.
+        detail: Detail,
+    },
+    /// A property expression failed for a signal (ABI §7.1, EXPR §8).
+    Failure(PropFailure),
+    /// The guest emitted a batch (ABI §6.2). Enqueued during `callback`, reported after it.
+    Emitted {
+        /// The callback that emitted it.
+        callback: &'static str,
+        /// The port and the batch.
+        emission: Emission,
+    },
+    /// The host declined to enter the guest at all.
+    ///
+    /// Not a callback result, because no callback ran: a batch beyond this instance's
+    /// limits is never delivered (ABI §9.7), and saying so as a status would invent a guest
+    /// return that never happened.
+    Refused {
+        /// What was refused, and why, for the operator.
+        reason: String,
+    },
+    /// The instance died (ABI §5.1 step 6). The last event; the thread is ending.
+    Died(Trap),
+    /// The instance stopped cleanly (ABI §5.1 step 5), having returned this many non-zero
+    /// callback statuses over its life (ABI §8). The last event.
+    Stopped {
+        /// The lifetime error count.
+        errors: u32,
+    },
+}
+
+/// The stream of [`Event`]s one instance produces, ending when the instance does.
+pub type Events = mpsc::UnboundedReceiver<Event>;
+
+/// The daemon's executor: the engine, and the configuration every instance is built with.
+///
+/// One per daemon. The wasmtime engine is shared because its compilation cache is (DAEMON
+/// §4), and it is the one thing here that crosses threads.
+pub struct Executor {
+    runtime: Arc<Runtime>,
+    mailbox: usize,
+}
+
+impl Executor {
+    /// Builds the executor, and with it the engine and its epoch ticker.
+    ///
+    /// `mailbox` is the depth of every instance's queue. Host configuration like the
+    /// budgets, and like them it has no ABI floor — a depth of one is legal and means every
+    /// sender waits for the previous item to be taken.
+    pub fn new(budgets: Budgets, mailbox: usize) -> anyhow::Result<Executor> {
+        anyhow::ensure!(
+            mailbox > 0,
+            "a mailbox must have room for at least one item"
+        );
+        Ok(Executor {
+            runtime: Arc::new(Runtime::new(budgets)?),
+            mailbox,
+        })
+    }
+
+    /// Loads a block, drives it to RUNNING, and leaves it on its own thread (ABI §5.1).
+    ///
+    /// Returns once the instance has accepted its configuration and started, because ABI
+    /// §5.1 begins delivery only after `eio_start` returns zero — so a [`Mailbox`] that
+    /// exists is a mailbox it is legal to post to. Everything that can go wrong before that
+    /// (validation, an unimplemented capability, a property that will not compile, a
+    /// rejected configuration, a death) comes back here as an error, and the thread is
+    /// already gone.
+    pub async fn spawn(&self, spec: InstanceSpec) -> anyhow::Result<(Instance, Events)> {
+        // ABI §4 first, off the instance's thread: a block that was never loadable fails
+        // before one is spawned, and the deployer gets a return value rather than a log line.
+        let loaded = spec.validate()?;
+        let id = String::from(loaded.instance_id());
+        let outputs = loaded.outputs().to_vec();
+
+        let (work_tx, work_rx) = mpsc::channel(self.mailbox);
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (started_tx, started_rx) = oneshot::channel();
+
+        let runtime = Arc::clone(&self.runtime);
+        let thread = std::thread::Builder::new()
+            // Visible in `top`, in a core file, and in a profiler — which is where an
+            // operator asks "which block is eating this machine" (DAEMON §11).
+            .name(format!("eio-{}-{id}", loaded.service()))
+            .spawn(move || run_instance(runtime, loaded, work_rx, event_tx, started_tx))?;
+
+        match started_rx.await {
+            Ok(Ok(())) => Ok((
+                Instance {
+                    id,
+                    outputs,
+                    mailbox: Mailbox { tx: work_tx },
+                    thread,
+                },
+                event_rx,
+            )),
+            // The instance never started. Joining is what makes that observable rather than
+            // merely likely: the thread has finished by construction, and any panic in it
+            // surfaces here instead of on a detached thread nobody is watching.
+            Ok(Err(error)) => {
+                let _ = thread.join();
+                Err(error)
+            }
+            // The thread dropped the sender without answering, which only a panic does.
+            Err(_) => {
+                let _ = thread.join();
+                Err(anyhow::anyhow!("the instance thread died while starting"))
+            }
+        }
+    }
+}
+
+/// A running instance, as everything outside its thread holds it.
+///
+/// Dropping this and every [`Mailbox`] cloned from it closes the queue, which the instance
+/// reads as a [`Work::Stop`] — so an instance cannot be leaked into a state where nothing can
+/// reach it and nothing will end it.
+#[derive(Debug)]
+pub struct Instance {
+    id: String,
+    outputs: Vec<String>,
+    mailbox: Mailbox,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Instance {
+    /// The way in.
+    pub fn mailbox(&self) -> &Mailbox {
+        &self.mailbox
+    }
+
+    /// What an [`Event::Emitted`]'s port index is called (ABI §5.2, §6.4).
+    ///
+    /// Kept here rather than in the event, because it is the same answer for every emission
+    /// this instance will ever make and the descriptor fixes it for the instance's life.
+    pub fn output_name(&self, port: u32) -> Option<&str> {
+        if port == eio_host_core::PORT_ERR {
+            // ABI §6.4: reserved, on every block, absent from the manifest's outputs.
+            return Some("err");
+        }
+        self.outputs.get(port as usize).map(String::as_str)
+    }
+
+    /// Waits for the instance's thread to finish.
+    ///
+    /// Closes the mailbox first, which stops the instance if a [`Work::Stop`] has not
+    /// already done so. Blocking, and meant to be called after the caller has drained the
+    /// [`Events`] stream to its end — at which point the thread has already returned and
+    /// this waits for nothing.
+    pub fn join(self) {
+        drop(self.mailbox);
+        if self.thread.join().is_err() {
+            tracing::error!(instance = %self.id, "the instance thread panicked");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mailbox with no reader, so `try_send` fills it and `send` would wait forever.
+    fn mailbox(capacity: usize) -> (Mailbox, mpsc::Receiver<Work>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (Mailbox { tx }, rx)
+    }
+
+    /// A work item that is not [`Work::Stop`], so a test can tell the two apart.
+    fn deliver(input_port: u32) -> Work {
+        Work::Deliver {
+            input_port,
+            batch: Batch::default(),
+        }
+    }
+
+    #[test]
+    fn a_full_mailbox_refuses_try_send_and_hands_the_work_back() {
+        let (mailbox, _rx) = mailbox(1);
+        assert_eq!(mailbox.try_send(Work::Stop), Ok(()));
+        assert_eq!(
+            mailbox.try_send(deliver(7)),
+            Err(Undelivered::Full(deliver(7))),
+            "the sender gets its work back, because a full mailbox may be worth retrying"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_waits_for_capacity_rather_than_refusing() {
+        let (mailbox, mut rx) = mailbox(1);
+        mailbox.send(Work::Stop).await.expect("the first fits");
+
+        // Nothing can complete this until something is taken out — which is the whole point
+        // of the bound, so it is asserted rather than assumed.
+        let waiting = mailbox.send(deliver(1));
+        tokio::pin!(waiting);
+        assert!(
+            poll_once(&mut waiting).is_none(),
+            "a full mailbox makes the sender wait"
+        );
+        assert_eq!(rx.recv().await, Some(Work::Stop));
+        assert_eq!(waiting.await, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn a_gone_instance_refuses_both_ways() {
+        let (mailbox, rx) = mailbox(4);
+        drop(rx);
+        assert_eq!(
+            mailbox.try_send(Work::Stop),
+            Err(Undelivered::Gone(Work::Stop))
+        );
+        assert_eq!(
+            mailbox.send(deliver(0)).await,
+            Err(Undelivered::Gone(deliver(0))),
+            "waiting cannot bring an instance back, so `send` refuses too"
+        );
+    }
+
+    /// Polls `future` once, off any runtime, and reports whether it finished.
+    fn poll_once<F: Future>(future: &mut std::pin::Pin<&mut F>) -> Option<F::Output> {
+        let waker = std::task::Waker::noop();
+        match future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(waker))
+        {
+            std::task::Poll::Ready(value) => Some(value),
+            std::task::Poll::Pending => None,
+        }
+    }
+}

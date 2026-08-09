@@ -7,17 +7,18 @@
 //! rule it obeys is obeyed inside `eio_host_core`, so the leaf runtime will obey the same
 //! one (DAEMON §1).
 //!
-//! # Why there is a tokio runtime here doing nothing asynchronous
+//! # Why this runtime has almost nothing on it
 //!
-//! DAEMON §5 puts each block instance in its own tokio task, and the management API (§9)
-//! needs a runtime regardless, so the runtime is established now rather than retrofitted.
-//! `dev run-block` does its work synchronously inside it because a wasmtime `Store` and the
-//! `Rc`-shared state around it are `!Send` — which is not an accident but the ABI showing
-//! through (§1.2: one instance, one caller at a time). Whether instances end up on a
-//! `LocalSet` or on a thread each is the executor's decision, not this file's.
+//! A wasmtime `Store` and the `Rc`-shared state around it are `!Send` — not an accident but
+//! the ABI showing through (§1.2: one instance, one caller at a time) — so every block
+//! instance lives on a thread of its own, with its own current-thread runtime (DAEMON §5,
+//! `executor`). What runs *here* is whatever talks to those instances through their
+//! mailboxes: today `dev run-block`, and later the management API (§9).
 
 mod core_fns;
 mod engine;
+mod executor;
+mod instance;
 mod json_batch;
 mod props;
 mod run;
@@ -27,10 +28,13 @@ mod end_to_end;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use eio_host_core::Limits;
 use tracing_subscriber::EnvFilter;
+
+use crate::engine::Budgets;
 
 /// The daemon's command line.
 #[derive(Debug, Parser)]
@@ -120,6 +124,23 @@ struct RunBlockArgs {
     /// Largest number of signals in one batch (ABI §9.7).
     #[arg(long, default_value_t = 1024, value_name = "SIGNALS")]
     max_batch: u32,
+
+    /// Fuel one guest entry may burn before it is killed (ABI §10).
+    ///
+    /// Roughly one unit per WASM instruction. Host configuration, not an ABI constant, so
+    /// the default is a stated number rather than a derived one.
+    #[arg(long, default_value_t = Budgets::DEFAULT_FUEL, value_name = "UNITS")]
+    fuel: u64,
+
+    /// Wall-clock time one guest entry may take before it is killed (ABI §10).
+    ///
+    /// The backstop for a callback that is blocked rather than busy, which fuel cannot see.
+    #[arg(long = "deadline-ms", default_value_t = Budgets::DEFAULT_DEADLINE.as_millis() as u64, value_name = "MS")]
+    deadline_ms: u64,
+
+    /// How many work items the instance's mailbox holds (DAEMON §5).
+    #[arg(long, default_value_t = 64, value_name = "ITEMS")]
+    mailbox: usize,
 }
 
 /// Parses a `--prop name=expression` pair.
@@ -167,7 +188,13 @@ async fn main() -> anyhow::Result<()> {
                 instance: args.instance,
                 service: args.service,
                 limits: Limits::new(args.max_payload, args.max_batch),
+                budgets: Budgets {
+                    fuel: args.fuel,
+                    deadline: Duration::from_millis(args.deadline_ms),
+                },
+                mailbox: args.mailbox,
             })
+            .await
             // The run's own report is for callers that assert on it; a terminal has already
             // seen everything worth seeing.
             .map(drop)

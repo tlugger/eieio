@@ -1,10 +1,16 @@
 //! End-to-end: a real WASM module, driven through ABI §5.1 by the real host.
 //!
-//! Everything below goes through [`run_block`](crate::run::run_block), because that is the
-//! only path that puts all the pieces in contact: `eio_manifest` validating, wasmtime
+//! Most of what is below goes through [`run_block`](crate::run::run_block), because that is
+//! the only path that puts all the pieces in contact: `eio_manifest` validating, wasmtime
 //! compiling and linking, `eio_host_core` driving, and this crate's `eio:core`
 //! implementations answering. A test that assembled the pieces itself would be testing an
 //! arrangement no user has.
+//!
+//! The last section drives the [`Executor`](crate::executor::Executor) directly, because the
+//! properties it asserts are not visible through one run of one block: serialization across
+//! *many* work items, a budget killing exactly one instance, and a second instance carrying
+//! on while the first spins. `run-block` posts two work items to one instance and cannot
+//! express any of them.
 //!
 //! Fixtures are `.wat` under `tests/blocks/`, assembled here. Text rather than bytes so a
 //! reviewer can see what each one does — and so that a block *is* readable, which matters
@@ -13,23 +19,42 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use eio_host_core::{ErrorCode, Limits, Status};
+use eio_host_core::{ErrorCode, Limits, Status, TrapKind};
 use eio_signal::Value;
 
-use crate::run::{RunBlock, RunReport, run_block};
+use crate::engine::Budgets;
+use crate::run::{RunBlock, RunReport};
 
-/// Assembles a fixture and writes it where `run_block` can read it.
+/// Runs one block to completion, on a runtime of this test's own.
 ///
-/// The command takes a path because a deployer has a file; handing it bytes would be a
-/// second entry point that no one uses.
-fn block(name: &str) -> PathBuf {
+/// `run_block` is `async` because the executor is (DAEMON §5), and every test below is a
+/// plain `#[test]` because none of them has anything concurrent to say. A current-thread
+/// runtime per test is the cheapest way to have both; the instance gets its own thread
+/// regardless, which is the whole point of the executor.
+fn run_block(args: &RunBlock) -> anyhow::Result<RunReport> {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime")
+        .block_on(crate::run::run_block(args))
+}
+
+/// Assembles a fixture.
+fn wasm(name: &str) -> Vec<u8> {
     let source = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/blocks")
             .join(name),
     )
     .expect("the fixture exists");
-    let wasm = wat::parse_str(&source).expect("the fixture assembles");
+    wat::parse_str(&source).expect("the fixture assembles")
+}
+
+/// Assembles a fixture and writes it where `run_block` can read it.
+///
+/// The command takes a path because a deployer has a file; handing it bytes would be a
+/// second entry point that no one uses.
+fn block(name: &str) -> PathBuf {
+    let wasm = wasm(name);
 
     // A path unique to this call, not to the fixture: several tests use the same `.wat`,
     // libtest runs them concurrently, and a shared path means one test truncating the file
@@ -56,6 +81,11 @@ fn args(name: &str) -> RunBlock {
         service: String::from("test"),
         // Explicit, because ABI §9.7 gives them no floor to fall back on (SCOPE §3.4).
         limits: Limits::new(64 * 1024, 1024),
+        // Likewise ABI §10: budgets are host configuration. Generous, because these tests
+        // are about the ABI rather than about the budgets — the ones that *are* about the
+        // budgets state their own.
+        budgets: Budgets::default(),
+        mailbox: 8,
     }
 }
 
@@ -205,17 +235,22 @@ fn a_non_zero_callback_return_is_reported_and_the_instance_still_stops() {
 
 // ── observability (DAEMON §11) ──────────────────────────────────────────────
 
-thread_local! {
-    /// What this thread has logged since it last cleared the buffer.
-    static LOGGED: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
-}
+/// Everything the test binary has logged since the buffer was last cleared.
+///
+/// One buffer for every thread, not one per thread: an instance runs on a thread of its own
+/// (DAEMON §5), so the guest's `log` calls and the daemon's own lines about that instance
+/// arrive from a thread the test never touches. A thread-local buffer would capture neither.
+///
+/// Sharing it with the concurrently running tests is harmless, because the assertions below
+/// look for lines belonging to *this* test's service and instance and the rest is noise.
+static LOGGED: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
-/// A writer that appends to the calling thread's buffer.
+/// A writer that appends to the shared buffer.
 struct Captured;
 
 impl std::io::Write for Captured {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        LOGGED.with_borrow_mut(|buffer| buffer.extend_from_slice(bytes));
+        LOGGED.lock().expect("the buffer").extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -227,11 +262,9 @@ impl std::io::Write for Captured {
 /// Installs the capturing subscriber, once, for the whole test binary.
 ///
 /// A *global* default rather than a scoped one, and that is the point rather than a
-/// convenience: `tracing` caches each callsite's interest globally, so a thread-scoped
-/// subscriber installed after another test has already evaluated the callsite under no
-/// subscriber at all sees nothing — a test that passes alone and fails in the suite. One
-/// global subscriber writing into a per-thread buffer has neither problem, and the other
-/// tests' output simply goes into buffers nobody reads.
+/// convenience: `tracing` caches each callsite's interest globally, so a scoped subscriber
+/// installed after another test has already evaluated the callsite under no subscriber at
+/// all sees nothing — a test that passes alone and fails in the suite.
 fn capture_logs() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -241,7 +274,12 @@ fn capture_logs() {
             .with_max_level(tracing::Level::TRACE)
             .init();
     });
-    LOGGED.with_borrow_mut(Vec::clear);
+    LOGGED.lock().expect("the buffer").clear();
+}
+
+/// What has been logged so far.
+fn logged() -> String {
+    String::from_utf8(LOGGED.lock().expect("the buffer").clone()).expect("utf-8")
 }
 
 #[test]
@@ -257,7 +295,7 @@ fn every_line_is_tagged_with_the_service_and_instance() {
     args.service = String::from("kitchen");
     run_block(&args).expect("the block runs");
 
-    let logged = LOGGED.with_borrow(|buffer| String::from_utf8(buffer.clone()).expect("utf-8"));
+    let logged = logged();
     assert!(
         logged.contains("service=kitchen"),
         "the service field is missing from:\n{logged}"
@@ -409,4 +447,306 @@ fn a_module_exporting_an_abi_this_host_does_not_implement_is_refused() {
     let message = error.to_string();
     assert!(message.contains("2.0"), "{message}");
     assert!(message.contains("1.0"), "{message}");
+}
+
+// ── the executor (DAEMON §5) ────────────────────────────────────────────────
+
+use std::time::{Duration, Instant};
+
+use crate::executor::{Event, Executor, Instance, Work};
+use crate::instance::InstanceSpec;
+
+/// The block `name`, as the executor takes it, with no properties and generous limits.
+fn spec(name: &str) -> InstanceSpec {
+    InstanceSpec {
+        wasm: wasm(name),
+        registry: None,
+        props: BTreeMap::new(),
+        instance: None,
+        service: String::from("test"),
+        limits: Limits::new(64 * 1024, 1024),
+    }
+}
+
+/// A one-signal batch, as a `Deliver` for `input_port`.
+fn deliver(input_port: u32) -> Work {
+    let mut signal = eio_signal::Signal::new();
+    signal.set("n", Value::Int(1));
+    let mut batch = eio_signal::Batch::new();
+    batch.push(signal);
+    Work::Deliver { input_port, batch }
+}
+
+/// Posts `work`, failing the test rather than the run if the instance has already gone.
+async fn post(instance: &Instance, work: Work) {
+    instance
+        .mailbox()
+        .send(work)
+        .await
+        .expect("the instance is still there");
+}
+
+/// Drains an instance's events to the end — which is where its thread has finished.
+async fn drain(mut events: crate::executor::Events) -> Vec<Event> {
+    let mut all = Vec::new();
+    while let Some(event) = events.recv().await {
+        all.push(event);
+    }
+    all
+}
+
+/// Every callback status in `events`, in order (ABI §8).
+fn statuses(events: &[Event]) -> Vec<Status> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Status { status, .. } => Some(*status),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How the instance ended, if `events` runs to its end.
+fn ending(events: &[Event]) -> Option<&Event> {
+    events
+        .iter()
+        .find(|event| matches!(event, Event::Died(_) | Event::Stopped { .. }))
+}
+
+#[tokio::test]
+async fn callbacks_never_overlap_however_full_the_mailbox_is() {
+    // ABI §1.2: "the host MUST NOT call into a guest that is mid-call." The canary reports
+    // an overlap as a non-zero status on that callback and every later one, so a burst that
+    // fills the mailbox several times over and *still* returns nothing but zeroes is the
+    // assertion. Port 0 emits, which puts the guest on the host's stack — the one opening a
+    // host would have to re-enter through (ABI §6.2).
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let (instance, events) = executor.spawn(spec("canary.wat")).await.expect("it starts");
+
+    for _ in 0..64 {
+        post(&instance, deliver(0)).await;
+    }
+    post(&instance, Work::Stop).await;
+    let events = drain(events).await;
+    instance.join();
+
+    assert_eq!(
+        statuses(&events).into_iter().filter(|s| !s.is_ok()).count(),
+        0,
+        "the guest was never entered while it was already inside a call: {events:#?}"
+    );
+    assert_eq!(
+        statuses(&events).len(),
+        67,
+        "configure, start, 64 deliveries and stop — every one of them ran"
+    );
+}
+
+#[tokio::test]
+async fn the_canary_can_tell_when_it_has_been_re_entered() {
+    // The negative half of the test above: a detector that has never fired is
+    // indistinguishable from one that cannot. Port 2 enters without leaving, which is the
+    // depth a re-entering host would produce, so the *next* callback must report it.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let (instance, events) = executor.spawn(spec("canary.wat")).await.expect("it starts");
+
+    post(&instance, deliver(2)).await;
+    post(&instance, deliver(1)).await;
+    post(&instance, Work::Stop).await;
+    let events = drain(events).await;
+    instance.join();
+
+    assert_eq!(
+        statuses(&events),
+        [
+            Status::Ok,
+            Status::Ok,
+            Status::Ok,
+            Status::Failed(ErrorCode::InvalidArg),
+            Status::Failed(ErrorCode::InvalidArg),
+        ],
+        "configure, start and the wedging delivery are clean; everything after it is not"
+    );
+}
+
+#[tokio::test]
+async fn a_spinning_guest_runs_out_of_fuel_and_dies() {
+    // ABI §10: "exhaustion is a trap (→ DEAD)". Enough fuel to instantiate, configure and
+    // start; nowhere near enough for an unbounded loop.
+    let budgets = Budgets {
+        fuel: 1_000_000,
+        deadline: Duration::from_secs(60),
+    };
+    let executor = Executor::new(budgets, 4).expect("an executor");
+    let (instance, events) = executor
+        .spawn(spec("spinner.wat"))
+        .await
+        .expect("it starts");
+
+    post(&instance, deliver(0)).await;
+    let events = drain(events).await;
+    instance.join();
+
+    match ending(&events) {
+        Some(Event::Died(trap)) => assert_eq!(trap.kind, TrapKind::Fuel),
+        other => panic!("expected a fuel death, got {other:?}"),
+    }
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Stopped { .. })),
+        "a dead instance is not stopped: ABI §5.1 has no path from DEAD"
+    );
+}
+
+#[tokio::test]
+async fn a_guest_that_overruns_its_deadline_dies_of_the_deadline() {
+    // The other budget of ABI §10, and the one that catches a callback that is blocked
+    // rather than busy. Fuel is effectively unlimited here so that the deadline is
+    // unambiguously what killed it.
+    let budgets = Budgets {
+        fuel: u64::MAX,
+        deadline: Duration::from_millis(50),
+    };
+    let executor = Executor::new(budgets, 4).expect("an executor");
+    let (instance, events) = executor
+        .spawn(spec("spinner.wat"))
+        .await
+        .expect("it starts");
+
+    post(&instance, deliver(0)).await;
+    let events = drain(events).await;
+    instance.join();
+
+    match ending(&events) {
+        Some(Event::Died(trap)) => assert_eq!(trap.kind, TrapKind::Deadline),
+        other => panic!("expected a deadline death, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_trap_kills_the_instance_and_a_non_zero_return_does_not() {
+    // ABI §8's rule, both halves, from the executor's side.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let (instance, events) = executor
+        .spawn(spec("trapper.wat"))
+        .await
+        .expect("it starts");
+
+    post(&instance, deliver(0)).await;
+    let events = drain(events).await;
+    instance.join();
+
+    match ending(&events) {
+        Some(Event::Died(trap)) => assert_eq!(trap.kind, TrapKind::Trap),
+        other => panic!("expected a trap, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_spinning_instance_does_not_stall_another_one() {
+    // The reason DAEMON §5.1's "a `LocalSet` or a thread each" is resolved as a thread each:
+    // a hostile block's blast radius is the block. The spinner is given three seconds of
+    // wall clock and unlimited fuel, so it is definitely still spinning while the second
+    // instance is asked to do its work.
+    let budgets = Budgets {
+        fuel: u64::MAX,
+        deadline: Duration::from_secs(3),
+    };
+    let executor = Executor::new(budgets, 4).expect("an executor");
+    let (spinner, mut spinner_events) = executor.spawn(spec("spinner.wat")).await.expect("starts");
+    let (echo, echo_events) = executor
+        .spawn(InstanceSpec {
+            props: echo_props(),
+            ..spec("echo.wat")
+        })
+        .await
+        .expect("starts");
+
+    post(&spinner, deliver(0)).await;
+    let began = Instant::now();
+    post(&echo, deliver(0)).await;
+    post(&echo, Work::Stop).await;
+    let events = drain(echo_events).await;
+    let elapsed = began.elapsed();
+    echo.join();
+
+    assert!(
+        matches!(ending(&events), Some(Event::Stopped { .. })),
+        "the second instance ran its whole lifecycle: {events:#?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "it took {elapsed:?}, which means it was waiting for the spinner"
+    );
+    // Its `configure` and `start` statuses are already queued, so what matters is that its
+    // *ending* is not: an instance that had already died of its deadline would have proved
+    // nothing about running alongside one that had not.
+    let mut seen = Vec::new();
+    while let Ok(event) = spinner_events.try_recv() {
+        seen.push(event);
+    }
+    assert!(
+        ending(&seen).is_none(),
+        "the spinner really was still spinning while it happened: {seen:#?}"
+    );
+    // Left to die of its own deadline: joining it would be waiting for the spin this test
+    // exists to prove nobody has to wait for.
+    drop(spinner);
+}
+
+#[tokio::test]
+async fn an_instance_whose_senders_are_all_gone_stops_itself() {
+    // A mailbox nothing can post to again is a stop: the guest still gets ABI §5.1 step 5
+    // rather than being left running with nothing to do.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let (instance, events) = executor
+        .spawn(InstanceSpec {
+            props: echo_props(),
+            ..spec("echo.wat")
+        })
+        .await
+        .expect("it starts");
+
+    instance.join();
+    let events = drain(events).await;
+
+    assert!(
+        matches!(ending(&events), Some(Event::Stopped { errors: 0 })),
+        "{events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_batch_beyond_the_limits_is_refused_without_entering_the_guest() {
+    // ABI §9.7 from the executor's side: the instance lives, no callback ran, and the
+    // refusal says which limit and by how much.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let (instance, events) = executor
+        .spawn(InstanceSpec {
+            props: echo_props(),
+            limits: Limits::new(4, 1024),
+            ..spec("echo.wat")
+        })
+        .await
+        .expect("it starts");
+
+    post(&instance, deliver(0)).await;
+    post(&instance, Work::Stop).await;
+    let events = drain(events).await;
+    instance.join();
+
+    let refused = events.iter().find_map(|event| match event {
+        Event::Refused { reason } => Some(reason.clone()),
+        _ => None,
+    });
+    assert!(
+        refused
+            .as_deref()
+            .is_some_and(|r| r.contains("max_payload")),
+        "{events:#?}"
+    );
+    assert_eq!(
+        statuses(&events),
+        [Status::Ok, Status::Ok, Status::Ok],
+        "configure, start and stop — process_signals was never called"
+    );
 }

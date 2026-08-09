@@ -31,13 +31,32 @@
 //! names only", and a module importing `eio:core` `log` with the wrong arity fails to
 //! instantiate.
 //!
+//! # Both budgets of ABI §10, armed on every guest entry
+//!
+//! A callback's budget is refreshed inside [`Engine::call`] rather than by the lifecycle
+//! driver, for the reason the dispatch table exists: the driver is `eio_host_core`'s and
+//! knows nothing about fuel. `call` is the one place every guest entry passes through, so
+//! arming it there is exhaustive by construction — including `eio_alloc`, which is a guest
+//! call like any other and is just as capable of spinning.
+//!
+//! Both budgets, not one, because they measure different things and DAEMON §5.1's trap
+//! table already names both: **fuel** bounds *work* and is deterministic, so the same block
+//! given the same batch dies at the same instruction on every run rather than only on a busy
+//! machine; **epoch interruption** bounds *wall-clock time*, which is what an operator
+//! actually promised. A guest blocked in a host function burns no fuel at all, so fuel alone
+//! would leave that case unbounded.
+//!
+//! Epoch interruption needs someone to advance the epoch, so a [`Runtime`] owns a ticker
+//! thread that does — one per engine, not one per instance. It holds a *weak* handle, so the
+//! last [`Runtime`] dropping is what ends it; nothing has to remember to shut it down.
+//!
 //! # What is deliberately not here
 //!
-//! - **Fuel and epoch budgets** (ABI §10). They are the executor's, and arrive with it.
 //! - **The post-MVP proposal list** (ABI §1, §4.3). [`Runtime::new`] takes wasmtime's
 //!   defaults today, which accept more than core MVP; disabling them is its own issue.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use eio_host_core::exports::{core_fn, namespace};
 use eio_host_core::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
@@ -51,6 +70,15 @@ use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val};
 /// plausible number: ABI §8's `ERR_UNSUPPORTED` is "a valid call, unimplemented on this
 /// host", which is precisely the situation.
 const UNIMPLEMENTED: i32 = eio_host_core::ErrorCode::Unsupported.as_i32();
+
+/// How often the epoch ticker advances the engine's epoch.
+///
+/// The resolution of every wall-clock deadline. A deadline is rounded *up* to whole ticks,
+/// and the ticker's phase is unrelated to when a guest was entered, so a 50 ms deadline
+/// fires somewhere between 49 ms and 50 ms in — within one tick of what was asked for,
+/// either side. That is imprecision an operator can ignore at any budget worth setting, and
+/// one sleeping thread per process is a cost that does not scale with the instance count.
+const EPOCH_TICK: Duration = Duration::from_millis(1);
 
 /// The most arguments any guest export takes.
 ///
@@ -126,26 +154,80 @@ struct State {
     core: [Option<HostFn>; CoreFn::ALL.len()],
 }
 
+/// What one guest entry is allowed to consume (ABI §10).
+///
+/// Host configuration, not ABI constants — §10 says so plainly, and leaf hosts will be
+/// tighter. Both numbers are therefore stated by whoever builds a [`Runtime`] rather than
+/// defaulted silently anywhere below this type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budgets {
+    /// Fuel per guest entry. wasmtime's unit: roughly one per WASM instruction executed.
+    pub fuel: u64,
+    /// Wall-clock time per guest entry, rounded up to [`EPOCH_TICK`].
+    pub deadline: Duration,
+}
+
+impl Budgets {
+    /// Enough fuel for a callback doing real work, and far too little for a spin.
+    ///
+    /// A number with no ABI meaning (§10: "budgets are host configuration, not ABI
+    /// constants"), stated here so that a daemon started with no configuration still
+    /// enforces *something* — an unbudgeted callback is the one thing §10 does not allow.
+    /// `node.toml` will supply the real one (DAEMON §2).
+    pub const DEFAULT_FUEL: u64 = 100_000_000;
+
+    /// The wall-clock companion to [`Budgets::DEFAULT_FUEL`], chosen the same way.
+    ///
+    /// Generous on purpose: it is the backstop for a callback blocked in a host function,
+    /// which fuel cannot see, rather than the primary limit.
+    pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(1);
+
+    /// The deadline in whole [`EPOCH_TICK`]s, rounded up and never zero.
+    ///
+    /// Zero would mean "already expired", which would kill every instance on its first call
+    /// — so a deadline shorter than one tick is one tick, and the log line an operator gets
+    /// is a deadline trap rather than a mystery.
+    fn epoch_ticks(self) -> u64 {
+        let tick = EPOCH_TICK.as_nanos();
+        let ticks = self.deadline.as_nanos().div_ceil(tick);
+        u64::try_from(ticks).unwrap_or(u64::MAX).max(1)
+    }
+}
+
+impl Default for Budgets {
+    fn default() -> Budgets {
+        Budgets {
+            fuel: Budgets::DEFAULT_FUEL,
+            deadline: Budgets::DEFAULT_DEADLINE,
+        }
+    }
+}
+
 /// The wasmtime engine, shared by every instance this daemon runs.
 ///
 /// Compilation artifacts are cached per engine, so there is one of these per process rather
-/// than one per block.
+/// than one per block. `Send + Sync`, unlike everything downstream of it, which is what lets
+/// one engine serve an instance on every thread (DAEMON §5).
 pub struct Runtime {
     engine: wasmtime::Engine,
+    budgets: Budgets,
 }
 
 impl Runtime {
-    /// Builds the engine.
+    /// Builds the engine and starts its epoch ticker.
     ///
-    /// The configuration is wasmtime's default plus nothing, which is **not yet** ABI §1's
-    /// "core WASM only": wasmtime enables several post-MVP proposals by default, and
-    /// disabling them is eieio-35h.7's subject. What is already narrower than the default is
-    /// the *feature* set (workspace `Cargo.toml`): threads, the component model and GC are
-    /// compiled out, so no configuration can turn them back on.
-    pub fn new() -> anyhow::Result<Runtime> {
-        Ok(Runtime {
-            engine: wasmtime::Engine::new(&Config::new())?,
-        })
+    /// The configuration is wasmtime's default plus the two budget mechanisms, which is
+    /// **not yet** ABI §1's "core WASM only": wasmtime enables several post-MVP proposals by
+    /// default, and disabling them is eieio-35h.7's subject. What is already narrower than
+    /// the default is the *feature* set (workspace `Cargo.toml`): threads, the component
+    /// model and GC are compiled out, so no configuration can turn them back on.
+    pub fn new(budgets: Budgets) -> anyhow::Result<Runtime> {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        config.epoch_interruption(true);
+        let engine = wasmtime::Engine::new(&config)?;
+        spawn_epoch_ticker(&engine)?;
+        Ok(Runtime { engine, budgets })
     }
 
     /// Compiles and instantiates `wasm`, with `eio:core` linked but not yet implemented.
@@ -169,6 +251,10 @@ impl Runtime {
                 core: [const { None }; CoreFn::ALL.len()],
             },
         );
+        // Before instantiation, not just before the callbacks: a store with fuel metering on
+        // starts with none, and instantiation runs the module's own initialisation (ABI §5.1
+        // step 1). Unarmed, every block would die on the way in.
+        arm(&mut store, self.budgets)?;
         let instance = linker.instantiate(&mut store, &module)?;
 
         let memory = instance
@@ -192,8 +278,40 @@ impl Runtime {
             store,
             memory,
             funcs,
+            budgets: self.budgets,
         })
     }
+}
+
+/// Gives `store` a full budget for one guest entry (ABI §10).
+fn arm(store: &mut Store<State>, budgets: Budgets) -> anyhow::Result<()> {
+    store
+        .set_fuel(budgets.fuel)
+        .map_err(|error| anyhow::anyhow!("this engine does not meter fuel: {error}"))?;
+    store.set_epoch_deadline(budgets.epoch_ticks());
+    Ok(())
+}
+
+/// Starts the thread that advances `engine`'s epoch, and ends when the engine is gone.
+///
+/// A *weak* handle rather than a clone, so that this thread is not what keeps the engine
+/// alive: when the last [`Runtime`] is dropped the upgrade fails and the loop returns. A
+/// strong clone here would make the ticker immortal and the engine unfreeable, which in a
+/// test binary means one leaked thread per test.
+fn spawn_epoch_ticker(engine: &wasmtime::Engine) -> anyhow::Result<()> {
+    let weak = engine.weak();
+    std::thread::Builder::new()
+        .name(String::from("eio-epoch"))
+        .spawn(move || {
+            loop {
+                std::thread::sleep(EPOCH_TICK);
+                match weak.upgrade() {
+                    Some(engine) => engine.increment_epoch(),
+                    None => return,
+                }
+            }
+        })?;
+    Ok(())
 }
 
 /// An exported function, with the arity its results buffer needs.
@@ -209,6 +327,8 @@ pub struct Guest {
     store: Store<State>,
     memory: wasmtime::Memory,
     funcs: BTreeMap<String, Exported>,
+    /// Refreshed on every entry through [`Engine::call`] (ABI §10).
+    budgets: Budgets,
 }
 
 impl Engine for Guest {
@@ -232,6 +352,13 @@ impl Engine for Guest {
         for (slot, arg) in params.iter_mut().zip(args) {
             *slot = Val::I32(*arg);
         }
+        // ABI §10, for this entry and no further. Both budgets are set from scratch rather
+        // than topped up, because §10 budgets a *callback*: what the previous one spent is
+        // not this one's business, and a guest cannot bank an unspent allowance.
+        arm(&mut self.store, self.budgets).map_err(|error| {
+            // Unreachable: `Runtime::new` is the only way to a `Guest`, and it enables fuel.
+            Trap::with_detail(TrapKind::Engine, format!("{error}"))
+        })?;
         let mut results = [Val::I32(0)];
         exported
             .func
