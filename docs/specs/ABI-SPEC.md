@@ -212,12 +212,12 @@ Properties are always expressions, evaluated **host-side, per-signal, on demand*
 - `signal_idx` identifies a signal **within the batch of the current `eio_process_signals` call**, explicitly — no hidden cursor. Outside `process_signals`, or for signal-independent evaluation, pass `SIGNAL_NONE`.
 - Result is the CBOR-encoded evaluated value, written to `(buf, cap)`. The value MUST satisfy the property's declared `type` (§11.1) and MUST be encoded as that type — an int promoted to a `float` property is encoded as a float, so the guest decodes what was declared. A value that does not satisfy it is `RESULT_TYPE` (EXPR §8), returned as `ERR_EXPR`.
 - Return convention (§8): `0..=cap` bytes written; `> cap` = required size, nothing written, guest grows buffer and retries; `< 0` = error.
-- The host MUST cache evaluation results keyed by `(instance, prop_id, signal_idx)` for the duration of the current callback, so the grow-and-retry path does not re-evaluate.
-- **Constant folding:** the host MUST parse all property expressions at configure time and SHOULD detect signal-independence statically; signal-independent expressions are evaluated once and served from cache regardless of `signal_idx`.
+- The host MUST cache evaluation results keyed by `(instance, prop_id, signal_idx)` for the duration of the current callback, so the grow-and-retry path does not re-evaluate. The cache MUST NOT outlive the callback: `signal_idx` numbers signals within *this* call's batch, so a value carried into the next callback would answer a different question than the one asked.
+- **Constant folding:** the host MUST parse all property expressions at configure time and SHOULD detect signal-independence statically; signal-independent expressions are evaluated once and served from cache regardless of `signal_idx`. That result is the expression's for the life of the instance, and a folded expression that *fails* is folded too — expressions are pure and terminating (EXPR §1), so re-evaluating one would spend budget to reach the same error, and the failure is reported once rather than once per call.
 - **No-context error:** evaluating a signal-dependent expression with `SIGNAL_NONE` MUST return `ERR_NO_SIGNAL_CONTEXT`, never a null value.
 - **Per-signal failure:** an expression that fails against a particular signal (missing attribute, type mismatch) returns `ERR_EXPR` _for that call only_; the instance is unaffected. The block chooses: skip the signal, substitute a default, or route it to `PORT_ERR`. The host MUST log the failure and SHOULD surface it in signal taps.
 
-`prop` calls with `signal_idx` outside the current batch (and not `SIGNAL_NONE`) return `ERR_INVALID_ARG`.
+`prop` calls with `signal_idx` outside the current batch (and not `SIGNAL_NONE`) return `ERR_INVALID_ARG`, and so do calls with a `prop_id` outside the manifest's `properties` list (§8: a bad index). The `signal_idx` check applies whatever the property is: a signal-independent expression served from the fold MUST still refuse an out-of-range index, or two properties of one block would answer the same bad argument differently.
 
 ### 7.2 `eio:state` — capability `state`
 

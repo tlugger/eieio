@@ -5,9 +5,13 @@
 //! ownership conventions (§6.1, §9), and the status/size/id return protocol (§8). The
 //! daemon drives it with wasmtime; the leaf runtime will drive it with WAMR or wasm3.
 //!
+//! …and the property access protocol (§7.1), which is where the three crates below this
+//! one meet: `eio_expr` parses and evaluates, `eio_signal` supplies the batch and carries
+//! the result, `eio_manifest` says what type that result must be.
+//!
 //! `no_std` (`alloc` permitted) is a hard requirement, because the leaf runtime compiles
-//! this crate onto an MCU (DAEMON §1). It has one dependency, `eio_signal`, and no engine
-//! anywhere in it.
+//! this crate onto an MCU (DAEMON §1). Its dependencies are the other three ★ crates, and
+//! there is no engine anywhere in it.
 //!
 //! # Why one crate, driven twice
 //!
@@ -102,6 +106,7 @@ mod descriptor;
 mod engine;
 mod instance;
 mod memory;
+mod prop;
 mod status;
 
 pub mod exports;
@@ -113,6 +118,7 @@ pub use instance::{
     check_required_exports,
 };
 pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer};
+pub use prop::{CompileError, PropContext, PropFailure, PropertySource};
 pub use status::{ErrorCode, Id, Size, Status};
 
 /// No signal context: property evaluation outside `process_signals` (ABI §3, §7.1).

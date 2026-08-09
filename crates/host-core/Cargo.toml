@@ -12,6 +12,15 @@ repository.workspace = true
 # builds one and delivers the other.
 eio-signal.workspace = true
 
+# Properties are expressions, evaluated host-side per signal (ABI §7.1). The
+# parser, the static analyser and the interpreter all come from here — a host
+# that approximated any of them would be the divergence ABI §13 forbids.
+eio-expr.workspace = true
+
+# The declared property type, and the one implementation of which values satisfy
+# it (ABI §11.1). `prop` type-checks every evaluated value against it.
+eio-manifest.workspace = true
+
 # Deliberately absent: wasmtime, and anything else engine-shaped. This crate is
 # the half of the host that the MCU leaf runtime also compiles (DAEMON-SPEC §1),
 # so an engine reaches it through the `Engine` trait or not at all. The daemon
