@@ -13,6 +13,7 @@
 //! which stays absent rather than becoming `null` (ABI §11.1). So a parse → emit →
 //! parse cycle is lossless, and the emitted key order is stable enough to diff.
 
+use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -381,13 +382,37 @@ impl PropertyType {
     ///
     /// Returns `Some` exactly when [`Self::accepts`] is true — `accepts` decides, this
     /// applies what it licensed, and `conform_agrees_with_accepts` pins the pair.
+    /// Written in terms of [`Self::conform_ref`] so the conversion exists once. A value
+    /// that needed no conversion is handed back by *move* rather than by cloning what the
+    /// borrow pointed at — which is why this is not `conform_ref(..).map(Cow::into_owned)`.
     pub fn conform(self, value: Value) -> Option<Value> {
-        if !self.accepts(&value) {
+        let converted = match self.conform_ref(&value)? {
+            Cow::Owned(converted) => Some(converted),
+            Cow::Borrowed(_) => None,
+        };
+        Some(converted.unwrap_or(value))
+    }
+
+    /// [`Self::conform`] without taking ownership: the value as this type, borrowed
+    /// wherever no conversion applies.
+    ///
+    /// The same rule, in the shape a host serving `prop` needs (ABI §7.1). A property
+    /// result reaches the host as a borrow of the signal's own attribute — `eio_expr`'s
+    /// `Shared` — and `conform` would deep-copy it just to hand it back unchanged. Here
+    /// the copy happens only where a conversion actually produces a new value, which is
+    /// the single int → float case; a `bytes` or `any` property carrying a whole map is
+    /// encoded straight out of the signal.
+    ///
+    /// Not a second implementation of the rule: [`Self::accepts`] still decides, and
+    /// `conform_ref_agrees_with_conform` pins the two against each other over the whole
+    /// value space.
+    pub fn conform_ref(self, value: &Value) -> Option<Cow<'_, Value>> {
+        if !self.accepts(value) {
             return None;
         }
         Some(match (self, value) {
-            (PropertyType::Float, Value::Int(n)) => Value::Float(n as f64),
-            (_, value) => value,
+            (PropertyType::Float, Value::Int(n)) => Cow::Owned(Value::Float(*n as f64)),
+            (_, value) => Cow::Borrowed(value),
         })
     }
 }

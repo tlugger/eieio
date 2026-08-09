@@ -16,6 +16,8 @@
 //! failure is a per-signal outcome and budgets are host configuration, so rejecting one
 //! would make a document's validity depend on which host read it.
 
+use std::borrow::Cow;
+
 use eio_manifest::{Error, PropertyType, parse};
 use eio_signal::{Map, Value};
 
@@ -125,6 +127,32 @@ fn conform_agrees_with_accepts_and_promotes_what_it_licensed() {
                     }
                     _ => assert_eq!(conformed, value, "an accepted value passes through"),
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn conform_ref_agrees_with_conform_and_borrows_where_nothing_converts() {
+    for (_, value) in every_kind() {
+        for declared in PropertyType::ALL {
+            let borrowed = declared.conform_ref(&value);
+            assert_eq!(
+                borrowed.as_deref().cloned(),
+                declared.conform(value.clone()),
+                "{}'s two conform shapes disagree about {value:?}",
+                declared.as_str()
+            );
+            // The whole reason the borrowing form exists (ABI §7.1): a host encoding a
+            // property result must not deep-copy a signal's attribute to hand it back
+            // unchanged. Only the int → float promotion may own.
+            if let Some(conformed) = borrowed {
+                assert_eq!(
+                    matches!(conformed, Cow::Owned(_)),
+                    matches!((declared, &value), (PropertyType::Float, Value::Int(_))),
+                    "{} copied {value:?} without converting it",
+                    declared.as_str()
+                );
             }
         }
     }
