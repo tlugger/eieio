@@ -1,0 +1,205 @@
+//! The eieio daemon (DAEMON-SPEC).
+//!
+//! A daemon-class node runtime (SCOPE §3.7). Today it is a skeleton: it can load one block,
+//! configure it, start it, deliver a batch and print what the block emits. Services, the
+//! router, the executor, the block cache and the management API arrive with their own
+//! epics; what is already load-bearing is the split this crate sits on top of — every ABI
+//! rule it obeys is obeyed inside `eio_host_core`, so the leaf runtime will obey the same
+//! one (DAEMON §1).
+//!
+//! # Why there is a tokio runtime here doing nothing asynchronous
+//!
+//! DAEMON §5 puts each block instance in its own tokio task, and the management API (§9)
+//! needs a runtime regardless, so the runtime is established now rather than retrofitted.
+//! `dev run-block` does its work synchronously inside it because a wasmtime `Store` and the
+//! `Rc`-shared state around it are `!Send` — which is not an accident but the ABI showing
+//! through (§1.2: one instance, one caller at a time). Whether instances end up on a
+//! `LocalSet` or on a thread each is the executor's decision, not this file's.
+
+mod core_fns;
+mod engine;
+mod json_batch;
+mod props;
+mod run;
+
+#[cfg(test)]
+mod end_to_end;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+use eio_host_core::Limits;
+use tracing_subscriber::EnvFilter;
+
+/// The daemon's command line.
+#[derive(Debug, Parser)]
+#[command(
+    name = "eio-daemon",
+    version,
+    about = "The eieio daemon-class node runtime"
+)]
+struct Cli {
+    /// Node data directory (DAEMON-SPEC §2).
+    ///
+    /// Accepted now so that scripts and unit files can be written against it; nothing reads
+    /// its contents yet — the on-disk layout is its own issue.
+    #[arg(long, global = true, default_value = "/etc/eieio")]
+    data_dir: PathBuf,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Development commands: run and inspect blocks outside any service.
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DevCommand {
+    /// Load one block, drive it through its lifecycle, and print what it emits.
+    RunBlock(RunBlockArgs),
+}
+
+/// `dev run-block` (DAEMON-SPEC §12).
+#[derive(Debug, Args)]
+struct RunBlockArgs {
+    /// The block's `.wasm` module.
+    wasm: PathBuf,
+
+    /// A registry manifest to validate the module against (ABI §4.4).
+    ///
+    /// Optional: a module carrying an `eio:manifest` custom section describes itself. When
+    /// both are present they must agree.
+    #[arg(long, value_name = "PATH")]
+    manifest: Option<PathBuf>,
+
+    /// A property expression, as `name=expression`. Repeatable.
+    ///
+    /// Stands in for a service file's property table (DAEMON §2). A property with no value
+    /// here falls back to the manifest's `default`, and fails configuration if it is
+    /// `required` and has neither (ABI §11.1).
+    #[arg(long = "prop", value_name = "NAME=EXPR", value_parser = property)]
+    props: Vec<(String, String)>,
+
+    /// A batch to deliver, as JSON: an array of objects (DAEMON §12).
+    ///
+    /// A debug input, not a wire format — the mapping cannot express byte strings and tells
+    /// ints from floats by how the number is written. Omit to run the lifecycle with no
+    /// delivery, which is what a timer-driven block wants.
+    #[arg(long, value_name = "JSON", conflicts_with = "batch_file")]
+    batch: Option<String>,
+
+    /// The same, read from a file.
+    #[arg(long, value_name = "PATH")]
+    batch_file: Option<PathBuf>,
+
+    /// Which input port to deliver the batch on.
+    #[arg(long, default_value_t = 0, value_name = "INDEX")]
+    input_port: u32,
+
+    /// The instance id the descriptor carries. Defaults to the block's name.
+    #[arg(long, value_name = "ID")]
+    instance: Option<String>,
+
+    /// The service name the logs are tagged with (DAEMON §11).
+    #[arg(long, default_value = "dev", value_name = "NAME")]
+    service: String,
+
+    /// Largest payload, in bytes, this instance may emit or receive (ABI §9.7).
+    ///
+    /// Host configuration with no floor (SCOPE §3.4), so it is stated rather than assumed.
+    #[arg(long, default_value_t = 64 * 1024, value_name = "BYTES")]
+    max_payload: u32,
+
+    /// Largest number of signals in one batch (ABI §9.7).
+    #[arg(long, default_value_t = 1024, value_name = "SIGNALS")]
+    max_batch: u32,
+}
+
+/// Parses a `--prop name=expression` pair.
+///
+/// Split at the *first* `=`, because an expression is full of them: `--prop
+/// hot='(= $state "on")'` is one property named `hot`.
+fn property(argument: &str) -> Result<(String, String), String> {
+    match argument.split_once('=') {
+        Some((name, expression)) if !name.is_empty() => {
+            Ok((name.to_string(), expression.to_string()))
+        }
+        _ => Err(String::from("expected NAME=EXPRESSION")),
+    }
+}
+
+/// The runtime DAEMON §5's executor and §9's API will share. See the module docs.
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    tracing::debug!(data_dir = %cli.data_dir.display(), "starting");
+
+    match cli.command {
+        Command::Dev {
+            command: DevCommand::RunBlock(args),
+        } => {
+            let batch = match &args.batch_file {
+                Some(path) => Some(
+                    std::fs::read_to_string(path)
+                        .map_err(|error| anyhow::anyhow!("reading {}: {error}", path.display()))?,
+                ),
+                None => args.batch.clone(),
+            };
+            run::run_block(&run::RunBlock {
+                wasm: args.wasm,
+                manifest: args.manifest,
+                props: args.props.into_iter().collect::<BTreeMap<_, _>>(),
+                batch,
+                input_port: args.input_port,
+                instance: args.instance,
+                service: args.service,
+                limits: Limits::new(args.max_payload, args.max_batch),
+            })
+            // The run's own report is for callers that assert on it; a terminal has already
+            // seen everything worth seeing.
+            .map(drop)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cli_is_internally_consistent() {
+        // clap's own assertions: conflicting arguments that do not exist, duplicate long
+        // names, defaults that do not parse. Cheaper to catch here than at the first run.
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn a_property_splits_at_the_first_equals() {
+        assert_eq!(
+            property("hot=(= $state \"on\")"),
+            Ok((String::from("hot"), String::from("(= $state \"on\")"))),
+            "an expression may contain any number of further `=`"
+        );
+        assert_eq!(
+            property("empty="),
+            Ok((String::from("empty"), String::new())),
+            "an empty expression is a parse error later, with a span — not a CLI error here"
+        );
+        assert!(property("novalue").is_err());
+        assert!(property("=novalue").is_err());
+    }
+}

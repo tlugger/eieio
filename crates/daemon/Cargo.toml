@@ -1,0 +1,54 @@
+[package]
+name = "eio-daemon"
+description = "The daemon-class node runtime: tokio, wasmtime, and the host side of the eieio block ABI (DAEMON-SPEC)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A binary and nothing else. DAEMON-SPEC §1's table gives `eio-daemon` no import
+# path, and there is nothing here another crate should link against: the reusable
+# half of the host is `eio-host-core`, on purpose. Tests live in `#[cfg(test)]`
+# modules beside the code they cover.
+[[bin]]
+name = "eio-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# The engine-agnostic host. Every ABI rule the daemon obeys is obeyed *here*, so the
+# leaf runtime obeys the same one (DAEMON §1). What this crate adds is wasmtime.
+eio-host-core.workspace = true
+
+# Load-time validation is exactly ABI §4 (DAEMON §4), and this is the one
+# implementation of it.
+eio-manifest.workspace = true
+
+# Batches on the way in and on the way out (ABI §6.3).
+eio-signal.workspace = true
+
+# Not for evaluating properties — `eio-host-core` does that — but for `render`,
+# EXPR §7.6's canonical rendering, which is how an emitted batch reaches a terminal.
+# A second renderer in the daemon would be a second definition of what a value looks
+# like, and the conformance vectors pin only this one.
+eio-expr.workspace = true
+
+wasmtime.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+anyhow.workspace = true
+
+# The `dev run-block` batch flag is JSON (DAEMON §12). Full `std` serde_json here,
+# unlike the `alloc`-only build the ★ crates share.
+serde_json = { workspace = true, default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Test blocks are checked in as `.wat` so a reviewer can read what each one exercises,
+# and assembled at test time. Same rationale, and same pin, as `manifest`'s fixtures.
+wat.workspace = true
+
+[lints]
+workspace = true

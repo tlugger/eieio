@@ -116,11 +116,13 @@ ci: fmt-check lint build test check-nostd
 
 # ── run recipes ──────────────────────────────────────────────────────────────
 
-# Run the daemon (not built yet).
-run-daemon:
-    #!/usr/bin/env bash
-    echo "run-daemon: the daemon does not exist yet — it lands with eieio-35h.3." >&2
-    exit 1
+# Everything after the recipe name is passed through, so `just run-daemon dev
+# run-block ./block.wasm --batch '[{"t":1}]'` works. Services and a listening
+# daemon arrive with their own epics; today `dev run-block` is the whole surface.
+
+# Run the daemon. Arguments are passed through.
+run-daemon *args:
+    cargo run --package eio-daemon -- {{ args }}
 
 # Run the Designer (not built yet).
 run-designer:

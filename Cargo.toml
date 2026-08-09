@@ -4,7 +4,13 @@
 resolver = "3"
 # Crates are added by their own epics. This list grows; it is never a glob,
 # because a glob that matches nothing is a hard error in cargo.
-members = ["crates/expr", "crates/host-core", "crates/manifest", "crates/signal"]
+members = [
+    "crates/daemon",
+    "crates/expr",
+    "crates/host-core",
+    "crates/manifest",
+    "crates/signal",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -63,6 +69,55 @@ boon = "0.6"
 # what each one is testing, and assembled at test time. Version-matched to wasmparser
 # because both come from the wasm-tools workspace.
 wat = "1.255"
+
+# ── the daemon's own dependencies (std, never reachable from a ★ crate) ──────
+#
+# Pinned here rather than in `crates/daemon/Cargo.toml` for one reason: the leaf
+# runtime will be a second std binary over the same ★ crates, and the two must not
+# drift on the pieces they share the shape of (the tracing field names, the CLI
+# conventions). Nothing below may ever appear in `nostd_crates` (justfile).
+
+# The engine. `default-features = false` is doing real work: it compiles out the
+# threads, component-model and GC support entirely, which is a stronger statement of
+# ABI §1's "core WASM only" than a `Config` toggle — with those features off, the
+# corresponding `Config` setters do not exist to be forgotten. The five that stay:
+#
+#   cranelift  the compiler. Required to compile a `.wasm` at all.
+#   runtime    the executor. Required to run one.
+#   std        rustix-backed platform layer; the daemon is a std binary (DAEMON §1).
+#   anyhow     makes `wasmtime::Error` an alias for `anyhow::Error`. Without it
+#              wasmtime's own error type does not implement `std::error::Error`, and
+#              every `?` in the daemon would need a hand-written conversion.
+#   backtrace  guest backtraces on a trap. A trap is an instance's death (ABI §8) and
+#              the log line is all anyone gets, so it should say where.
+wasmtime = { version = "47.0", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+    "anyhow",
+    "backtrace",
+] }
+
+# One task per block instance (DAEMON §5). `rt` and `macros` only: the executor and
+# the management API arrive with their own epics, and a feature enabled early is a
+# feature nobody remembers to justify.
+tokio = { version = "1.53", default-features = false, features = ["rt", "macros"] }
+
+# Structured logging, with guest `log` calls tagged (service, instance) (DAEMON §11).
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The CLI. Derive rather than the builder so the flags and the struct cannot drift.
+clap = { version = "4.6", features = ["derive"] }
+
+# `eio:core` `rand` (ABI §7.0). The host mediates it deliberately — it is the
+# determinism/replay lever — so the daemon needs a source, and this is the one
+# `rand` itself calls. Nothing more is wanted: blocks get bytes, not distributions.
+getrandom = "0.4"
+
+# `wasmtime::Error` is `anyhow::Error` (see above), so the daemon's own errors may as
+# well be too rather than converting at every boundary.
+anyhow = "1.0"
 
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.
