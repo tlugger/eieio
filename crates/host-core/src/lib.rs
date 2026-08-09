@@ -112,12 +112,12 @@ mod status;
 pub mod exports;
 
 pub use descriptor::{Descriptor, Limits};
-pub use engine::{Engine, EngineError, HostCall, HostFn, Memory, Trap, TrapKind};
+pub use engine::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
 pub use instance::{
     Configured, Configuring, Outcome, Running, Starting, Stopped, abi_version,
     check_required_exports,
 };
-pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer};
+pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer, Outbound};
 pub use prop::{CompileError, PropContext, PropFailure, PropertySource};
 pub use status::{ErrorCode, Id, Size, Status};
 

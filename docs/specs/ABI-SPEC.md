@@ -151,6 +151,16 @@ Guest, inside any callback: encode CBOR batch into guest memory → `emit(output
 - Backpressure, fan-out duplication, cross-node publication, and signal tapping (SCOPE §3.12) are host concerns invisible to the guest.
 - `emit` failure (queue full / payload too large) is a status code to the _emitter_, policy is host-defined (OPEN: backpressure, SCOPE §3.4).
 
+Three refusals are **not** host-defined, because a guest that hears a different code from two hosts cannot be written against either:
+
+|What the guest emitted|Code|
+|---|---|
+|Bytes that are not a canonical batch (§6.3.1)|`ERR_INVALID_ARG`|
+|An `output_port` that is neither an index into the instance descriptor's `outputs` nor `PORT_ERR`|`ERR_INVALID_ARG`|
+|A `len` beyond `max_payload` (§9.7)|`ERR_LIMIT`|
+
+The first two are §8's "bad index, pointer, or parameter" and the third is §9.7 stated as a code. A host MUST check the port and the length before reading the payload: the length check is the one that makes an oversized `(ptr, len)` cheap to refuse, and refusing on a length the host never read is what stops a guest from choosing how much memory the host touches.
+
 A block MAY emit zero, one, or many batches per callback; timer-driven blocks (simulators) emit with no inbound batch at all.
 
 ### 6.3 Batch encoding
@@ -201,7 +211,7 @@ Import namespaces, with signatures. `-> i32` follows the status/size convention 
 |`error`|`(code: i32, ptr: i32, len: i32) -> ()`|Structured error detail accompanying a non-zero callback return|
 |`time_unix_ms`|`() -> i64`|Wall clock. Host-mediated deliberately: determinism/replay lever|
 |`time_mono_ms`|`() -> i64`|Monotonic|
-|`rand`|`(buf: i32, len: i32) -> i32`|Host RNG, same rationale|
+|`rand`|`(buf: i32, len: i32) -> i32`|Host RNG, same rationale. **Status** convention, not size: the parameter is a `len`, not a `cap`, so `0` means exactly `len` bytes were written and there is no shorter answer to grow and retry from|
 
 ### 7.1 Property access protocol
 
@@ -215,6 +225,7 @@ Properties are always expressions, evaluated **host-side, per-signal, on demand*
 - The host MUST cache evaluation results keyed by `(instance, prop_id, signal_idx)` for the duration of the current callback, so the grow-and-retry path does not re-evaluate. The cache MUST NOT outlive the callback: `signal_idx` numbers signals within *this* call's batch, so a value carried into the next callback would answer a different question than the one asked.
 - **Constant folding:** the host MUST parse all property expressions at configure time and SHOULD detect signal-independence statically; signal-independent expressions are evaluated once and served from cache regardless of `signal_idx`. That result is the expression's for the life of the instance, and a folded expression that *fails* is folded too — expressions are pure and terminating (EXPR §1), so re-evaluating one would spend budget to reach the same error, and the failure is reported once rather than once per call.
 - **No-context error:** evaluating a signal-dependent expression with `SIGNAL_NONE` MUST return `ERR_NO_SIGNAL_CONTEXT`, never a null value.
+- **No value at all:** a property the service did not supply and whose manifest has no `default` returns `ERR_NOT_FOUND`, for every `signal_idx` including `SIGNAL_NONE`. §11.1 admits any combination of `required` and `default`, so this is a valid declaration and not an omission: the property keeps its `prop_id` — that number is its position in the manifest (§5.2), and skipping it would renumber every property after it — and the block hears that the deployer configured nothing, which is the one thing it can act on by falling back to a value of its own. It is neither `ERR_INVALID_ARG` (which means the `prop_id` was out of range) nor `ERR_NO_SIGNAL_CONTEXT` (which means the expression needed a signal): there is no expression here for a signal to be the context of.
 - **Per-signal failure:** an expression that fails against a particular signal (missing attribute, type mismatch) returns `ERR_EXPR` _for that call only_; the instance is unaffected. The block chooses: skip the signal, substitute a default, or route it to `PORT_ERR`. The host MUST log the failure and SHOULD surface it in signal taps.
 
 `prop` calls with `signal_idx` outside the current batch (and not `SIGNAL_NONE`) return `ERR_INVALID_ARG`, and so do calls with a `prop_id` outside the manifest's `properties` list (§8: a bad index). The `signal_idx` check applies whatever the property is: a signal-independent expression served from the fold MUST still refuse an out-of-range index, or two properties of one block would answer the same bad argument differently.
@@ -423,7 +434,7 @@ Two limits on that, both deliberate:
 
 One consequence follows from EXPR rather than from anything here: the expression language has no `bytes` literal and no builtin that produces one (EXPR §3.2, §7), so a `bytes` property cannot have a signal-independent default at all. Its default, if it has one, reads the signal.
 
-**`required` and `default`.** `default` is the value the property takes when the service does not supply one; it is what makes an instance configurable without the deployer touching every field. `required: true` means configuration MUST fail when the property has no value at configure time — from the service file or from `default`, either satisfies it. `required` is therefore the enforceable half of the pair and the two do not constrain each other in the manifest: any combination of `required` and `default` is a valid declaration, including both (a required property with a suggested starting value, as in the example above).
+**`required` and `default`.** `default` is the value the property takes when the service does not supply one; it is what makes an instance configurable without the deployer touching every field. `required: true` means configuration MUST fail when the property has no value at configure time — from the service file or from `default`, either satisfies it. `required` is therefore the enforceable half of the pair and the two do not constrain each other in the manifest: any combination of `required` and `default` is a valid declaration, including both (a required property with a suggested starting value, as in the example above). The remaining combination — not required, no default, and nothing supplied — is equally valid, and what `prop` answers for it is in §7.1: `ERR_NOT_FOUND`, with the `prop_id` unchanged.
 
 **Size.** A manifest document larger than the host's configured maximum MUST be rejected before parsing. The bound is host configuration like every other budget (EXPR §9): hosts MUST accept documents of at least 8 KiB, and 64 KiB is the reference default. Manifests are read from registries and from module custom sections, so the bound is a trust-boundary limit, not a style guide.
 

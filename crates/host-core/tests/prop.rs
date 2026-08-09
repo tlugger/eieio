@@ -20,7 +20,9 @@ mod mock;
 
 use std::rc::Rc;
 
-use eio_host_core::{Engine, ErrorCode, PropContext, PropertySource, SIGNAL_NONE, Size, exports};
+use eio_host_core::{
+    Arg, Engine, ErrorCode, PropContext, PropertySource, Ret, SIGNAL_NONE, Size, exports,
+};
 use eio_manifest::PropertyType;
 use eio_signal::{Batch, Signal, Value};
 use mock::MockGuest;
@@ -60,9 +62,17 @@ fn prop(guest: &mut MockGuest, prop_id: u32, signal_idx: u32, cap: u32) -> Size 
         .call_import(
             exports::namespace::CORE,
             exports::core_fn::PROP,
-            &[prop_id as i32, signal_idx as i32, BUF as i32, cap as i32],
+            &[
+                Arg::I32(prop_id as i32),
+                Arg::I32(signal_idx as i32),
+                Arg::I32(BUF as i32),
+                Arg::I32(cap as i32),
+            ],
         )
         .expect("prop is registered");
+    let Ret::I32(raw) = raw else {
+        panic!("prop answers with an i32 (ABI §7.0)")
+    };
     Size::decode(raw, cap as usize)
 }
 
@@ -350,6 +360,45 @@ fn a_prop_id_out_of_range_is_invalid_arg() {
             ErrorCode::InvalidArg
         );
     });
+}
+
+#[test]
+fn a_property_with_no_value_is_not_found() {
+    // ABI §11.1 admits any combination of `required` and `default`, so a property with
+    // neither a service-supplied expression nor a default is a valid declaration. §7.1
+    // answers it `ERR_NOT_FOUND`: the `prop_id` is in range and the value is simply absent,
+    // which is the one thing a block can act on by falling back to its own.
+    let context = PropContext::compile(&[
+        PropertySource::unset("filter", PropertyType::String),
+        PropertySource::new("temp", PropertyType::Int, "$temp"),
+    ])
+    .expect("nothing to parse cannot fail to parse");
+    let mut guest = guest_with(&context);
+
+    context.during(Some(batch(&[10])), || {
+        assert_eq!(error_of(&mut guest, 0, SIGNAL_NONE), ErrorCode::NotFound);
+        assert_eq!(
+            error_of(&mut guest, 0, 0),
+            ErrorCode::NotFound,
+            "not ERR_NO_SIGNAL_CONTEXT and not ERR_INVALID_ARG: there is no expression for a \
+             signal to be the context of"
+        );
+        assert_eq!(
+            error_of(&mut guest, 2, SIGNAL_NONE),
+            ErrorCode::InvalidArg,
+            "an unset property still occupies its prop_id, so 2 is still out of range"
+        );
+        assert_eq!(
+            value_of(&mut guest, 1, 0),
+            Value::Int(10),
+            "and the property after it keeps its own number (ABI §5.2)"
+        );
+    });
+    assert_eq!(
+        context.evaluations(),
+        1,
+        "an unset property is never evaluated"
+    );
 }
 
 #[test]

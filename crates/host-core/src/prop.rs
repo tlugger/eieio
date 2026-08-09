@@ -59,7 +59,7 @@ use eio_manifest::PropertyType;
 use eio_signal::Batch;
 
 use crate::SIGNAL_NONE;
-use crate::engine::{HostCall, HostFn};
+use crate::engine::{Arg, HostCall, HostFn, Ret};
 use crate::memory::OutBuffer;
 use crate::status::ErrorCode;
 
@@ -70,24 +70,44 @@ use crate::status::ErrorCode;
 /// are built from the same manifest order.
 ///
 /// `source` is the expression the property will actually be evaluated as: the service
-/// file's value where it supplied one, the manifest's `default` otherwise. Which of those
-/// it is, and what to do when there is neither, is ABI §11.1's `required` rule and belongs
+/// file's value where it supplied one, the manifest's `default` otherwise, and [`None`]
+/// where there is neither. Choosing between them is ABI §11.1's `required` rule and belongs
 /// to whatever reads the service file — by the time a source reaches here the question is
-/// settled.
+/// settled, including the decision that an unconfigured `required` property was a
+/// configuration failure rather than an [`unset`](PropertySource::unset) one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertySource<'a> {
     /// The property name, for diagnostics. Not used for lookup: `prop_id` is the index.
     pub name: &'a str,
     /// The type the evaluated value must satisfy (ABI §11.1).
     pub ty: PropertyType,
-    /// The expression text.
-    pub source: &'a str,
+    /// The expression text, or [`None`] when the property has no value at all.
+    pub source: Option<&'a str>,
 }
 
 impl<'a> PropertySource<'a> {
-    /// A property source.
+    /// A property that evaluates `source`.
     pub const fn new(name: &'a str, ty: PropertyType, source: &'a str) -> PropertySource<'a> {
-        PropertySource { name, ty, source }
+        PropertySource {
+            name,
+            ty,
+            source: Some(source),
+        }
+    }
+
+    /// A property with no value: no service-supplied expression and no manifest `default`
+    /// (ABI §11.1).
+    ///
+    /// A valid declaration, not an omission — §11.1 admits any combination of `required`
+    /// and `default` — so it keeps its `prop_id` slot and answers `ERR_NOT_FOUND`. It has to
+    /// keep the slot: `prop_id` is the property's position in the manifest (ABI §5.2), and
+    /// leaving an unconfigured property out would renumber every property after it.
+    pub const fn unset(name: &'a str, ty: PropertyType) -> PropertySource<'a> {
+        PropertySource {
+            name,
+            ty,
+            source: None,
+        }
     }
 }
 
@@ -152,25 +172,49 @@ struct Compiled {
     name: String,
     /// The declared type the evaluated value must satisfy (ABI §11.1).
     ty: PropertyType,
-    /// The parsed expression. Parsed once, at configure (ABI §7.1).
-    expr: Expr,
-    /// The folded result, for a signal-independent expression: evaluated once at compile
-    /// and served for every `signal_idx` afterwards.
-    ///
-    /// [`None`] exactly when the expression is signal-dependent — which is why there is no
-    /// separate `signal_dependent` flag to keep in step with it. A *failure* is folded too:
-    /// expressions are pure and terminating (EXPR §1), so re-evaluating one that failed
-    /// would spend fuel to reach the same error.
-    folded: Option<Answer>,
+    /// What answering `prop` for it amounts to.
+    body: Body,
 }
 
-impl Compiled {
-    /// Whether this property reads the signal (EXPR §10.2).
+/// What a property answers with, decided once at compile time (ABI §7.1, §11.1).
+///
+/// One enum rather than an expression beside an optional fold, so that "signal-dependent",
+/// "folded" and "has no value" cannot disagree with each other: each is a variant, and
+/// there is no combination of fields to keep in step.
+#[derive(Debug)]
+enum Body {
+    /// No expression at all: the service supplied none and the manifest has no `default`
+    /// (ABI §11.1). `prop` answers `ERR_NOT_FOUND` — the `prop_id` is in range and the
+    /// value is simply not there, which a block can act on by falling back to its own.
+    Unset,
+    /// Signal-dependent (EXPR §10.2): evaluated per signal, cached per callback.
+    PerSignal(Expr),
+    /// Signal-independent: evaluated once at compile and served for every `signal_idx`
+    /// afterwards (ABI §7.1's constant folding). A *failure* is folded too — expressions
+    /// are pure and terminating (EXPR §1), so re-evaluating one that failed would spend
+    /// fuel to reach the same error.
+    Folded(Answer),
+}
+
+impl State {
+    /// Which signal `signal_idx` names in the current batch (ABI §7.1).
     ///
-    /// Read off the fold rather than stored beside it, so the two cannot disagree: an
-    /// expression is folded exactly when it is signal-independent.
-    const fn is_signal_dependent(&self) -> bool {
-        self.folded.is_none()
+    /// [`None`] for `SIGNAL_NONE`; `ERR_INVALID_ARG` for an index outside the batch, which
+    /// includes *every* index during a callback that has no batch at all — `eio_on_timer`
+    /// and friends.
+    fn signal_at(&self, signal_idx: u32) -> Result<Option<u32>, ErrorCode> {
+        if signal_idx == SIGNAL_NONE {
+            return Ok(None);
+        }
+        let within = self
+            .signals
+            .as_ref()
+            .is_some_and(|batch| (signal_idx as usize) < batch.len());
+        if within {
+            Ok(Some(signal_idx))
+        } else {
+            Err(ErrorCode::InvalidArg)
+        }
     }
 }
 
@@ -266,42 +310,54 @@ impl PropContext {
                 error,
             };
 
-            // EXPR §10.1: a PARSE error is a configuration rejection.
-            let expr = eio_expr::parse(property.source).map_err(fail)?;
-            // EXPR §10.3 and the shape rules it obliges. Diagnostics are collected by the
-            // analyser so an editor can show them all (DESIGNER §5); a host has room for
-            // one, and rejects on the first.
-            let analysis = eio_expr::analyze(&expr);
-            if let Some(error) = analysis.first_error() {
-                return Err(fail(*error));
-            }
+            let body = match property.source {
+                // ABI §11.1: no service value and no default. Nothing to parse, and not a
+                // rejection — `required` is the enforceable half of the pair and whoever
+                // resolved this source already applied it.
+                None => Body::Unset,
+                Some(source) => {
+                    // EXPR §10.1: a PARSE error is a configuration rejection.
+                    let expr = eio_expr::parse(source).map_err(fail)?;
+                    // EXPR §10.3 and the shape rules it obliges. Diagnostics are collected
+                    // by the analyser so an editor can show them all (DESIGNER §5); a host
+                    // has room for one, and rejects on the first.
+                    let analysis = eio_expr::analyze(&expr);
+                    if let Some(error) = analysis.first_error() {
+                        return Err(fail(*error));
+                    }
 
-            // EXPR §10.2's classification, taken from the analysis that just computed it
-            // rather than walked for a second time.
-            let folded = (!analysis.signal_dependent).then(|| {
-                // `None` is SIGNAL_NONE, which is what a signal-independent expression is
-                // defined against; the classifier above is what guarantees no sigil can
-                // reach it and turn this into NO_SIGNAL.
-                let answer = evaluate(&expr, property.ty, None, limits);
-                if let Err(error) = &answer {
-                    failures.push(PropFailure {
-                        prop_id,
-                        signal: None,
-                        error: *error,
-                    });
+                    // EXPR §10.2's classification, taken from the analysis that just
+                    // computed it rather than walked for a second time.
+                    if analysis.signal_dependent {
+                        Body::PerSignal(expr)
+                    } else {
+                        // `None` is SIGNAL_NONE, which is what a signal-independent
+                        // expression is defined against; the classifier above is what
+                        // guarantees no sigil can reach it and turn this into NO_SIGNAL.
+                        let answer = evaluate(&expr, property.ty, None, limits);
+                        if let Err(error) = &answer {
+                            failures.push(PropFailure {
+                                prop_id,
+                                signal: None,
+                                error: *error,
+                            });
+                        }
+                        Body::Folded(answer)
+                    }
                 }
-                answer
-            });
+            };
 
             compiled.push(Compiled {
                 name: property.name.to_owned(),
                 ty: property.ty,
-                expr,
-                folded,
+                body,
             });
         }
 
-        let evaluations = compiled.iter().filter(|p| p.folded.is_some()).count() as u64;
+        let evaluations = compiled
+            .iter()
+            .filter(|p| matches!(p.body, Body::Folded(_)))
+            .count() as u64;
         Ok(PropContext {
             inner: Rc::new(Inner {
                 props: compiled,
@@ -401,22 +457,27 @@ impl PropContext {
     }
 
     /// `prop(prop_id, signal_idx, buf, cap) -> i32` (ABI §7.1).
-    fn call(&self, call: HostCall<'_>) -> i32 {
-        let [prop_id, signal_idx, buf, cap] = match *call.args {
-            [prop_id, signal_idx, buf, cap] => [prop_id, signal_idx, buf, cap],
+    fn call(&self, call: HostCall<'_>) -> Ret {
+        let [
+            Arg::I32(prop_id),
+            Arg::I32(signal_idx),
+            Arg::I32(buf),
+            Arg::I32(cap),
+        ] = *call.args
+        else {
             // The engine link-checked the signature (ABI §4.3), so this is unreachable
             // through a real guest; a host driving the handler by hand still gets an
             // answer rather than a panic inside a callback.
-            _ => return ErrorCode::InvalidArg.as_i32(),
+            return Ret::I32(ErrorCode::InvalidArg.as_i32());
         };
         // ABI §3: identifiers and pointers are u32 carried as i32.
         let (prop_id, signal_idx) = (prop_id as u32, signal_idx as u32);
         let out = OutBuffer::new(buf as u32, cap as u32);
 
-        match self.answer(prop_id, signal_idx) {
+        Ret::I32(match self.answer(prop_id, signal_idx) {
             Ok(bytes) => out.fill(call.memory, &bytes),
             Err(code) => code.as_i32(),
-        }
+        })
     }
 
     /// The bytes property `prop_id` evaluates to for `signal_idx`, or the code to return.
@@ -439,34 +500,33 @@ impl PropContext {
             return Err(ErrorCode::InvalidArg);
         }
 
-        let signal = if signal_idx == SIGNAL_NONE {
+        // One match over the three shapes a property can have, so that each of §7.1's
+        // answers is given in exactly one place. The order within it is §7.1's: what the
+        // property *is* decides `ERR_NOT_FOUND` and `ERR_NO_SIGNAL_CONTEXT`, and only then
+        // does the argument decide `ERR_INVALID_ARG`.
+        let (expr, signal) = match &property.body {
+            // ABI §11.1: the property has no value at all. Answered before the `signal_idx`
+            // check because there is no expression for a signal to be the context *of* —
+            // the question is about the property, not about the argument.
+            Body::Unset => return Err(ErrorCode::NotFound),
+
+            // Constant folding (ABI §7.1): evaluated once at compile and served for every
+            // `signal_idx`. The index is still checked — the rule is about the argument, and
+            // a host that skipped it here would answer a bad index differently depending on
+            // which property was asked.
+            Body::Folded(folded) => {
+                state.signal_at(signal_idx)?;
+                return served(folded);
+            }
+
             // ABI §7.1: a signal-dependent expression under SIGNAL_NONE is
             // ERR_NO_SIGNAL_CONTEXT — decided statically, so there is no path on which it
             // could evaluate to a null instead.
-            if property.is_signal_dependent() {
+            Body::PerSignal(_) if signal_idx == SIGNAL_NONE => {
                 return Err(ErrorCode::NoSignalContext);
             }
-            None
-        } else {
-            // ABI §7.1: a signal_idx outside the current batch is ERR_INVALID_ARG. Checked
-            // for every property, including signal-independent ones — the rule is about the
-            // argument, and a host that skipped it for a folded property would answer
-            // differently depending on which property was asked.
-            let within = state
-                .signals
-                .as_ref()
-                .is_some_and(|batch| (signal_idx as usize) < batch.len());
-            if !within {
-                return Err(ErrorCode::InvalidArg);
-            }
-            Some(signal_idx)
+            Body::PerSignal(expr) => (expr, state.signal_at(signal_idx)?),
         };
-
-        // Constant folding (ABI §7.1): evaluated once at compile, served for every
-        // signal_idx — but only after the argument checks above.
-        if let Some(folded) = &property.folded {
-            return served(folded);
-        }
 
         // The per-callback cache (ABI §7.1), which is what makes grow-and-retry free.
         let key = (prop_id, signal_idx);
@@ -481,7 +541,7 @@ impl PropContext {
             (Some(index), Some(batch)) => batch.get(index as usize),
             _ => None,
         };
-        let answer = evaluate(&property.expr, property.ty, current, self.inner.limits);
+        let answer = evaluate(expr, property.ty, current, self.inner.limits);
         state.evaluations = state.evaluations.saturating_add(1);
         if let Err(error) = &answer {
             state.failures.push(PropFailure {

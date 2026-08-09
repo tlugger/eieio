@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::vec::Vec;
 
-use eio_host_core::{Engine, EngineError, HostCall, HostFn, Trap, TrapKind, exports};
+use eio_host_core::{Arg, Engine, EngineError, HostCall, HostFn, Ret, Trap, TrapKind, exports};
 
 /// How the fake guest answers one export.
 #[derive(Debug, Clone)]
@@ -148,7 +148,7 @@ impl MockGuest {
     /// The mock has no WASM to run, so a test plays the guest's part: this is what
     /// `(call $eio_core_prop ...)` amounts to on the host side, and it is how the
     /// registration seam gets exercised rather than merely declared.
-    pub fn call_import(&mut self, namespace: &str, name: &str, args: &[i32]) -> Option<i32> {
+    pub fn call_import(&mut self, namespace: &str, name: &str, args: &[Arg]) -> Option<Ret> {
         let key = import_key(namespace, name);
         // Taken out of the map for the duration of the call, because the handler needs
         // `&mut dyn Memory` — which is this same struct. Put back afterwards.

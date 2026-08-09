@@ -76,15 +76,67 @@ pub trait Engine {
 
     /// Registers a host function the guest may import as `namespace`.`name`.
     ///
-    /// The seam, and no more than that. What the eight `eio:core` functions and the
-    /// capability namespaces of ABI §7 *do* is not here and not in this crate yet:
-    /// `prop` arrives with the property protocol, `emit` with the router, `state_*` with
-    /// the state store. What is settled here is the shape they all have — a
-    /// [`HostFn`] over a [`HostCall`], returning the `i32` the guest sees.
+    /// The seam, and no more than that. What the seven `eio:core` functions and the
+    /// capability namespaces of ABI §7 *do* is mostly not this crate's:
+    /// [`PropContext::host_fn`](crate::PropContext::host_fn) supplies `prop`, and a host
+    /// builds the rest against its own logger, router and devices. What is settled here is
+    /// the shape they all have — a [`HostFn`] over a [`HostCall`], answering with the
+    /// [`Ret`] its §7 entry specifies.
     ///
     /// Registration happens before the guest runs, so a duplicate name is a host bug and
     /// an [`EngineError::DuplicateImport`].
     fn register(&mut self, namespace: &str, name: &str, f: HostFn) -> Result<(), EngineError>;
+}
+
+/// A WASM value crossing into a host function (ABI §7).
+///
+/// Two variants, because ABI §7's import table uses exactly two parameter types: `i32`
+/// everywhere, and `i64` for `timer_set`'s `delay_ms` (§7.3). Carrying the *declared* type
+/// rather than a widened `i64` is what stops a handler reading a pointer out of an argument
+/// that was never one — the engine put the type in, so a handler that expects the other
+/// finds a mismatch rather than a plausible number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arg {
+    /// A 32-bit argument: every pointer, length, index and identifier in ABI §7.
+    I32(i32),
+    /// A 64-bit argument. `timer_set`'s `delay_ms` is the only one at ABI 1.0.
+    I64(i64),
+}
+
+/// What a host function returns to the guest (ABI §7).
+///
+/// Three variants, because ABI §7 has three return shapes and no more: nothing (`log`,
+/// `error`), an `i32` under one of §8's conventions (everything else), and an `i64` for the
+/// two clocks of §7.0. They are distinct here rather than collapsed into an `i64` for the
+/// same reason [`Status`](crate::Status), [`Size`](crate::Size) and [`Id`](crate::Id) are
+/// three types: a return that means nothing and a return that means `0` are not the same
+/// answer, and nothing should be able to swap them silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ret {
+    /// The function returns nothing.
+    None,
+    /// An `i32`, under whichever §8 convention the function's §7 entry specifies.
+    I32(i32),
+    /// An `i64` — the two clocks of §7.0.
+    I64(i64),
+}
+
+impl From<i32> for Ret {
+    fn from(value: i32) -> Ret {
+        Ret::I32(value)
+    }
+}
+
+impl From<i64> for Ret {
+    fn from(value: i64) -> Ret {
+        Ret::I64(value)
+    }
+}
+
+impl From<()> for Ret {
+    fn from((): ()) -> Ret {
+        Ret::None
+    }
 }
 
 /// A host function's implementation (ABI §7).
@@ -92,18 +144,17 @@ pub trait Engine {
 /// Boxed rather than generic so that a host can build its import table at runtime from a
 /// block's declared capabilities — which is the only way it can be built, since the set
 /// depends on the manifest (ABI §4.3).
-pub type HostFn = Box<dyn FnMut(HostCall<'_>) -> i32>;
+pub type HostFn = Box<dyn FnMut(HostCall<'_>) -> Ret>;
 
 /// One guest→host call, as the handler sees it.
 ///
-/// Carries the raw `i32` arguments and a way back into guest memory, because that is what
-/// every ABI §7 function needs and nothing more: `log` reads a `(ptr, len)`, `emit` reads
-/// one and enforces `max_payload`, `prop` writes into a guest-supplied `(buf, cap)`.
-/// Handlers return the `i32` the guest receives, under whichever §8 convention their entry
-/// in §7 specifies.
+/// Carries the arguments and a way back into guest memory, because that is what every ABI
+/// §7 function needs and nothing more: `log` reads a `(ptr, len)`, `emit` reads one and
+/// enforces `max_payload`, `prop` writes into a guest-supplied `(buf, cap)`. Handlers
+/// answer with a [`Ret`] of the shape their entry in §7 specifies.
 pub struct HostCall<'a> {
-    /// The arguments, in declaration order.
-    pub args: &'a [i32],
+    /// The arguments, in declaration order, each carrying its declared WASM type.
+    pub args: &'a [Arg],
     /// Guest memory, for the duration of this call only.
     ///
     /// ABI §9.3 is the reason this is a borrow: the host copies out *during* the call and

@@ -10,7 +10,7 @@
 //! |4 — guest-supplied out-buffers, grow-and-retry|`an_out_buffer_*`|
 //! |5 — `eio_alloc` returning 0 is failure|`lifecycle.rs`'s `an_allocator_that_refuses_*`|
 //! |6 — 8-byte alignment|`lifecycle.rs`'s `an_allocator_that_lies_*`, and `alloc_align_is_eight`|
-//! |7 — `max_payload`|the caller's; the driver has no opinion (ABI §9.7, SCOPE §3.4)|
+//! |7 — `max_payload`|`a_payload_beyond_max_payload_is_limit`, for an emission; the caller's for a delivery (ABI §9.7, SCOPE §3.4)|
 //!
 //! Rule 3 is the one with no test worth writing, and that is the finding rather than a gap:
 //! a handler receives `&mut dyn Memory` borrowed from its [`HostCall`], so retaining it past
@@ -19,7 +19,10 @@
 #[path = "mock.rs"]
 mod mock;
 
-use eio_host_core::{ALLOC_ALIGN, Engine, EngineError, ErrorCode, Memory, OutBuffer, exports};
+use eio_host_core::{
+    ALLOC_ALIGN, Arg, Engine, EngineError, ErrorCode, Limits, Memory, OutBuffer, Outbound, Ret,
+    exports,
+};
 use mock::MockGuest;
 
 // ── inbound: the host allocates and writes, and nothing else ────────────────
@@ -172,13 +175,89 @@ fn an_out_buffer_outside_guest_memory_is_invalid_arg() {
     );
 }
 
+// ── outbound: which emissions the host refuses (ABI §6.2, §9.7) ─────────────
+
+/// An instance with two output ports and a small payload limit.
+const LIMITS: Limits = Limits::new(64, 8);
+
+#[test]
+fn an_emission_on_a_declared_port_is_accepted() {
+    let accepted = Outbound::accept(1, 8, 2, LIMITS).expect("port 1 of 2, eight bytes");
+    assert_eq!(accepted.port(), 1);
+    // CBOR `[{"a": 1}]`.
+    let batch = accepted
+        .decode(&[0x81, 0xa1, 0x61, 0x61, 0x01])
+        .expect("canonical");
+    assert_eq!(batch.len(), 1);
+}
+
+#[test]
+fn the_error_port_is_accepted_without_being_declared() {
+    // ABI §6.4: `PORT_ERR` is reserved on every block and absent from the manifest's
+    // outputs, so it is above every declared index rather than one of them.
+    assert!(Outbound::accept(eio_host_core::PORT_ERR, 4, 2, LIMITS).is_ok());
+    assert!(Outbound::accept(eio_host_core::PORT_ERR, 4, 0, LIMITS).is_ok());
+}
+
+#[test]
+fn a_port_the_block_does_not_declare_is_invalid_arg() {
+    // ABI §8: a bad index.
+    assert_eq!(
+        Outbound::accept(2, 4, 2, LIMITS),
+        Err(ErrorCode::InvalidArg)
+    );
+    assert_eq!(
+        Outbound::accept(0, 4, 0, LIMITS),
+        Err(ErrorCode::InvalidArg)
+    );
+}
+
+#[test]
+fn a_payload_beyond_max_payload_is_limit() {
+    // ABI §9.7, and the boundary: exactly `max_payload` fits.
+    assert!(Outbound::accept(0, 64, 2, LIMITS).is_ok());
+    assert_eq!(Outbound::accept(0, 65, 2, LIMITS), Err(ErrorCode::Limit));
+}
+
+#[test]
+fn the_port_is_checked_before_the_length() {
+    // Both wrong: the answer is about the port, because a host that reported the length
+    // first would send a block off to shrink a batch it was never allowed to send.
+    assert_eq!(
+        Outbound::accept(9, 1024, 2, LIMITS),
+        Err(ErrorCode::InvalidArg)
+    );
+}
+
+#[test]
+fn bytes_that_are_not_a_canonical_batch_are_invalid_arg() {
+    // ABI §6.2, §6.3.1. Never a trap: the guest passed a bad parameter and lives (§8).
+    let accepted = || Outbound::accept(0, 8, 2, LIMITS).expect("accepted");
+    assert_eq!(accepted().decode(&[]), Err(ErrorCode::InvalidArg));
+    assert_eq!(
+        accepted().decode(&[0xa1, 0x61, 0x61, 0x01]),
+        Err(ErrorCode::InvalidArg),
+        "a bare map is a signal, not a batch"
+    );
+    assert_eq!(
+        accepted().decode(&[0x81, 0xa1, 0x61, 0x61, 0x01, 0x00]),
+        Err(ErrorCode::InvalidArg),
+        "trailing bytes are corruption, not a batch carrying extra data (§6.3.1 rule 10)"
+    );
+    assert!(
+        accepted().decode(&[0x80]).is_ok(),
+        "an empty batch is legal and MUST stay routable (§6.3)"
+    );
+}
+
 // ── the host-function seam (ABI §7) ─────────────────────────────────────────
 
 #[test]
 fn a_registered_host_function_is_reachable_and_answers_the_guest() {
-    // The seam this issue defines: what the §7 functions *are* is not here — `prop` arrives
-    // with the property protocol, `emit` with the router — but the shape they all have is,
-    // and it is exercised rather than merely declared.
+    // The seam: what the §7 functions *are* is mostly not here — `emit` arrives with the
+    // router — but the shape they all have is, and it is exercised rather than merely
+    // declared. `log` returns nothing (ABI §7.0), which is a [`Ret`] of its own rather than
+    // a zero that could be mistaken for a status.
     let mut guest = MockGuest::healthy();
     guest
         .register(
@@ -187,11 +266,12 @@ fn a_registered_host_function_is_reachable_and_answers_the_guest() {
             Box::new(|call| {
                 // A handler reads its arguments and reaches guest memory through the borrow
                 // it was given.
-                let level = call.args[0];
-                let (ptr, len) = (call.args[1] as u32, call.args[2] as u32);
-                let message = call.memory.read(ptr, len).expect("in bounds");
+                let [Arg::I32(_level), Arg::I32(ptr), Arg::I32(len)] = *call.args else {
+                    panic!("log is (i32, i32, i32)")
+                };
+                let message = call.memory.read(ptr as u32, len as u32).expect("in bounds");
                 assert_eq!(message, b"hello");
-                level
+                Ret::None
             }),
         )
         .expect("registered");
@@ -201,10 +281,38 @@ fn a_registered_host_function_is_reachable_and_answers_the_guest() {
         guest.call_import(
             exports::namespace::CORE,
             exports::core_fn::LOG,
-            &[4, 128, 5]
+            &[Arg::I32(4), Arg::I32(128), Arg::I32(5)]
         ),
-        Some(4),
-        "the handler's return value is what the guest sees"
+        Some(Ret::None),
+        "the handler's answer is what the guest sees"
+    );
+}
+
+#[test]
+fn a_handler_may_answer_with_an_i64() {
+    // ABI §7.0's two clocks are `() -> i64`, so the seam has to carry a 64-bit answer that
+    // is not an `i32` widened — a host that could only return `i32` could not implement
+    // `time_unix_ms` at all.
+    let mut guest = MockGuest::healthy();
+    guest
+        .register(
+            exports::namespace::CORE,
+            exports::core_fn::TIME_UNIX_MS,
+            Box::new(|call| {
+                assert!(call.args.is_empty(), "the clocks take no arguments");
+                Ret::I64(1_764_000_000_000)
+            }),
+        )
+        .expect("registered");
+
+    assert_eq!(
+        guest.call_import(
+            exports::namespace::CORE,
+            exports::core_fn::TIME_UNIX_MS,
+            &[]
+        ),
+        Some(Ret::I64(1_764_000_000_000)),
+        "a millisecond timestamp does not fit in an i32 and is not truncated to one"
     );
 }
 
@@ -218,8 +326,11 @@ fn a_handler_can_write_into_a_guest_supplied_buffer() {
             exports::namespace::CORE,
             exports::core_fn::PROP,
             Box::new(|call| {
-                let buffer = OutBuffer::new(call.args[2] as u32, call.args[3] as u32);
-                buffer.fill(call.memory, &[0xf5]) // CBOR `true`
+                let [_, _, Arg::I32(buf), Arg::I32(cap)] = *call.args else {
+                    panic!("prop is (i32, i32, i32, i32)")
+                };
+                let buffer = OutBuffer::new(buf as u32, cap as u32);
+                Ret::I32(buffer.fill(call.memory, &[0xf5])) // CBOR `true`
             }),
         )
         .expect("registered");
@@ -229,9 +340,9 @@ fn a_handler_can_write_into_a_guest_supplied_buffer() {
         guest.call_import(
             exports::namespace::CORE,
             exports::core_fn::PROP,
-            &[0, -1, 256, 8]
+            &[Arg::I32(0), Arg::I32(-1), Arg::I32(256), Arg::I32(8)]
         ),
-        Some(1)
+        Some(Ret::I32(1))
     );
     assert_eq!(guest.memory[256], 0xf5);
 
@@ -240,9 +351,9 @@ fn a_handler_can_write_into_a_guest_supplied_buffer() {
         guest.call_import(
             exports::namespace::CORE,
             exports::core_fn::PROP,
-            &[0, -1, 512, 0]
+            &[Arg::I32(0), Arg::I32(-1), Arg::I32(512), Arg::I32(0)]
         ),
-        Some(1)
+        Some(Ret::I32(1))
     );
     assert_eq!(guest.memory[512], 0, "untouched");
 }
@@ -254,7 +365,7 @@ fn registering_the_same_import_twice_is_a_host_bug() {
         guest.register(
             exports::namespace::STATE,
             "get",
-            Box::new(|_call| ErrorCode::Unsupported.as_i32()),
+            Box::new(|_call| Ret::I32(ErrorCode::Unsupported.as_i32())),
         )
     };
     assert_eq!(register(&mut guest), Ok(()));
@@ -275,7 +386,7 @@ fn an_unregistered_import_is_simply_absent() {
     // such a module at load time rather than letting it fail here.
     let mut guest = MockGuest::healthy();
     assert_eq!(
-        guest.call_import(exports::namespace::GPIO, "read", &[0]),
+        guest.call_import(exports::namespace::GPIO, "read", &[Arg::I32(0)]),
         None
     );
 }

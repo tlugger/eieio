@@ -27,9 +27,16 @@
 //! handler a `&mut dyn Memory` that cannot outlive its call
 //! ([`HostCall`](crate::HostCall)). "Host MUST NOT retain guest pointers past the call" is
 //! therefore not a rule anyone has to remember.
+//!
+//! [`Outbound`] is the other half of an emission: ABI §6.2 fixes three of its refusals as
+//! *not* host-defined, so they are decided here rather than in each host. Where the batch
+//! then goes is the host's own business, and is not.
 
 use alloc::vec::Vec;
 
+use eio_signal::Batch;
+
+use crate::descriptor::Limits;
 use crate::engine::{Engine, Trap, TrapKind};
 use crate::exports::required;
 use crate::status::{ErrorCode, Status};
@@ -182,6 +189,61 @@ impl From<crate::engine::EngineError> for DeliveryFailure {
     /// lied about its own memory (ABI §13.2's allocator-liar block).
     fn from(error: crate::engine::EngineError) -> DeliveryFailure {
         DeliveryFailure::Dead(Trap::from(error))
+    }
+}
+
+/// An `emit` the host has agreed to look at (ABI §6.2).
+///
+/// ABI §6.2 fixes three refusals as *not* host-defined — a guest that heard a different code
+/// from two hosts could not be written against either — so they are decided here rather than
+/// in whichever host is doing the emitting. What remains a host's own business is everything
+/// after: where the batch goes, whether the queue has room, and what backpressure means
+/// (SCOPE §3.4, still OPEN).
+///
+/// The two steps are two types because §6.2 fixes their *order* as well: the port and the
+/// length are checked before the host reads a byte of the payload. A host that read first
+/// would be letting a guest choose how much memory it touches, and `Outbound` is the only
+/// way to reach [`decode`](Outbound::decode) — so "check the length first" is not a rule to
+/// remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outbound {
+    port: u32,
+}
+
+impl Outbound {
+    /// Checks an emission's port and length (ABI §6.2, §9.7).
+    ///
+    /// `outputs` is how many output ports the instance declares; `PORT_ERR` is accepted
+    /// besides, because every block has it without declaring it (ABI §6.4).
+    pub const fn accept(
+        port: u32,
+        len: u32,
+        outputs: u32,
+        limits: Limits,
+    ) -> Result<Outbound, ErrorCode> {
+        if port != crate::PORT_ERR && port >= outputs {
+            // ABI §8: a bad index.
+            return Err(ErrorCode::InvalidArg);
+        }
+        if len > limits.max_payload {
+            // ABI §9.7: "host rejects `emit` beyond it with ERR_LIMIT".
+            return Err(ErrorCode::Limit);
+        }
+        Ok(Outbound { port })
+    }
+
+    /// Which output port this emission is for, or [`PORT_ERR`](crate::PORT_ERR).
+    pub const fn port(self) -> u32 {
+        self.port
+    }
+
+    /// Decodes the payload the guest wrote (ABI §6.2, §6.3.1).
+    ///
+    /// A decode failure is `ERR_INVALID_ARG` and never a trap: the guest handed over bytes
+    /// that are not a batch, which is a bad parameter, and ABI §8 keeps the instance alive
+    /// for it. Consuming `self` is what stops one accepted emission being decoded twice.
+    pub fn decode(self, bytes: &[u8]) -> Result<Batch, ErrorCode> {
+        Batch::from_cbor(bytes).map_err(|_| ErrorCode::InvalidArg)
     }
 }
 
