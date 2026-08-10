@@ -67,7 +67,7 @@
 //!                 "name": "predicate",
 //!                 "type": "bool",
 //!                 "description": "Evaluated per signal",
-//!                 "default": "(true)",
+//!                 "default": "(> $temp 20)",
 //!                 "required": true
 //!             }
 //!         ]
@@ -80,7 +80,7 @@
 //! assert!(!manifest.declares(Capability::Gpio));
 //!
 //! // A default is an expression, and an invalid one is an invalid manifest.
-//! let broken = manifest.to_json().replace("(true)", "(frobnicate)");
+//! let broken = manifest.to_json().replace("(> $temp 20)", "(frobnicate)");
 //! assert!(parse(&broken).is_err());
 //! ```
 

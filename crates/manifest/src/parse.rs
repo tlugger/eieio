@@ -43,7 +43,7 @@ pub const MIN_MANIFEST_BYTES: u32 = 8_192;
 ///         "inputs": [{ "name": "in" }],
 ///         "outputs": [{ "name": "high" }, { "name": "low" }],
 ///         "properties": [
-///             { "name": "limit", "type": "float", "default": "(21.5)" }
+///             { "name": "limit", "type": "float", "default": "21.5" }
 ///         ]
 ///     }"#,
 /// )

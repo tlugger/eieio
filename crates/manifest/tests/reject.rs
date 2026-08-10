@@ -412,7 +412,7 @@ fn default_failing_static_analysis() {
 fn invalid_default_names_its_property() {
     let json = manifest(
         r#", "properties": [
-            { "name": "good", "type": "bool", "default": "(true)" },
+            { "name": "good", "type": "bool", "default": "true" },
             { "name": "bad",  "type": "bool", "default": "(nope)" }
         ]"#,
     );

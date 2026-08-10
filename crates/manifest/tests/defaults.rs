@@ -295,9 +295,6 @@ fn a_default_that_cannot_evaluate_is_not_a_manifest_defect() {
         ("int", r#""(mod 1 0)""#),
         ("int", r#""(int \"1.5\")""#),
         ("string", r#""(first (arr))""#),
-        // `(true)` applies a literal, which is a TYPE error rather than a parse or
-        // analysis one — the shape that was in ABI §11's own example until this issue.
-        ("bool", r#""(true)""#),
         ("int", r#""(range 100000)""#),
     ] {
         let json = with_default(ty, default);
@@ -314,7 +311,12 @@ fn parse_and_analysis_failures_still_come_first() {
     // The fold is an addition, not a replacement: a default that cannot parse or that
     // names a function which does not exist is still `InvalidDefault`, and reporting a
     // type mismatch for it would bury the real problem.
-    for default in [r#""(+ 1""#, r#""(frobnicate 1)""#, r#""$""#] {
+    //
+    // `(true)` is here rather than among the evaluation failures because EXPR §10 decides
+    // it statically: a literal head can never be a function. It is the shape ABI §11's own
+    // example manifest once shipped, so a manifest carrying it is caught when it is read
+    // rather than per signal, forever.
+    for default in [r#""(+ 1""#, r#""(frobnicate 1)""#, r#""(true)""#, r#""$""#] {
         let json = with_default("int", default);
         match parse(&json) {
             Err(Error::InvalidDefault { property, .. }) => assert_eq!(property, "p"),

@@ -43,8 +43,9 @@ fn spec_example() {
     assert_eq!(property.ty, PropertyType::Bool);
     assert_eq!(property.description, "Evaluated per signal");
     // `true`, not `(true)`: a list applies its head, and the literal `true` is not a
-    // function, so `(true)` is a TYPE error at evaluation (EXPR §4). §11's example said
-    // the latter until eieio-m7o.4 folded defaults and it stopped being theoretical.
+    // function. §11's example said the latter until eieio-m7o.4 folded defaults and it
+    // stopped being theoretical; EXPR §10 now rejects the shape outright, so a manifest
+    // carrying it is refused here rather than failing per signal forever.
     assert_eq!(property.default.as_deref(), Some("true"));
     assert!(property.required);
 }
@@ -147,9 +148,9 @@ fn signal_dependent_default() {
 #[test]
 fn required_and_default_are_independent() {
     for (required, default) in [
-        (true, Some("(true)")),
+        (true, Some("true")),
         (true, None),
-        (false, Some("(true)")),
+        (false, Some("true")),
         (false, None),
     ] {
         let default = match default {
