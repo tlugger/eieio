@@ -78,8 +78,8 @@
     {
       "name": "sub-requires-an-argument",
       "expr": "(-)",
-      "error": "ARITY",
-      "note": "- has no identity, so unlike + it is not total at zero arguments.",
+      "error": "ANY",
+      "note": "Rejected at configure time by 10's arity check: - has no identity, so it requires its named argument. Which code says so is diagnostic.",
       "spec": "\u00a77"
     },
     {
@@ -156,8 +156,9 @@
     {
       "name": "div-requires-two-arguments",
       "expr": "(/ 1)",
-      "error": "ARITY",
-      "spec": "\u00a77.1"
+      "error": "ANY",
+      "spec": "\u00a77.1",
+      "note": "/ takes exactly two arguments. Statically decidable from the builtin table (10)."
     },
     {
       "name": "intdiv-floors-toward-negative-infinity",
@@ -273,14 +274,16 @@
     {
       "name": "min-requires-an-argument",
       "expr": "(min)",
-      "error": "ARITY",
-      "spec": "\u00a77"
+      "error": "ANY",
+      "spec": "\u00a77",
+      "note": "min has no identity and requires its named argument (7.1). Decided statically (10)."
     },
     {
       "name": "max-requires-an-argument",
       "expr": "(max)",
-      "error": "ARITY",
-      "spec": "\u00a77"
+      "error": "ANY",
+      "spec": "\u00a77",
+      "note": "max has no identity and requires its named argument (7.1). Decided statically (10)."
     },
     {
       "name": "abs-int",

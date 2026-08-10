@@ -393,7 +393,7 @@ impl<'a> Evaluator<'a> {
                     return Err(Error::new(
                         ErrorCode::Arity,
                         call.span(),
-                        "function applied to the wrong number of arguments",
+                        form::FN_CALL_ARITY,
                     ));
                 }
                 // Parameters bind simultaneously (EXPR §5.4), which is why the

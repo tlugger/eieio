@@ -49,6 +49,9 @@ pub struct Arity {
     pub min: u8,
     /// Most arguments accepted, or [`None`] for variadic.
     pub max: Option<u8>,
+    /// Whether the count must also be even, for a builtin taking alternating
+    /// arguments. `dict` is the only one (EXPR §7.5).
+    pub pairs: bool,
 }
 
 impl Arity {
@@ -57,12 +60,17 @@ impl Arity {
         Self {
             min: n,
             max: Some(n),
+            pairs: false,
         }
     }
 
     /// `n` or more arguments.
     pub const fn at_least(n: u8) -> Self {
-        Self { min: n, max: None }
+        Self {
+            min: n,
+            max: None,
+            pairs: false,
+        }
     }
 
     /// Between `min` and `max` arguments, inclusive.
@@ -70,6 +78,20 @@ impl Arity {
         Self {
             min,
             max: Some(max),
+            pairs: false,
+        }
+    }
+
+    /// Alternating arguments: any even number, zero included (EXPR §7.5).
+    ///
+    /// Here rather than inside the implementation so that one rule has one home: the
+    /// count is as statically decidable as any other arity, and EXPR §10 rejects it at
+    /// configure time through the same table lookup.
+    pub const fn pairs() -> Self {
+        Self {
+            min: 0,
+            max: None,
+            pairs: true,
         }
     }
 
@@ -84,6 +106,11 @@ impl Arity {
         }
         if self.max.is_some_and(|max| count > max as usize) {
             return Err("too many arguments for this builtin");
+        }
+        if self.pairs && !count.is_multiple_of(2) {
+            return Err(
+                "this builtin takes alternating keys and values, so an even number of arguments",
+            );
         }
         Ok(())
     }
@@ -336,7 +363,7 @@ pub const BUILTINS: &[Builtin] = &[
     Builtin::new("ceil", Arity::exact(1), arith::ceil), // §7.1
     Builtin::new("concat", Arity::at_least(0), collect::concat), // §7.5
     Builtin::new("contains?", Arity::exact(2), strings::contains), // §7.4, §7.5
-    Builtin::new("dict", Arity::at_least(0), collect::dict), // §7.5
+    Builtin::new("dict", Arity::pairs(), collect::dict), // §7.5
     Builtin::new("div", Arity::exact(2), arith::int_div), // §7.1
     Builtin::new("ends-with?", Arity::exact(2), strings::ends_with), // §7.4
     Builtin::new("filter", Arity::exact(2), collect::filter), // §7.5

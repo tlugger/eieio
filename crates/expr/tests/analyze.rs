@@ -433,6 +433,63 @@ fn a_bad_head_does_not_hide_the_arguments() {
     assert_eq!(result.diagnostics[1].code, ErrorCode::Unbound);
 }
 
+/// A builtin's argument count, decided from the table at configure time (EXPR §10).
+///
+/// `(get)` and `(get 1 2 3)` are the pair that motivated the rule — both passed analysis
+/// and failed per signal, forever, for a fault that is one table lookup away.
+#[test]
+fn builtin_arity_is_checked_statically() {
+    // Exact, both directions.
+    one_error("(get)", ErrorCode::Arity, "(get)");
+    one_error("(get 1 2 3)", ErrorCode::Arity, "(get 1 2 3)");
+    one_error("(not)", ErrorCode::Arity, "(not)");
+    // At-least: under-application only, since a variadic has no upper bound to exceed.
+    one_error("(-)", ErrorCode::Arity, "(-)");
+    one_error("(min)", ErrorCode::Arity, "(min)");
+    clean("(+ 1 2 3 4 5)");
+    clean("(str \"a\" \"b\" \"c\")");
+    // Between, both directions.
+    one_error("(range)", ErrorCode::Arity, "(range)");
+    one_error("(range 1 2 3)", ErrorCode::Arity, "(range 1 2 3)");
+    clean("(range 5)");
+    clean("(range 1 5)");
+    // Pairs: an odd count is an arity fault like any other.
+    one_error("(dict \"a\")", ErrorCode::Arity, "(dict \"a\")");
+    clean("(dict)");
+    clean("(dict \"a\" 1 \"b\" 2)");
+}
+
+/// A `fn` written where it is applied has its parameters in the source.
+#[test]
+fn a_directly_applied_fn_is_arity_checked() {
+    one_error("((fn (x y) x) 1)", ErrorCode::Arity, "((fn (x y) x) 1)");
+    one_error("((fn (x) x) 1 2)", ErrorCode::Arity, "((fn (x) x) 1 2)");
+    clean("((fn (x y) x) 1 2)");
+    clean("((fn () 7))");
+
+    // A malformed `fn` is `walk_fn`'s to report; guessing a parameter count on top would
+    // report one fault twice. Exactly one diagnostic, and it is the shape one.
+    one_error("((fn (x x) x) 1 2)", ErrorCode::Arity, "x");
+    one_error("((fn 1 2) 3)", ErrorCode::Type, "1");
+}
+
+/// What the arity rule must *not* decide: anything needing a value.
+///
+/// The accepting side is the half that keeps the rule honest — rejecting these would
+/// refuse working expressions at deploy, and EXPR §5.2 explicitly permits the shadowing.
+#[test]
+fn arity_through_a_value_is_left_to_evaluation() {
+    // §5.2 permits binding over a builtin, and the binding's contents are unknown here.
+    clean("(let ((abs 3)) (abs 1))");
+    clean("(let ((get 1)) (get))");
+    clean("(let ((f abs)) (f 1 2))");
+    // Higher-order: the count is the lambda's, against what `map` calls it with.
+    clean("(map (fn (x y) x) (arr 1))");
+    clean("(reduce (fn (x) x) 0 (arr 1))");
+    // A head that is itself a call.
+    clean("((if true abs floor) -1.5)");
+}
+
 /// The heads that are *not* statically decidable stay accepted.
 ///
 /// This is the half that keeps the rule honest: over-rejecting here would refuse

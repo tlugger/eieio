@@ -35,13 +35,10 @@ pub(super) fn arr<'a>(ev: &mut Evaluator<'a>, args: &[Operand<'a>], call: &Call<
 
 /// `(dict k v k v ...)` — even arity, string keys, `(dict)` is the empty map.
 pub(super) fn dict<'a>(ev: &mut Evaluator<'a>, args: &[Operand<'a>], call: &Call<'a>) -> Built<'a> {
-    if !args.len().is_multiple_of(2) {
-        return Err(call.error(
-            ErrorCode::Arity,
-            "dict takes alternating keys and values, so an even number of arguments",
-        ));
-    }
-
+    // The even count is `Arity::pairs`'s, checked before this runs on every application
+    // path — `Evaluator::apply` is the only one, `map` included. Repeating it here would
+    // be a second home for one rule, and EXPR §10 could only decide it statically from
+    // the table anyway.
     let mut entries = Map::new();
     for pair in (0..args.len()).step_by(2) {
         let key = call.text(args, pair)?;

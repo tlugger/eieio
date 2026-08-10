@@ -251,6 +251,66 @@
       "spec": "\u00a710"
     },
     {
+      "name": "static-arity-exact-under",
+      "expr": "(get)",
+      "error": "ANY",
+      "note": "get takes exactly two arguments. The builtin table carries every arity, so 10 decides the count at configure time; this and (get 1 2 3) are the pair that motivated the rule.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-exact-over",
+      "expr": "(get 1 2 3)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-between-under",
+      "expr": "(range)",
+      "error": "ANY",
+      "note": "range takes one or two arguments (7.5): both ends of a bounded arity are decidable.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-between-over",
+      "expr": "(range 1 2 3)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-at-least-has-no-upper-bound",
+      "expr": "(+ 1 2 3 4 5)",
+      "expect": {
+        "int": 15
+      },
+      "signal_dependent": false,
+      "note": "A variadic cannot be over-applied, so the at-least class has no over-application vector: there is nothing to reject. Pinned as accepted so a bug that invented an upper bound would show up here.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-pairs-accepts-an-even-count",
+      "expr": "(len (dict \"a\" 1))",
+      "expect": {
+        "int": 1
+      },
+      "signal_dependent": false,
+      "note": "The other side of dict-odd-arity-is-an-error: an even count is accepted at configure time. Wrapped in len so the vector asserts an int rather than restating the map's encoding.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-is-skipped-for-a-shadowed-builtin",
+      "expr": "(let ((abs 3)) (abs 1))",
+      "error": "TYPE",
+      "note": "5.2 permits binding over a builtin, and what the binding holds is not statically known -- so the arity check MUST NOT fire here. It analyses clean and fails at evaluation as a TYPE error: applying 3. A host that arity-checked the shadowed name would reject a legal expression at deploy.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-arity-is-not-decidable-through-a-binding",
+      "expr": "(let ((f abs)) (f 1 2))",
+      "error": "ARITY",
+      "note": "f holds abs, but only evaluation knows that, so the count is not statically decidable and ARITY stays normative. The boundary of the rule, from the accepting side.",
+      "spec": "\u00a710"
+    },
+    {
       "name": "static-valid-list-head-is-not-decidable",
       "expr": "((if true abs floor) -1.5)",
       "expect": {

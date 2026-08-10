@@ -191,14 +191,16 @@
     {
       "name": "fn-arity-mismatch-too-few",
       "expr": "((fn (x y) x) 1)",
-      "error": "ARITY",
-      "spec": "\u00a75.4"
+      "error": "ANY",
+      "spec": "\u00a75.4",
+      "note": "A fn written where it is applied has its parameters in the source, so 10 decides the count statically. Contrast (map (fn (x y) x) (arr 1)), where the count is the lambda's against what map calls it with -- not decidable from the table, and still ARITY at evaluation."
     },
     {
       "name": "fn-arity-mismatch-too-many",
       "expr": "((fn (x) x) 1 2)",
-      "error": "ARITY",
-      "spec": "\u00a75.4"
+      "error": "ANY",
+      "spec": "\u00a75.4",
+      "note": "The same, over-applied."
     },
     {
       "name": "fn-parameters-bind-simultaneously",

@@ -10,7 +10,7 @@
 use alloc::vec::Vec;
 
 use crate::ast::{Expr, ExprKind};
-use crate::builtin::{is_builtin, is_special_form};
+use crate::builtin::{is_builtin, is_special_form, lookup};
 use crate::error::{Error, ErrorCode};
 use crate::form;
 use crate::parse::parse;
@@ -141,6 +141,8 @@ fn walk<'a>(expr: &'a Expr, scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
                 }
             }
 
+            check_arity(expr, head, items.len() - 1, scope, out);
+
             // An ordinary application: the head is evaluated like any other operand
             // (EXPR §4), so it is walked with the rest.
             for item in items {
@@ -148,6 +150,57 @@ fn walk<'a>(expr: &'a Expr, scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
             }
         }
     }
+}
+
+/// The argument count of an application, where it is decidable (EXPR §10).
+///
+/// Two heads answer it without knowing any value: a builtin named directly, whose arity
+/// the table already carries, and a `fn` written where it is applied, whose parameters are
+/// in the source. Everything else needs a value — a symbol bound to a function, or a head
+/// that is itself a call — and is left to evaluation.
+///
+/// `(map (fn (x y) x) (arr 1))` is deliberately not here. The count it gets wrong is the
+/// *lambda's*, against what `map` calls it with, which the table does not describe.
+fn check_arity(call: &Expr, head: &Expr, args: usize, scope: &[&str], out: &mut Vec<Error>) {
+    let wrong = match &head.kind {
+        // Skipped when the name is shadowed: EXPR §5.2 permits binding over a builtin,
+        // and what `(let ((abs 3)) (abs 1))` binds is not the builtin's arity — that one
+        // is a TYPE error at evaluation, not an arity error here.
+        ExprKind::Symbol(name) if !scope.contains(&name.as_str()) => {
+            lookup(name).and_then(|builtin| builtin.arity.check(args).err())
+        }
+
+        // `((fn (x y) x) 1)` — checked only when the form is well shaped. A malformed
+        // `fn` is already reported by `walk_fn`, and guessing a parameter count on top of
+        // it would report one fault twice.
+        ExprKind::List(form) => match fn_params(form) {
+            Some(params) if params != args => Some(form::FN_CALL_ARITY),
+            _ => None,
+        },
+
+        _ => None,
+    };
+
+    if let Some(message) = wrong {
+        out.push(Error::new(ErrorCode::Arity, call.span, message));
+    }
+}
+
+/// The parameter count of `(fn (a b) body)`, if `form` is exactly that shape.
+fn fn_params(form: &[Expr]) -> Option<usize> {
+    let [head, params, _body] = form else {
+        return None;
+    };
+    if !matches!(&head.kind, ExprKind::Symbol(name) if name == "fn") {
+        return None;
+    }
+    let ExprKind::List(params) = &params.kind else {
+        return None;
+    };
+    params
+        .iter()
+        .all(|param| matches!(param.kind, ExprKind::Symbol(_)))
+        .then_some(params.len())
 }
 
 /// `(if cond then else)` — EXPR §5.1: three arguments, always.

@@ -93,8 +93,8 @@
     {
       "name": "dict-odd-arity-is-an-error",
       "expr": "(dict \"a\")",
-      "error": "ARITY",
-      "note": "Even arity: keys and values.",
+      "error": "ANY",
+      "note": "dict takes alternating keys and values, so an even count. Pure arity, so 10 decides it at configure time from the table rather than per signal.",
       "spec": "\u00a77.5"
     },
     {

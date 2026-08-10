@@ -345,11 +345,12 @@ Item 3 obliges more than a symbol-table lookup. Resolving symbols requires knowi
 - a binding or parameter that shadows a special form (§5.2, §5.4);
 - a special form appearing anywhere but the head of a list, since §4 would then resolve it as an ordinary symbol and find nothing;
 - an empty list `()`, which has nothing to apply (§4);
+- an application whose **argument count is decidable without evaluating anything**. Two heads qualify: a builtin named directly, whose arity §7 fixes — `(get)`, `(get 1 2 3)`, `(dict "a")`, where `dict`'s alternating arguments make an odd count as much an arity fault as a short one — and a `fn` written where it is applied, whose parameters are in the source: `((fn (x y) x) 1)`. A count that needs a value is *not* decidable and MUST NOT be rejected: `(let ((f abs)) (f 1 2))` and `(map (fn (x y) x) (arr 1))` are `ARITY` at evaluation, and so is any application of a shadowed builtin, since §5.2 permits binding over one and the binding's contents are unknown here;
 - a list whose head is a **literal or a sigil**, neither of which can ever be a function: `(true)`, `(1 2)`, `($temp 1)`. §4.2 settles it — "a function is not a value (§2)" — and a sigil yields a signal attribute, which is always a value. A Lisp-shaped `(true)` is a natural mistake for anyone coming from a language where it is a call, and without this the mistake fails per signal, forever, instead of once at deploy. Only these two head shapes are decidable: a symbol head resolves through scope, and a list head (`((if c abs floor) 1)`) is genuinely dynamic.
 
 Diagnostics SHOULD be collected rather than reported one at a time: an expression editor (DESIGNER §5) shows every mistake at once, and a deploy that surfaces one typo per attempt wastes the operator's time. Which code a host attaches to each rejection is diagnostic rather than normative — hosts MUST agree on *whether* an expression is statically valid, not on how they describe a fault (cf. ABI §6.3.1).
 
-Hosts MAY additionally constant-fold sub-expressions, arity-check builtin applications, or compile to bytecode — all invisible if conformance vectors pass.
+Hosts MAY additionally constant-fold sub-expressions or compile to bytecode — invisible if conformance vectors pass. Arity checking used to sit in this list; it is a MUST above, because an optional rejection is one hosts can disagree about.
 
 ---
 

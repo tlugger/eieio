@@ -33,6 +33,13 @@ pub(crate) const LET_BINDING_NAME: &str = "let binding name must be a symbol";
 /// (EXPR §5.4).
 pub(crate) const FN_ARITY: &str = "fn takes a parameter list and exactly one body expression";
 
+/// A `fn` applied to the wrong number of arguments (EXPR §5.4, §10).
+///
+/// One message for both directions, because the evaluator has never distinguished them:
+/// it compares two counts that are both on screen. Shared so analysis, which decides this
+/// statically for a `fn` written where it is applied, cannot word it differently.
+pub(crate) const FN_CALL_ARITY: &str = "function applied to the wrong number of arguments";
+
 /// A `fn` whose second element is not a list.
 pub(crate) const FN_PARAMS: &str = "fn requires a list of parameters";
 

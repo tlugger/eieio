@@ -183,14 +183,16 @@
     {
       "name": "not-requires-one-argument",
       "expr": "(not)",
-      "error": "ARITY",
-      "spec": "\u00a77.2"
+      "error": "ANY",
+      "spec": "\u00a77.2",
+      "note": "Exactly one argument, decided statically from the builtin table (10)."
     },
     {
       "name": "equal-two-arguments-required",
       "expr": "(= 1)",
-      "error": "ARITY",
-      "spec": "\u00a77.2"
+      "error": "ANY",
+      "spec": "\u00a77.2",
+      "note": "= takes exactly two arguments. Decided statically (10)."
     }
   ]
 }
