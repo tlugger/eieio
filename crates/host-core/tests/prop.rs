@@ -429,9 +429,12 @@ fn every_evaluation_error_code_maps_to_err_expr() {
     let sources = [
         ("(/ 1 0)", eio_expr::ErrorCode::Domain),
         ("(+ 1 \"two\")", eio_expr::ErrorCode::Type),
-        // Not `(if true)`: EXPR §10 rejects a malformed special form at configure time, so
-        // the ARITY that survives to evaluation is a function applied to the wrong count.
-        ("((fn (x) x))", eio_expr::ErrorCode::Arity),
+        // Finding an ARITY that survives to evaluation keeps getting harder, which is the
+        // point of EXPR §10: it was `(if true)` until §10 rejected malformed special forms
+        // statically, then `((fn (x) x))` until §10 learned to count the parameters of a
+        // `fn` written where it is applied. What is left needs a *value* to decide — `f`
+        // holds `abs`, and only evaluation knows that.
+        ("(let ((f abs)) (f 1 2))", eio_expr::ErrorCode::Arity),
         ("(get $ \"absent\")", eio_expr::ErrorCode::Missing),
     ];
     let props: Vec<PropertySource<'_>> = sources
