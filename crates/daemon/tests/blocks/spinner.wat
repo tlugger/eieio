@@ -23,6 +23,10 @@
         (i32.and (i32.add (local.get $size) (i32.const 8)) (i32.const -8))))
     (local.get $ptr))
 
+  ;; ABI §6.1's free is deliberately absent: this callback never returns, so "before the next
+  ;; callback at the latest" never arrives, and there is no next callback to be late for. The
+  ;; fixture also has to consume *only* fuel to be a test of the budget rather than of
+  ;; anything the guest touches — a host call here would muddy exactly that.
   (func (export "eio_free") (param i32 i32))
 
   (func (export "eio_configure") (param i32 i32) (result i32) (i32.const 0))

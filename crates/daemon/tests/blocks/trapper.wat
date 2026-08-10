@@ -20,6 +20,9 @@
         (i32.and (i32.add (local.get $size) (i32.const 8)) (i32.const -8))))
     (local.get $ptr))
 
+  ;; ABI §6.1's free is deliberately absent: this callback traps, and a trap is instance
+  ;; death (§8). The store goes with it, so there is no leak to observe and nothing that
+  ;; freeing first would prove.
   (func (export "eio_free") (param i32 i32))
 
   (func (export "eio_configure") (param i32 i32) (result i32) (i32.const 0))

@@ -37,7 +37,7 @@
         (i32.and (i32.add (local.get $size) (i32.const 8)) (i32.const -8))))
     (local.get $ptr))
 
-  (func (export "eio_free") (param i32 i32))
+  (func $free (export "eio_free") (param i32 i32))
 
   ;; Raises the depth counter, recording an overlap if there already was one.
   (func $enter
@@ -54,9 +54,11 @@
   (func $status (result i32)
     (i32.sub (i32.const 0) (global.get $violated)))
 
-  (func (export "eio_configure") (param i32 i32) (result i32)
+  (func (export "eio_configure") (param $ptr i32) (param $len i32) (result i32)
     (call $enter)
     (call $leave)
+    ;; The configure payload is a host→guest buffer like any other (ABI §6.1).
+    (call $free (local.get $ptr) (local.get $len))
     (call $status))
 
   (func (export "eio_start") (result i32)
@@ -81,6 +83,10 @@
     ;; detector that has never fired is indistinguishable from one that cannot.
     (if (i32.ne (local.get $port) (i32.const 2))
       (then (call $leave)))
+    ;; After the emit above, which reads out of this buffer while it is still the guest's
+    ;; (ABI §9.3). Freed on every port, port 2 included: the reentrancy fault this fixture
+    ;; stages is about depth, and leaking on top of it would stage two at once.
+    (call $free (local.get $ptr) (local.get $len))
     (call $status))
 
   (@custom "eio:manifest" "{\"name\":\"canary\",\"version\":\"1.0.0\",\"abi\":{\"major\":1,\"minor\":0},\"description\":\"Reports any overlapping callback entry\",\"inputs\":[{\"name\":\"emitting\"},{\"name\":\"quiet\"},{\"name\":\"wedge\"}],\"outputs\":[{\"name\":\"out\"}]}")

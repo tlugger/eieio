@@ -28,6 +28,8 @@
         (i32.and (i32.add (local.get $size) (i32.const 8)) (i32.const -8))))
     (local.get $ptr))
 
+  ;; No `eio_free` calls below, and none are owed: this module is refused at load for using a
+  ;; post-MVP proposal (ABI §4.3), before any callback runs.
   (func (export "eio_free") (param i32 i32))
 
   (func (export "eio_configure") (param i32 i32) (result i32) (i32.const 0))

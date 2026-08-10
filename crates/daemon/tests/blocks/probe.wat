@@ -46,15 +46,17 @@
         (i32.and (i32.add (local.get $size) (i32.const 8)) (i32.const -8))))
     (local.get $ptr))
 
-  (func (export "eio_free") (param i32 i32))
+  (func $free (export "eio_free") (param i32 i32))
 
-  (func (export "eio_configure") (param i32 i32) (result i32)
+  (func (export "eio_configure") (param $ptr i32) (param $len i32) (result i32)
     ;; One line at each of ABI §7.0's five levels.
     (call $log (i32.const 0) (i32.const 0) (i32.const 10))
     (call $log (i32.const 1) (i32.const 0) (i32.const 10))
     (call $log (i32.const 2) (i32.const 0) (i32.const 10))
     (call $log (i32.const 3) (i32.const 0) (i32.const 10))
     (call $log (i32.const 4) (i32.const 0) (i32.const 10))
+    ;; The configure payload is a host→guest buffer like any other (ABI §6.1).
+    (call $free (local.get $ptr) (local.get $len))
     (i32.const 0))
 
   (func (export "eio_start") (result i32) (i32.const 0))
@@ -94,6 +96,9 @@
           (i32.eq (local.get $first) (local.get $second)))
       (then (i32.store8 (i32.const 141) (i32.const 0xf5))))
 
+    ;; Before the emit, and safely so: what is emitted lives at 128, not in the inbound
+    ;; buffer, so nothing reads `$ptr` after this (ABI §6.1, §9.3).
+    (call $free (local.get $ptr) (local.get $len))
     (call $emit (i32.const 0) (i32.const 128) (i32.const 26)))
 
   (@custom "eio:manifest" "{\"name\":\"probe\",\"version\":\"1.0.0\",\"abi\":{\"major\":1,\"minor\":0},\"description\":\"Calls every eio:core function and reports\",\"inputs\":[{\"name\":\"in\"}],\"outputs\":[{\"name\":\"out\"}],\"properties\":[{\"name\":\"n\",\"type\":\"int\",\"default\":\"7\"}]}")
