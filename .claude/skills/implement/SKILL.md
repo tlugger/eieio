@@ -35,7 +35,8 @@ Non-negotiables from CLAUDE.md that this workflow must never erode:
 ## Step 1 — Research
 
 - Read the governing spec sections the issue cites (and `docs/SCOPE.md` where referenced). Note every **PROPOSED** marker this work would ratify, and every point where a spec is silent, ambiguous, or wrong for what you are about to build.
-- Explore the code: what exists, what this touches, blast radius (callers, shared crates, conformance suites, justfile recipes, CI).
+- **Open the code with `wdpkr search`** (semantic index — see the wdpkr section of CLAUDE.md): one conceptual query per area the issue touches, e.g. `wdpkr search "executor mailbox delivery" --scope crates/daemon -k 3`. Run scoped queries in parallel when the issue spans crates. Use it to find what already exists before deciding anything needs to be built — duplicate implementations of something the index would have surfaced are a research failure.
+- Assess blast radius from the results' `called_by`/`calls` fields (callers, shared crates, conformance suites), then verify by reading the files — call-graph edges resolve by name and over-match on common names (`new`, `len`), so treat them as leads, not proof. Once wdpkr has pointed you at files and symbols, switch to `rg`/Read; don't chain semantic queries to refine.
 - `bd list` for adjacent open issues, so you don't implement work planned elsewhere.
 - Probe mechanisms empirically now, before they reach the plan. A one-command experiment that kills a bad approach is worth more than a paragraph of reasoning about it.
 
@@ -102,8 +103,9 @@ Commit per CLAUDE.md: one commit per area, best-fit emoji, spec+code together, n
 1. `bd close <id>` with `--reason`. If that was an epic's last child and the epic's own criteria are met, close the epic too.
 2. Confirm the follow-up beads from steps 5–6 exist.
 3. `bd dolt push`.
-4. Report this iteration compactly: commits landed, issue closed, follow-ups filed, and what the next driver needs to know.
-5. **Return to step 0 immediately.**
+4. **`wdpkr index`** — fold the commits you just pushed into the semantic index so step 1 of the next iteration searches current code, not last week's. It is incremental from the last indexed SHA; run it exactly once per iteration, after the push (never from a subagent or worktree). If it fails, note it and continue — a stale index is a degraded search, not a stop condition.
+5. Report this iteration compactly: commits landed, issue closed, follow-ups filed, and what the next driver needs to know.
+6. **Return to step 0 immediately.**
 
 ## Stop conditions
 
