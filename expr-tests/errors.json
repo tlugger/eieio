@@ -10,8 +10,9 @@
     {
       "name": "unbound-symbol",
       "expr": "(frobnicate 1)",
-      "error": "UNBOUND",
-      "spec": "\u00a78"
+      "error": "ANY",
+      "spec": "\u00a78",
+      "note": "Statically rejected (10 item 3 is a MUST), so the code is diagnostic rather than normative. This implementation reports UNBOUND; a host reporting something else still conforms."
     },
     {
       "name": "type-wrong-operand",
@@ -22,9 +23,9 @@
     {
       "name": "arity-if-missing-else",
       "expr": "(if true 1)",
-      "error": "ARITY",
+      "error": "ANY",
       "spec": "\u00a75.1",
-      "note": "else is mandatory: an if with no else would have to invent a value for the missing branch"
+      "note": "if's arity is decided by 10's shape rules at configure time, so the code is diagnostic. ARITY stays normative where it is not statically decidable -- builtin arity, and a fn applied to the wrong count."
     },
     {
       "name": "domain-division-by-zero",

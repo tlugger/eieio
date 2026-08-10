@@ -73,13 +73,29 @@ the promotion asserted end to end: an int expression, a float property, and a fl
 wire. The only `error` it admits is `RESULT_TYPE`; `budget`, `render` and `signal_dependent`
 are the language suite's and are not accepted there.
 
-`"error": "ANY"` asserts that the expression is **rejected**, without pinning which code
-says so. It exists because §10 makes exactly that distinction: for a statically-invalid
-expression — `(let (x) x)`, a parameter shadowing a special form, an empty list — hosts
-MUST agree on *whether* it is rejected, and "which code a host attaches to each rejection
-is diagnostic rather than normative". A vector pinning a code there would fail a
-conforming host. Use a real code everywhere else; `ANY` is a statement about the spec, not
-a way to avoid deciding.
+`"error": "ANY"` asserts that the expression is rejected by **§10 static analysis**,
+without pinning which code says so. It exists because §10 makes exactly that distinction:
+for a statically-invalid expression — `(let (x) x)`, a parameter shadowing a special form,
+an empty list — hosts MUST agree on *whether* it is rejected, and "which code a host
+attaches to each rejection is diagnostic rather than normative". A vector pinning a code
+there would fail a conforming host.
+
+Which gate rejects it is not a detail the corpus leaves open, and the runner enforces the
+correspondence in **both** directions:
+
+- a vector expecting `ANY` MUST be rejected by analysis, not merely fail to evaluate.
+  Without this, `ANY` degrades into "errors somehow", and every static vector in the
+  corpus passes on a host that implements none of §10 — which is what they all did until
+  eieio-s85.10;
+- a vector pinning a real code MUST analyse clean. A pinned code on a statically-rejected
+  expression asserts a code §10 calls diagnostic, so a conforming host that words its
+  diagnostics differently would fail this suite.
+
+So the choice is forced, not stylistic: if §10 rejects the expression it is `ANY`, and
+otherwise it is the §8 code evaluation produces. Two codes are consequently unreachable as
+pinned vectors — `RESULT_TYPE`, which is the host's property check and lives in
+`properties/`, and `UNBOUND`, since every unbound symbol is statically decidable and §10
+item 3 makes rejecting one a MUST.
 
 Exactly one of `expect` and `error` must be present. A vector with neither, both, or an
 unknown field is malformed and the runner rejects the file — a typo'd field name that was

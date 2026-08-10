@@ -44,8 +44,9 @@
     {
       "name": "if-else-is-mandatory",
       "expr": "(if true 1)",
-      "error": "ARITY",
-      "spec": "\u00a75.1"
+      "error": "ANY",
+      "spec": "\u00a75.1",
+      "note": "5.1's rule, enforced statically by 10, so the code is diagnostic rather than normative. That else is mandatory is the assertion; which code says so is not."
     },
     {
       "name": "let-binds-and-uses",

@@ -98,7 +98,7 @@ No quote/quasiquote, no macros, no keywords, no chars, no rationals, no multiple
 Standard eager applicative-order evaluation with lexical scoping:
 
 - A **number, string, `true`, `false`, `null`** evaluates to itself.
-- A **symbol** evaluates to its binding (innermost `let`/`fn` scope, then the builtin table). A symbol resolving to the builtin table yields a **function** (§5.4): `abs` on its own is a function value, which is what makes `(map abs $samples)` legal. Unbound symbol = `ERR_EXPR` at evaluation time (not parse time — but see §10 static checks).
+- A **symbol** evaluates to its binding (innermost `let`/`fn` scope, then the builtin table). A symbol resolving to the builtin table yields a **function** (§5.4): `abs` on its own is a function value, which is what makes `(map abs $samples)` legal. Unbound symbol = `ERR_EXPR`, and not at parse time: resolution is a scope question, not a grammatical one. An evaluator must classify it, but in a conforming host nothing reaches evaluation with an unbound symbol in it — §10 makes rejecting one at configure time a MUST.
 - A **sigil** evaluates per §6.
 - A **list** `(f a b ...)`: if `f` is a special form symbol (§5), apply special-form rules; otherwise evaluate `f` and all arguments left-to-right, then apply. Applying a non-function is a `TYPE` error, and so is the empty list `()`, which has nothing to apply (§10 rejects it statically, before any signal arrives).
 
@@ -333,9 +333,11 @@ At configure time (ABI §7.1), the host MUST parse every property expression and
 
 1. Reject `PARSE` errors → configuration rejection.
 2. Compute **signal dependence**: an expression is signal-dependent iff any sigil (`$`, `$name`) appears in it. This is the constant-folding predicate required by ABI §7.1 — signal-independent expressions are evaluated once and cached.
-3. SHOULD reject statically-unbound symbols (every symbol resolvable to a binding form or builtin) at configure time rather than first evaluation. Catching typos at deploy, not at 2 a.m., is the point.
+3. MUST reject statically-unbound symbols (every symbol resolvable to a binding form or builtin) at configure time rather than first evaluation. Catching typos at deploy, not at 2 a.m., is the point.
 
-Item 3 obliges more than a symbol-table lookup. Resolving symbols requires knowing what each binding form binds, so a host implementing item 3 MUST also validate the *shape* of the five special forms (§5) in order to do it at all: what `(let (x) x)` binds has no answer, and a host that guessed would accept an expression that cannot evaluate. Such a host MUST reject:
+Item 3 is a MUST because the paragraph below it already required one: hosts must agree on *whether* an expression is statically valid, and an optional analysis is one they can disagree about. ABI §11.1 had already assumed as much, requiring a manifest `default` to pass this analysis. It was a SHOULD until this section was reconciled with itself. The burden is the same for every tier: the analysis is a pure function of the parsed expression, with no budget, no clock and no host state.
+
+Item 3 obliges more than a symbol-table lookup. Resolving symbols requires knowing what each binding form binds, so a host MUST also validate the *shape* of the five special forms (§5) in order to do it at all: what `(let (x) x)` binds has no answer, and a host that guessed would accept an expression that cannot evaluate. A host MUST reject:
 
 - a `let` whose bindings are not a list of `(name expr)` pairs with a symbol in the name position, or which lacks exactly one body expression;
 - a `fn` whose parameters are not a list of symbols, which repeats a parameter name, or which lacks exactly one body expression;

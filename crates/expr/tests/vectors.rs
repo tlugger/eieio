@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use eio_expr::{
-    BUILTINS, ErrorCode, EvalLimits, Expr, ExprKind, ParseLimits, SPECIAL_FORMS, eval_with_limits,
-    parse_with_limits, render,
+    BUILTINS, ErrorCode, EvalLimits, Expr, ExprKind, ParseLimits, SPECIAL_FORMS, analyze,
+    eval_with_limits, parse_with_limits, render,
 };
 use eio_signal::Signal;
 use serde::Deserialize;
@@ -218,6 +218,36 @@ fn vectors_pass() {
             );
         }
 
+        // §10 static analysis is a MUST, and `ANY` is how a vector says an expression
+        // falls to it. Asserted as a biconditional, in both directions, because each
+        // direction catches a different way for the corpus to stop meaning anything:
+        //
+        // - `ANY` without a static rejection would be a vector that passes on a host
+        //   implementing none of §10, which is how all 21 of them passed before this
+        //   assertion existed — the evaluator errored and nobody checked who did.
+        // - A pinned code *with* a static rejection is a vector asserting a code §10
+        //   calls diagnostic rather than normative, so a host that reports its own would
+        //   fail this suite while conforming.
+        //
+        // A vector that does not parse is not analysed; PARSE is a different gate, and
+        // `corpus_covers_the_language` is where an unparsable vector's claim is checked.
+        if let Ok(expr) = &parsed {
+            let statically_rejected = !analyze(expr).is_ok();
+            let expects_any = vector.error.as_deref() == Some(ANY_ERROR);
+            assert_eq!(
+                statically_rejected,
+                expects_any,
+                "{at}: {} (§10)",
+                if statically_rejected {
+                    "statically rejected, so it must expect ANY rather than pin a code \
+                     §10 leaves diagnostic"
+                } else {
+                    "expects ANY but analyses clean, so it is asserting the evaluator \
+                     rather than §10"
+                },
+            );
+        }
+
         let outcome = parsed.and_then(|expr| eval_with_limits(&expr, signal.as_ref(), eval_limits));
 
         match (&vector.expect, &vector.error) {
@@ -265,6 +295,7 @@ fn vectors_pass() {
 fn corpus_covers_the_language() {
     let mut symbols = BTreeSet::new();
     let mut codes = BTreeSet::new();
+    let mut static_codes: Vec<ErrorCode> = Vec::new();
 
     for (file, vector) in corpus() {
         // Parse under the vector's own limits: a PARSE vector may deliberately exceed
@@ -272,6 +303,12 @@ fn corpus_covers_the_language() {
         let (parse_limits, _) = limits(&vector.budget);
         if let Ok(expr) = parse_with_limits(&vector.expr, parse_limits) {
             collect_symbols(&expr, &mut symbols);
+            // What this implementation calls each static rejection. §10 leaves the code
+            // diagnostic, so these are collected for the audit below rather than pinned by
+            // any vector — which is exactly why the audit has to be the one asking.
+            if vector.error.as_deref() == Some(ANY_ERROR) {
+                static_codes.extend(analyze(&expr).diagnostics.iter().map(|d| d.code));
+            }
         } else {
             let expected = vector.error.as_deref();
             assert!(
@@ -309,13 +346,20 @@ fn corpus_covers_the_language() {
         "special forms have no vector: {missing_forms:?}",
     );
 
+    // Two codes cannot be covered by a *pinned* vector, for opposite reasons.
+    //
     // RESULT_TYPE is the host's property-type check (ABI §7.1, §11), not an interpreter
     // outcome: no expression can produce it, so no vector here can cover it. It has its own
     // vectors, in `expr-tests/properties/`, run by `eio_host_core` where the check lives.
+    //
+    // UNBOUND is the other way round — every unbound symbol is statically decidable, and
+    // §10 item 3 makes rejecting one a MUST, so no expression reaches an evaluator with one
+    // in it. A vector pinning UNBOUND would be pinning a code §10 calls diagnostic. It is
+    // covered below instead, as a static rejection.
+    //
     // Every other code is required here.
     let missing_codes: Vec<&str> = [
         ErrorCode::Parse,
-        ErrorCode::Unbound,
         ErrorCode::Type,
         ErrorCode::Arity,
         ErrorCode::Domain,
@@ -332,6 +376,13 @@ fn corpus_covers_the_language() {
     assert!(
         missing_codes.is_empty(),
         "error codes have no vector: {missing_codes:?}",
+    );
+
+    // UNBOUND's coverage, per the note above: it is reachable only as a static rejection,
+    // so the audit asks for it there rather than letting it silently drop out.
+    assert!(
+        static_codes.contains(&ErrorCode::Unbound),
+        "no ANY vector rejects an unbound symbol: §10 item 3 has lost its coverage",
     );
 }
 
