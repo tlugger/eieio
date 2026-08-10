@@ -1,11 +1,14 @@
 //! What a malformed special form is called (EXPR-SPEC §5, §10).
 //!
-//! Every message here is raised from two places: [`analyze`](crate::analyze), which
-//! reports it at configure time as EXPR §10 asks, and the evaluator, which has to
+//! Most messages here are raised from two places: [`analyze`](crate::analyze), which
+//! reports them at configure time as EXPR §10 asks, and the evaluator, which has to
 //! reach the same verdict on its own because §10's symbol-resolution requirement is a
 //! SHOULD. A host that declines it still gets the same classification per signal, and
 //! two hosts that disagree about *which* rule an expression broke would be a
 //! conformance bug even where EXPR §10 leaves the wording non-normative.
+//!
+//! [`LITERAL_HEAD`] and [`SIGIL_HEAD`] are the exceptions: analysis raises them, the
+//! evaluator does not. Each one is marked with why.
 //!
 //! Sharing the constants is what makes that a fact rather than an intention: the
 //! wording cannot drift, because there is one of each.
@@ -48,6 +51,26 @@ pub(crate) const SPECIAL_FORM_AS_VALUE: &str = "special form cannot be used as a
 
 /// `()` — nothing to apply (EXPR §4).
 pub(crate) const EMPTY_LIST: &str = "empty list cannot be applied";
+
+/// `(true)`, `(1 2)` — a literal in head position (EXPR §10).
+///
+/// Analysis only. The evaluator reaches the same *code* by its ordinary route: it
+/// evaluates the head, finds a value rather than a function, and reports `TYPE`
+/// "cannot apply a non-function". Saying it twice would buy nothing.
+pub(crate) const LITERAL_HEAD: &str = "a literal cannot be applied";
+
+/// `($temp 1)`, `($ 1)` — a sigil in head position (EXPR §10).
+///
+/// A sigil yields a signal attribute, and a function is not a value (EXPR §2, §4.2),
+/// so this can no more be applied than a literal can.
+///
+/// Analysis only, and here that is load-bearing rather than incidental: the evaluator
+/// evaluates the head *before* it can find out the head is not a function, so under
+/// `SIGNAL_NONE` it reports `ERR_NO_SIGNAL_CONTEXT` for the sigil (EXPR §6) and never
+/// reaches the application. Raising this from the evaluator too would mean reordering
+/// §6's rule for an expression no conforming host can deploy, since §10 rejects it at
+/// configure time.
+pub(crate) const SIGIL_HEAD: &str = "a signal value cannot be applied";
 
 /// A symbol that resolves neither to a binding nor to a builtin (EXPR §4).
 pub(crate) const UNBOUND_SYMBOL: &str = "unbound symbol";

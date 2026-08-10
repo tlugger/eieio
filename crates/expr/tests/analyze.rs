@@ -380,6 +380,77 @@ fn empty_application() {
     one_error("(+ 1 ())", ErrorCode::Type, "()");
 }
 
+/// A literal in head position can never be a function (EXPR §10).
+///
+/// `(true)` is the case that motivated the rule: ABI §11's own example manifest once
+/// shipped it as a bool property's default, which meant the normative example could
+/// never evaluate. Every literal type is covered, because the mistake is shaped by the
+/// author's previous language, not by the type they happened to write.
+#[test]
+fn literal_in_head_position() {
+    for (source, span) in [
+        ("(true)", "true"),
+        ("(false)", "false"),
+        ("(null)", "null"),
+        ("(1 2)", "1"),
+        ("(1.5)", "1.5"),
+        ("(\"a\" 1)", "\"a\""),
+    ] {
+        one_error(source, ErrorCode::Type, span);
+    }
+
+    // Nested, to prove the rule is not anchored to the root of the expression.
+    one_error("(+ 1 (2 3))", ErrorCode::Type, "2");
+}
+
+/// A sigil in head position, for the same reason: a sigil yields a signal attribute,
+/// and a function is not a value (EXPR §2, §4.2).
+///
+/// Worth stating separately from the literal case because the *evaluator* cannot reach
+/// this verdict — it evaluates the head first, so under `SIGNAL_NONE` it reports
+/// `NO_SIGNAL` for the sigil and never gets to the application (EXPR §6). Analysis is
+/// the only place this is caught.
+#[test]
+fn sigil_in_head_position() {
+    one_error("($ 1)", ErrorCode::Type, "$");
+    one_error("($temp)", ErrorCode::Type, "$temp");
+    one_error("($temp 1)", ErrorCode::Type, "$temp");
+    one_error("(+ 1 ($temp 2))", ErrorCode::Type, "$temp");
+}
+
+/// The head rule reports and keeps walking: EXPR §10 collects diagnostics rather than
+/// stopping at the first, so a bad head does not hide a typo in the arguments.
+#[test]
+fn a_bad_head_does_not_hide_the_arguments() {
+    let result = analysis("(true nope)");
+    assert_eq!(
+        result.diagnostics.len(),
+        2,
+        "expected the head and the unbound symbol, got {:?}",
+        result.diagnostics
+    );
+    assert_eq!(result.diagnostics[0].code, ErrorCode::Type);
+    assert_eq!(result.diagnostics[1].code, ErrorCode::Unbound);
+}
+
+/// The heads that are *not* statically decidable stay accepted.
+///
+/// This is the half that keeps the rule honest: over-rejecting here would refuse
+/// working expressions at deploy, which is worse than the mistake being fixed.
+#[test]
+fn undecidable_heads_are_left_alone() {
+    // A list head evaluates to whatever it evaluates to.
+    clean("((fn (x) x) 1)");
+    clean("((if true abs floor) -1.5)");
+    clean("((let ((f abs)) f) -1)");
+    // A symbol head resolves through scope, and both of these do resolve.
+    clean("(abs -1)");
+    clean("(let ((f abs)) (f -1))");
+    // A sigil is only refused in head position; everywhere else it is ordinary.
+    clean("(+ $temp 1)");
+    clean("(get $ \"temp\")");
+}
+
 // ── the shared builtin table ────────────────────────────────────────────────
 
 /// Sorted and duplicate-free, which `is_builtin`'s binary search requires.

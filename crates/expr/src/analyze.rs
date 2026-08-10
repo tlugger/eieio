@@ -110,6 +110,21 @@ fn walk<'a>(expr: &'a Expr, scope: &mut Vec<&'a str>, out: &mut Vec<Error>) {
                 return;
             };
 
+            // A head that can never be a function, decided once here rather than per
+            // signal forever (EXPR §10). Only these two shapes are decidable: a symbol
+            // resolves through scope, and a list head is genuinely dynamic.
+            match &head.kind {
+                ExprKind::Literal(_) => {
+                    out.push(Error::new(ErrorCode::Type, head.span, form::LITERAL_HEAD))
+                }
+                ExprKind::Signal | ExprKind::Attr(_) => {
+                    out.push(Error::new(ErrorCode::Type, head.span, form::SIGIL_HEAD))
+                }
+                // Reported, then walked with the rest below: `(true nope)` has two
+                // things wrong with it and EXPR §10 collects both.
+                ExprKind::Symbol(_) | ExprKind::List(_) => {}
+            }
+
             if let ExprKind::Symbol(name) = &head.kind {
                 match name.as_str() {
                     "if" => return walk_if(expr, items, scope, out),

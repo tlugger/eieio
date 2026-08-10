@@ -205,6 +205,72 @@
       "spec": "\u00a710"
     },
     {
+      "name": "static-literal-head",
+      "expr": "(true)",
+      "error": "ANY",
+      "note": "A literal can never be a function (4.2: a function is not a value), so the head is decidable once at deploy rather than per signal forever. ABI 11's own example manifest once shipped (true) as a bool default, which could never evaluate.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-literal-head-number",
+      "expr": "(1 2)",
+      "error": "ANY",
+      "note": "Every literal type, not just the Lisp-shaped (true): the mistake is shaped by the author's previous language, not by the type they wrote.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-literal-head-string",
+      "expr": "(\"a\" 1)",
+      "error": "ANY",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-literal-head-nested",
+      "expr": "(+ 1 (2 3))",
+      "error": "ANY",
+      "note": "Not anchored to the root of the expression.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-sigil-head",
+      "expr": "($temp 1)",
+      "error": "ANY",
+      "signal": {
+        "temp": {
+          "int": 9
+        }
+      },
+      "note": "A sigil yields a signal attribute, which is always a value (2), so it can no more be applied than a literal. The signal is present and carries temp: the rejection is about the head position, not a missing attribute.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-signal-head",
+      "expr": "($ 1)",
+      "error": "ANY",
+      "note": "$ is the whole signal, a map (6). Also not applicable.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-valid-list-head-is-not-decidable",
+      "expr": "((if true abs floor) -1.5)",
+      "expect": {
+        "float": 1.5
+      },
+      "signal_dependent": false,
+      "note": "A list head evaluates to whatever it evaluates to, so it MUST stay accepted -- only literal and sigil heads are decidable. Over-rejecting here would refuse working expressions at deploy.",
+      "spec": "\u00a710"
+    },
+    {
+      "name": "static-valid-symbol-head-resolves-through-scope",
+      "expr": "(let ((f abs)) (f -1))",
+      "expect": {
+        "int": 1
+      },
+      "signal_dependent": false,
+      "note": "A symbol head is resolved by the ordinary symbol rules, not by the head rule.",
+      "spec": "\u00a710"
+    },
+    {
       "name": "static-valid-let-with-several-bindings",
       "expr": "(let ((a 1) (b 2)) (+ a b))",
       "expect": {

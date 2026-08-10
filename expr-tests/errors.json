@@ -72,8 +72,9 @@
     },
     {
       "name": "type-applying-a-non-function",
-      "expr": "(1 2)",
+      "expr": "((if true 1 2) 3)",
       "error": "TYPE",
+      "note": "A list head, so the fault is only findable at evaluation and TYPE is normative. A literal or sigil head is rejected statically instead (10).",
       "spec": "\u00a78"
     },
     {

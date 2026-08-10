@@ -342,7 +342,8 @@ Item 3 obliges more than a symbol-table lookup. Resolving symbols requires knowi
 - an `if` with other than three arguments (§5.1);
 - a binding or parameter that shadows a special form (§5.2, §5.4);
 - a special form appearing anywhere but the head of a list, since §4 would then resolve it as an ordinary symbol and find nothing;
-- an empty list `()`, which has nothing to apply (§4).
+- an empty list `()`, which has nothing to apply (§4);
+- a list whose head is a **literal or a sigil**, neither of which can ever be a function: `(true)`, `(1 2)`, `($temp 1)`. §4.2 settles it — "a function is not a value (§2)" — and a sigil yields a signal attribute, which is always a value. A Lisp-shaped `(true)` is a natural mistake for anyone coming from a language where it is a call, and without this the mistake fails per signal, forever, instead of once at deploy. Only these two head shapes are decidable: a symbol head resolves through scope, and a list head (`((if c abs floor) 1)`) is genuinely dynamic.
 
 Diagnostics SHOULD be collected rather than reported one at a time: an expression editor (DESIGNER §5) shows every mistake at once, and a deploy that surfaces one typo per attempt wastes the operator's time. Which code a host attaches to each rejection is diagnostic rather than normative — hosts MUST agree on *whether* an expression is statically valid, not on how they describe a fault (cf. ABI §6.3.1).
 
