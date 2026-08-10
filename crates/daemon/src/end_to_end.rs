@@ -1041,3 +1041,100 @@ async fn a_wired_instance_still_stops_when_every_sender_is_gone() {
 
     service.join();
 }
+
+// ── the milestone (implementation order item 4's exit criterion) ─────────────
+
+#[tokio::test]
+async fn two_blocks_route_a_signal_evaluate_a_property_on_it_and_stop_clean() {
+    // The exit criterion for `host-core` + the daemon skeleton: "load a block and route a
+    // signal". Everything below it has its own test; what only this one covers is the four
+    // of them in contact — the router carrying a batch between two real WASM instances, the
+    // property protocol evaluating against *that* batch, and ABI §6.1's ledger balancing
+    // across the whole run.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![
+            instance("echo.wat", "source", echo_props()),
+            instance("sink.wat", "sink", BTreeMap::new()),
+        ],
+        &[connect(("source", "out"), ("sink", "in"))],
+    )
+    .await
+    .expect("it starts");
+
+    post(service.instance("source").expect("it is there"), deliver(0)).await;
+
+    // configure, start, and the routed delivery.
+    let seen = until_statuses(service.events("sink").expect("its events"), 3).await;
+
+    // The property is `(+ $n 41)` against the routed signal's `n = 1`. A host that folded it
+    // at configure could not have seen `n` at all, and one that evaluated it against the
+    // wrong signal could not reach 42 — so the value is the proof that E2 ran in-flow, not
+    // merely that `prop` answered something (ABI §7.1, EXPR §6).
+    assert_eq!(
+        emitted(&seen).get(0).and_then(|signal| signal.get("val")),
+        Some(&Value::Int(42)),
+        "the sink evaluated its property against the batch the source routed: {seen:#?}"
+    );
+
+    // A clean stop, and the ledger with it: the sink's `eio_stop` returns non-zero unless
+    // every buffer the host allocated in it was handed back to `eio_free` (ABI §6.1).
+    service.stop().await;
+    let ended = drain(service.events("sink").expect("its events")).await;
+    // Counted, not just `all`-checked. `ended` holds only what arrived after the three
+    // statuses already awaited, so an `all` over it would pass on an empty vec — and an
+    // empty vec is exactly what a sink that never reached `eio_stop` would leave.
+    let statuses: Vec<Status> = statuses(&seen)
+        .into_iter()
+        .chain(statuses(&ended))
+        .collect();
+    assert_eq!(
+        statuses,
+        [Status::Ok; 4],
+        "configure, start, the routed delivery and stop all succeeded, \
+         and the alloc/free ledger balanced: {ended:#?}"
+    );
+    assert!(
+        matches!(ending(&ended), Some(Event::Stopped { .. })),
+        "the instance stopped rather than died: {ended:#?}"
+    );
+
+    service.join();
+}
+
+#[tokio::test]
+async fn the_milestones_alloc_free_ledger_can_actually_fail() {
+    // The companion the assertion above needs: `sink.wat`'s port 1 skips the free, so an
+    // unbalanced ledger really does surface as a non-zero `eio_stop` (ABI §8). Without this,
+    // a sink that had quietly stopped counting would pass the milestone unchanged.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![
+            instance("echo.wat", "source", echo_props()),
+            instance("sink.wat", "sink", BTreeMap::new()),
+        ],
+        &[connect(("source", "out"), ("sink", "leak"))],
+    )
+    .await
+    .expect("it starts");
+
+    post(service.instance("source").expect("it is there"), deliver(0)).await;
+    until_statuses(service.events("sink").expect("its events"), 3).await;
+
+    service.stop().await;
+    let ended = drain(service.events("sink").expect("its events")).await;
+    assert!(
+        statuses(&ended).contains(&Status::Failed(ErrorCode::InvalidArg)),
+        "the leaked buffer surfaced at stop: {ended:#?}"
+    );
+    // Still a stop, not a death: ABI §8's "status codes are life" holds for the callback
+    // that reports the leak exactly as for any other.
+    assert!(
+        matches!(ending(&ended), Some(Event::Stopped { .. })),
+        "a non-zero stop status is not fatal: {ended:#?}"
+    );
+
+    service.join();
+}
