@@ -6,7 +6,7 @@ Guidance for agents working in this repository.
 
 eieio is a distributed stream-processing platform: WASM **blocks** wired into **services** running on **nodes** that form a **System**, targeting everything from servers down to MCUs. `README.md` is the human orientation; this file is how to build here.
 
-**Current state: design stage. There is no code.** The repository is `docs/` plus this file. The first commit of Rust is still ahead (see [Implementation order](#implementation-order)).
+**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. `block-sdk` does not exist yet, so every test block is hand-written `.wat` under `crates/daemon/tests/blocks/`.
 
 ## The prime directive: specs are normative
 

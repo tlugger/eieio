@@ -2,7 +2,7 @@
 
 Build a distributed stream-processing system by wiring blocks together on a canvas — then deploy it across a fleet of Raspberry Pis, or bake it into an ESP32's firmware, from the same design.
 
-> **Status: design stage.** The specifications are complete through Draft 1; no code has been written yet. `docs/` is the artifact. See [Roadmap](#roadmap).
+> **Status: early implementation.** The specs are complete through Draft 1 and the bottom four layers are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. No SDK yet, so blocks are still hand-written `.wat`. See [Roadmap](#roadmap).
 
 ---
 
@@ -75,6 +75,13 @@ This is a rebuild of [nio](https://web.archive.org/web/20190716020124/https://do
 ## Repository layout
 
 ```
+crates/
+  signal/     ★ CBOR value, signal and batch types
+  expr/       ★ the expression language: parser, analysis, interpreter, budgets
+  manifest/   ★ manifest schema, parsing, WASM import cross-check
+  host-core/  ★ engine-agnostic ABI host: lifecycle, memory, props, router core
+  daemon/       the std binary: tokio, wasmtime, executor
+expr-tests/     host-agnostic expression conformance vectors
 docs/
   SCOPE.md              scope and decision record — read first
   specs/
@@ -85,7 +92,9 @@ docs/
     DESIGNER-SPEC.md    the visual management surface
 ```
 
-Code lands as a Cargo workspace under `crates/`, with the Designer as a sibling SvelteKit app. Blocks live in their own repositories and publish to an OCI registry independently.
+★ crates are shared with the future leaf runtime and stay `no_std` (`alloc` allowed) — `just check-nostd` is what enforces it. The Designer will be a sibling SvelteKit app. Blocks live in their own repositories and publish to an OCI registry independently.
+
+The specs are normative, not descriptive: code does not get to drift from them, and a spec change lands in the same commit as the code it governs. [`CLAUDE.md`](CLAUDE.md) is the working guide for that.
 
 ## Developing
 
@@ -106,12 +115,12 @@ Warnings are denied in `just lint`, never in a `Cargo.toml`, so a plain `cargo b
 
 ## Roadmap
 
-Specifications are Draft 1. Implementation is bottom-up, starting with the `no_std` crates the leaf runtime also needs:
+Implementation is bottom-up, starting with the `no_std` crates the leaf runtime also needs:
 
-- [ ] `signal` — CBOR value, signal, and batch types
-- [ ] `expr` — the expression language, plus its conformance vector suite
-- [ ] `manifest` — manifest schema and WASM import cross-check
-- [ ] `host-core` + `daemon` skeleton — load a block, route a signal
+- [x] `signal` — CBOR value, signal, and batch types
+- [x] `expr` — the expression language, plus its conformance vector suite
+- [x] `manifest` — manifest schema and WASM import cross-check
+- [x] `host-core` + `daemon` skeleton — load a block, route a signal
 - [ ] `block-sdk` + conformance harness and golden blocks
 - [ ] Service files + management API
 - [ ] Pub/sub transport and cross-node signals
