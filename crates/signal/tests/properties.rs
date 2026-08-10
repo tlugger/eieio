@@ -124,6 +124,25 @@ proptest! {
         prop_assert_eq!(value.encoded_len(), value.to_cbor().len());
     }
 
+    /// `to_cbor` allocates exactly once: it pre-sizes from `encoded_len`, and the
+    /// hint is neither short nor slack.
+    ///
+    /// This is the assertion that catches the hint *drifting* from the encoder.
+    /// The two laws above compare `encoded_len` against `to_cbor().len()`, and
+    /// both stay green if the hint is wrong — the `Vec` silently grows past a
+    /// short one and silently carries a long one. Capacity is where the
+    /// difference shows: sizing exactly leaves `capacity == len`, an over-report
+    /// leaves slack, and an under-report forces a growth reallocation that
+    /// overshoots.
+    #[test]
+    fn to_cbor_allocates_exactly_once(batch in any_batch(), value in any_value(MAX_DEPTH - 1)) {
+        let bytes = batch.to_cbor();
+        prop_assert_eq!(bytes.capacity(), bytes.len(), "batch buffer was not sized exactly");
+
+        let bytes = value.to_cbor();
+        prop_assert_eq!(bytes.capacity(), bytes.len(), "value buffer was not sized exactly");
+    }
+
     /// Mutating a valid encoding never panics — the decoder must stay total on
     /// input that is *nearly* well-formed, which is where off-by-one handling of
     /// lengths and heads tends to go wrong.
@@ -212,6 +231,26 @@ proptest! {
     }
 }
 
+/// Encodes `value` and asserts `encoded_len` predicted the result exactly — in
+/// length, and in the capacity `to_cbor` reserved from it.
+///
+/// See `to_cbor_allocates_exactly_once` for why capacity is the half that catches
+/// the hint drifting from the encoder.
+#[track_caller]
+fn encodes_exactly(value: &Value, what: &str) {
+    let bytes = value.to_cbor();
+    assert_eq!(
+        value.encoded_len(),
+        bytes.len(),
+        "computed and actual length disagree for {what}"
+    );
+    assert_eq!(
+        bytes.capacity(),
+        bytes.len(),
+        "buffer was not sized exactly for {what}"
+    );
+}
+
 /// `encoded_len` at every CBOR head-width boundary.
 ///
 /// The property tests above rarely generate a collection or string long enough to
@@ -240,49 +279,41 @@ fn encoded_len_at_head_width_boundaries() {
     ] {
         let value = Value::Int(n);
         assert_eq!(value.encoded_len(), expected, "wrong length for Int({n})");
-        assert_eq!(
-            value.encoded_len(),
-            value.to_cbor().len(),
-            "computed and actual disagree for Int({n})"
-        );
+        encodes_exactly(&value, &format!("Int({n})"));
+    }
+
+    // The remaining leaf kinds, whose lengths are fixed.
+    for value in [Value::Null, Value::Bool(true), Value::Float(-0.0)] {
+        encodes_exactly(&value, &format!("{value:?}"));
     }
 
     // Strings and byte strings: head width follows the length.
     for len in [0, 1, 23, 24, 255, 256, 65535, 65536] {
-        let text = Value::Str("a".repeat(len));
-        assert_eq!(
-            text.encoded_len(),
-            text.to_cbor().len(),
-            "text of {len} bytes"
+        encodes_exactly(
+            &Value::Str("a".repeat(len)),
+            &format!("text of {len} bytes"),
         );
-        let bytes = Value::Bytes(vec![0u8; len]);
-        assert_eq!(
-            bytes.encoded_len(),
-            bytes.to_cbor().len(),
-            "byte string of {len} bytes"
+        encodes_exactly(
+            &Value::Bytes(vec![0u8; len]),
+            &format!("byte string of {len} bytes"),
         );
     }
 
     // Arrays and maps: head width follows the element count.
     for len in [0, 1, 23, 24, 255, 256, 65535, 65536] {
-        let array = Value::Array(vec![Value::Null; len]);
-        assert_eq!(
-            array.encoded_len(),
-            array.to_cbor().len(),
-            "array of {len} elements"
+        encodes_exactly(
+            &Value::Array(vec![Value::Null; len]),
+            &format!("array of {len} elements"),
         );
-
-        let map = Value::Map((0..len).map(|i| (format!("k{i}"), Value::Null)).collect());
-        assert_eq!(
-            map.encoded_len(),
-            map.to_cbor().len(),
-            "map of {len} entries"
+        encodes_exactly(
+            &Value::Map((0..len).map(|i| (format!("k{i}"), Value::Null)).collect()),
+            &format!("map of {len} entries"),
         );
     }
 
     // Multi-byte UTF-8: the length is in bytes, not scalars.
     let text = Value::Str("°C — ναι".into());
-    assert_eq!(text.encoded_len(), text.to_cbor().len());
+    encodes_exactly(&text, "non-ASCII text");
     assert!(
         text.encoded_len() > "°C — ναι".chars().count(),
         "byte length exceeds scalar count for non-ASCII text"
@@ -293,7 +324,9 @@ fn encoded_len_at_head_width_boundaries() {
 #[test]
 fn encoded_len_of_batch_and_signal() {
     assert_eq!(Batch::new().encoded_len(), 1); // 0x80
-    assert_eq!(Batch::new().to_cbor().len(), 1);
+    let empty = Batch::new().to_cbor();
+    assert_eq!(empty.len(), 1);
+    assert_eq!(empty.capacity(), empty.len(), "empty batch buffer");
 
     assert_eq!(Signal::new().encoded_len(), 1); // 0xa0
 

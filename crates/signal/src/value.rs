@@ -179,8 +179,12 @@ impl Value {
     /// contexts that carry a bare value rather than a batch — notably the
     /// property protocol, where `prop` returns one CBOR-encoded evaluated value
     /// (ABI §7.1).
+    ///
+    /// Sized from [`encoded_len`](Self::encoded_len), so the buffer is allocated
+    /// once rather than grown by reallocation-doubling — see
+    /// [`Batch::to_cbor`](crate::Batch::to_cbor) for why that matters here.
     pub fn to_cbor(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.encoded_len());
         let mut e = Encoder::new(&mut out);
         // Infallible for the same reason as `Batch::to_cbor`; see the comment
         // there for why this is asserted rather than unwrapped.

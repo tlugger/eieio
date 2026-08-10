@@ -88,8 +88,14 @@ impl Batch {
     }
 
     /// Encodes the batch to its canonical CBOR form (ABI §6.3.1).
+    ///
+    /// Sized from [`encoded_len`](Self::encoded_len) up front, so encoding
+    /// allocates exactly once instead of reallocation-doubling its way to the
+    /// final size. The length is exact, not an upper bound, so the buffer is
+    /// neither grown nor slack — which is what the leaf targets need, where
+    /// allocation is scarce and fragmentation is permanent.
     pub fn to_cbor(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.encoded_len());
         let mut e = Encoder::new(&mut out);
         // `Write for Vec<u8>` has `Error = Infallible`, and this crate's
         // `Encode` impls never construct an error of their own — they only
