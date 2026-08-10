@@ -22,6 +22,12 @@
 //! leaves the instance somewhere to `await` the capability completions (§7.3, §7.6) that
 //! post back into its mailbox.
 //!
+//! What that costs, and when to revisit it, is DAEMON §5: a thread each is a Pi-class
+//! cost, where the threads are parked and it is stack reservation and nothing else. The
+//! ceiling is server-class density — thousands of instances on one node — and the two
+//! candidate replacements are recorded there rather than here, because neither has a
+//! workload asking for it yet. Nothing outside this crate is affected by the answer.
+//!
 //! Placement is not really a preference either way: `Store<State>` is `!Send`, because
 //! `eio_host_core`'s host functions are `Rc`-shared boxed closures (ABI §1.2 again). An
 //! instance therefore has to be *built* on the thread it will live on, which is why
