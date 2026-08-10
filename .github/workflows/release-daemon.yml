@@ -1,0 +1,156 @@
+# The daemon's release pipeline (SCOPE §7.2).
+#
+# One of several: §7.2 puts a pipeline per deployable component, each tag-triggered and
+# independent, and the tag names the component. `daemon-v0.1.0` releases the daemon and
+# nothing else; a bare `v0.1.0` would fire every pipeline in the repository and leave each
+# one to filter itself back out, which is not independence.
+#
+# Three things about the shape are deliberate:
+#
+#   - **CI is a prerequisite job, reused rather than restated.** §7.2 requires it, and
+#     `workflow_call` makes it the *same* gate `main` runs. A release job that re-listed
+#     the checks would be a second definition of "passing", free to drift from the first.
+#   - **The build is `just release-daemon`.** Same rule as `ci.yml`: a step a contributor
+#     cannot run locally is a step nobody can debug. The workflow's own contribution is the
+#     matrix, the cross-linker, and the upload.
+#   - **Write permission is scoped to the job that publishes.** Building needs to read the
+#     repository and nothing more.
+name: release-daemon
+
+on:
+  push:
+    tags: ["daemon-v*"]
+  # For a rehearsal against a branch: everything runs except the publish, which has no
+  # tag to attach to and is skipped.
+  workflow_dispatch:
+
+# Not cancel-in-progress: a superseded CI run is a stale answer about code nobody is
+# looking at, but a superseded *release* is a half-published one.
+concurrency:
+  group: release-daemon-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # SCOPE §7.2: "all require CI as a prerequisite job". The tag is not released if the
+  # commit it names does not pass the gate.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    strategy:
+      # One target's failure leaves the others' artifacts worth having — and worth seeing,
+      # because "which architectures broke" is the useful answer.
+      fail-fast: false
+      matrix:
+        include:
+          # Both keys on every entry, spelled out rather than left undefined: a missing
+          # matrix key compares equal to `''` only because GitHub coerces both to zero,
+          # which is a rule to remember instead of a value to read.
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+            linker: ""
+          - target: aarch64-unknown-linux-gnu
+            # Rust can emit the code; it cannot link it without a cross-linker. Named per
+            # target rather than installed unconditionally, so the native build stays a
+            # native build.
+            packages: gcc-aarch64-linux-gnu
+            linker: aarch64-linux-gnu-gcc
+    steps:
+      - name: Check out the repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install just
+        # The same version and the same recorded checksum as `ci.yml`. A checksum a
+        # release could rewrite proves nothing about that release, so it is pinned here
+        # rather than fetched alongside the tarball.
+        env:
+          JUST_VERSION: 1.50.0
+          JUST_SHA256: 27e011cd6328fadd632e59233d2cf5f18460b8a8c4269acd324c1a8669f34db0
+        run: |
+          set -euo pipefail
+          archive="just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/casey/just/releases/download/${JUST_VERSION}/${archive}"
+          echo "${JUST_SHA256}  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" just
+          install -m 0755 just /usr/local/bin/just
+          rm -f just "$archive"
+
+      - name: Install the pinned Rust toolchain
+        # `rust-toolchain.toml` decides the compiler; the release target is added by the
+        # recipe, because it is the recipe's argument and not the toolchain file's business.
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup show
+
+      - name: Install the cross-linker
+        if: matrix.packages != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ${{ matrix.packages }}
+
+      - name: Build and package
+        env:
+          # Cargo's per-target linker knob, spelled the way cargo reads it from the
+          # environment. Empty for a native build, where cargo's default is correct.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+        run: just release-daemon ${{ matrix.target }}
+
+      - name: Upload the artifact
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: eio-daemon-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Only a tag is a release. A `workflow_dispatch` rehearsal builds and stops here,
+    # which is what makes it safe to run against a branch.
+    if: startsWith(github.ref, 'refs/tags/daemon-v')
+    permissions:
+      # The one job that writes, and the only reason this workflow needs to.
+      contents: write
+    steps:
+      - name: Collect every target's artifacts
+        # actions/download-artifact v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
+        # `gh` rather than a third-party release action: it is preinstalled on the runner
+        # and is already the tool this repository uses to talk to GitHub, so publishing
+        # costs no additional dependency to trust and pin.
+        #
+        # Notes are left to the tag. There is no changelog convention here yet, and
+        # inventing one in a workflow would be a decision belonging in SCOPE.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Every target must have produced both files, or the release is partial and
+          # silently so — the archives are downloaded one at a time, and a missing one is
+          # only discovered by whoever needed that architecture.
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+              for suffix in .tar.gz .tar.gz.sha256; do
+                  test -f "dist/eio-daemon-${target}${suffix}" \
+                      || { echo "missing dist/eio-daemon-${target}${suffix}" >&2; exit 1; }
+              done
+          done
+          gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "" \
+              dist/*.tar.gz dist/*.tar.gz.sha256

@@ -24,11 +24,18 @@ on:
   # queued for a day, which left `main` unverified with nothing to do about it but
   # commit something. `gh workflow run ci.yml` is that missing button.
   workflow_dispatch:
+  # Callable, so a release pipeline can make the gate a prerequisite job (SCOPE §7.2)
+  # by *reusing* it rather than restating it. A release that ran a different gate from
+  # the one `main` runs would be exactly the drift this file exists to prevent.
+  workflow_call:
 
 # A newer push to the same ref supersedes an in-flight run; the older answer is about code
 # nobody is looking at any more.
+# `github.workflow` is in the key so a release's reused CI run does not cancel the
+# push-triggered run for the same commit, and vice versa: they are different questions
+# about the same ref and both answers are wanted.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 # Reads the repository. Nothing here publishes, comments or tags.

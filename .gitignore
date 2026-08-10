@@ -3,6 +3,9 @@
 /target/
 **/*.rs.bk
 
+# Release tarballs, from `just release-daemon` (SCOPE §7.2)
+/dist/
+
 # Designer (SvelteKit) artifacts
 designer/node_modules/
 designer/.svelte-kit/

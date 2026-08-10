@@ -129,3 +129,43 @@ run-designer:
     #!/usr/bin/env bash
     echo "run-designer: the Designer does not exist yet — it lands with eieio-m9s.1." >&2
     exit 1
+
+# ── release ──────────────────────────────────────────────────────────────────
+#
+# Release pipelines are per deployable component and tag-triggered (SCOPE §7.2),
+# and the tag names the component: `daemon-v0.1.0`, never a bare `v0.1.0`. A
+# shared tag would fire every pipeline and leave each one to filter itself back
+# out, which is not the independence §7.2 asks for.
+#
+# The build lives here rather than in the workflow for the same reason `ci` does:
+# a release step a contributor cannot run locally is a step nobody can debug when
+# it fails at 2 a.m. `release-daemon` is exactly what CI runs, and it runs the
+# same way on a laptop.
+
+# Where `release-daemon` leaves its tarballs.
+dist := "dist"
+
+# Build and package the daemon for one target. Cross targets need their linker.
+release-daemon target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup target add "{{ target }}"
+    cargo build --release --package eio-daemon --target "{{ target }}"
+
+    # Named for the target, because the artifacts of several targets land in one
+    # GitHub Release and `eio-daemon` twice would be ambiguous.
+    mkdir -p "{{ dist }}"
+    staging="$(mktemp -d)"
+    install -m 0755 "target/{{ target }}/release/eio-daemon" "$staging/eio-daemon"
+    install -m 0644 LICENSE "$staging/LICENSE"
+    tar --create --gzip \
+        --file "{{ dist }}/eio-daemon-{{ target }}.tar.gz" \
+        --directory "$staging" eio-daemon LICENSE
+    rm -rf "$staging"
+
+    # A checksum per artifact rather than one manifest for all of them: each is
+    # downloaded on its own, and a file listing checksums for archives you did not
+    # fetch is a file nobody checks.
+    ( cd "{{ dist }}" && shasum --algorithm 256 "eio-daemon-{{ target }}.tar.gz" \
+        > "eio-daemon-{{ target }}.tar.gz.sha256" )
+    ls -l "{{ dist }}"

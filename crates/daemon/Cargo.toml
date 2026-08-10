@@ -1,7 +1,12 @@
 [package]
 name = "eio-daemon"
 description = "The daemon-class node runtime: tokio, wasmtime, and the host side of the eieio block ABI (DAEMON-SPEC)"
-version.workspace = true
+# Its own, not the workspace's. SCOPE §7.2 makes release pipelines per component
+# and tag-triggered, and `daemon-v0.1.0` releases the daemon alone — so the daemon
+# has to be able to reach 0.2.0 without republishing `eio-sdk` at a version nothing
+# in it changed. The ★ crates and the SDK keep `version.workspace`, because
+# crates.io publishes those together (§7.2).
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
