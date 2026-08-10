@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use eio_host_core::{
-    Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext, Running,
-    Starting, Status, Trap, exports::optional, resolve,
+    Budgets, Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext,
+    Running, Starting, Status, Trap, exports::optional, resolve,
 };
 use eio_manifest::{Abi, Manifest};
 use eio_signal::Batch;
@@ -297,8 +297,13 @@ impl Live {
         // ABI §11.1's `required`/`default` rule, then EXPR §10's static analysis. Both are
         // configuration-time gates, and a failure of either is a rejection the deployer
         // reads.
+        // One `Budgets` for the instance, feeding both the expression compile and `emit`'s
+        // decode bound. That is what makes ABI §6.3.1 rule 9 hold here rather than being a
+        // thing to remember: the two numbers cannot drift because there is one source of
+        // them. `DEFAULT` until `node.toml` states them (DAEMON §3).
+        let budgets = Budgets::DEFAULT;
         let sources = resolve(&prepared.manifest, &prepared.props)?;
-        let properties = PropContext::compile(&sources)
+        let properties = PropContext::compile_with_limits(&sources, budgets.eval())
             .map_err(|error| anyhow::anyhow!("this configuration is invalid: {error}"))?;
 
         let mut guest = runtime
@@ -310,7 +315,7 @@ impl Live {
         // read the version through an unwired `eio:core` would be answering `ERR_UNSUPPORTED`
         // to a guest that had done nothing wrong.
         let descriptor = prepared.descriptor;
-        let core = Core::new(descriptor.limits, descriptor.outputs.len() as u32);
+        let core = Core::new(descriptor.limits, budgets, descriptor.outputs.len() as u32);
         core.register(&mut guest, &properties)
             .map_err(|error| anyhow::anyhow!("wiring eio:core: {error}"))?;
         check_abi_version(&mut guest, &prepared.manifest)?;

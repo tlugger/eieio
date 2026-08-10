@@ -25,7 +25,8 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use eio_host_core::{
-    Arg, Engine, EngineError, ErrorCode, HostCall, Limits, Outbound, PropContext, Ret, Status,
+    Arg, Budgets, Engine, EngineError, ErrorCode, HostCall, Limits, Outbound, PropContext, Ret,
+    Status,
     exports::{core_fn, namespace},
 };
 use eio_signal::Batch;
@@ -61,6 +62,8 @@ pub struct Detail {
 struct Shared {
     /// The limits this host imposes (ABI §5.2, §9.7). `emit` enforces `max_payload`.
     limits: Limits,
+    /// The expression and decode budgets (ABI §6.3.1 rule 9). `emit` decodes under them.
+    budgets: Budgets,
     /// How many output ports the instance declares, for `emit`'s index check.
     outputs: u32,
     /// The origin `time_mono_ms` counts from.
@@ -81,11 +84,16 @@ pub struct Core {
 }
 
 impl Core {
-    /// The `eio:core` functions for an instance with these limits and this many outputs.
-    pub fn new(limits: Limits, outputs: u32) -> Core {
+    /// The `eio:core` functions for an instance with these limits, budgets and outputs.
+    ///
+    /// `budgets` is the same one the instance's properties were compiled under, which is
+    /// what makes ABI §6.3.1 rule 9 hold across the two: an expression cannot construct a
+    /// value deeper than `emit` will decode.
+    pub fn new(limits: Limits, budgets: Budgets, outputs: u32) -> Core {
         Core {
             shared: Rc::new(RefCell::new(Shared {
                 limits,
+                budgets,
                 outputs,
                 origin: Instant::now(),
                 emissions: Vec::new(),
@@ -206,7 +214,7 @@ impl Core {
                 .map_err(|_| ErrorCode::InvalidArg)?;
             let port = accepted.port();
             accepted
-                .decode(&bytes)
+                .decode(&bytes, shared.budgets)
                 .map(|batch| Emission { port, batch })
         };
         match emit() {
