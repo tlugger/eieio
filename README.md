@@ -120,13 +120,15 @@ Implementation is bottom-up, starting with the `no_std` crates the leaf runtime 
 - [x] `signal` — CBOR value, signal, and batch types
 - [x] `expr` — the expression language, plus its conformance vector suite
 - [x] `manifest` — manifest schema and WASM import cross-check
-- [x] `host-core` + `daemon` skeleton — load a block, route a signal
-- [ ] `block-sdk` + conformance harness and golden blocks
-- [ ] Service files + management API
+- [x] `host-core` + `daemon` skeleton — load a block, route a signal *(milestone met; refinements still open)*
+- [ ] `block-sdk`, `cargo-eio`, conformance harness and golden blocks
+- [ ] Service files, node config, and management API
 - [ ] Pub/sub transport and cross-node signals
 - [ ] CLI and agent (MCP) tooling
 - [ ] Designer UI
 - [ ] Leaf runtime and firmware build pipeline
+
+Alongside those, not in sequence: CI runs `just ci` on every push and pull request already; the release and deploy pipelines land per component as each becomes shippable.
 
 Open questions — delivery guarantees and backpressure, pub/sub transport and broker topology, supervision policy, transport security — are tracked as **OPEN** items in [`docs/SCOPE.md`](docs/SCOPE.md).
 
