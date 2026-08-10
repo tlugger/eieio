@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use eio_host_core::{
-    Configured, Configuring, Descriptor, Limits, Outcome, PropContext, Running, Starting, Status,
-    Trap, exports::optional, resolve,
+    Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext, Running,
+    Starting, Status, Trap, exports::optional, resolve,
 };
 use eio_manifest::{Abi, Manifest};
 use eio_signal::Batch;
@@ -282,11 +282,9 @@ impl Live {
             pending: Vec::new(),
         };
 
-        // ABI §5.1 step 2. `during` opens the property scope: a guest MAY read properties in
-        // configure, with `SIGNAL_NONE` (§5.1), and outside a scope `prop` refuses.
-        let configuring = live
-            .properties
-            .during(None, || Configured::configure(guest, &live.descriptor));
+        // ABI §5.1 step 2. The driver takes the property context here and opens a scope
+        // around this and every later callback itself, so nothing below has to remember to.
+        let configuring = Configured::configure(guest, &live.descriptor, live.properties.clone());
         live.collect("configure");
         let configured = match configuring {
             Configuring::Configured(configured) => configured,
@@ -299,7 +297,7 @@ impl Live {
         tracing::info!("configured");
 
         // ABI §5.1 step 3.
-        let starting = live.properties.during(None, || configured.start());
+        let starting = configured.start();
         live.collect("start");
         let running = match starting {
             Starting::Running(running) => running,
@@ -342,87 +340,37 @@ impl Live {
     }
 
     /// Delivers a batch on an input port (ABI §6.1).
+    ///
+    /// The batch goes to the driver decoded and once: the guest is handed the canonical CBOR
+    /// (ABI §6.1) and `prop`'s `signal_idx` indexes the signals of this same call (§7.1), and
+    /// `host-core` derives one from the other so the two cannot be different batches. ABI
+    /// §9.7's limits are its too — the daemon's part is saying what a refusal means to an
+    /// operator (DAEMON §11).
     fn deliver(
         &mut self,
         running: Running<Guest>,
         input_port: u32,
         batch: Batch,
     ) -> Option<Running<Guest>> {
-        // ABI §9.7's two cheap questions first — the port and the signal count answer without
-        // touching the payload, so a batch refused for either never pays to be encoded.
-        if let Err(reason) = self.addressable(input_port, &batch) {
-            return self.refuse(running, input_port, reason);
-        }
-
-        // The batch crosses twice, and the two paths differ on purpose: the guest gets the
-        // canonical CBOR (ABI §6.1), and the property scope gets the decoded batch, because
-        // `prop`'s `signal_idx` indexes *this* call's signals (ABI §7.1). `max_payload` is
-        // asked of these exact bytes rather than of a predicted length, which costs nothing:
-        // the encoding is the one the guest is about to be handed either way.
-        let bytes = batch.to_cbor();
-        let limits = self.descriptor.limits;
-        if bytes.len() as u64 > u64::from(limits.max_payload) {
-            let reason = format!(
-                "the batch encodes to {} bytes, beyond this instance's max_payload of {}",
-                bytes.len(),
-                limits.max_payload
-            );
-            return self.refuse(running, input_port, reason);
-        }
-
-        let signals = Rc::new(batch);
-        let outcome = self.properties.during(Some(Rc::clone(&signals)), || {
-            running.process_signals(input_port, &bytes)
-        });
+        let count = batch.len();
+        let delivering = running.process_signals(input_port, Rc::new(batch));
         self.collect("process_signals");
-        match outcome {
-            Outcome::Live(running, status) => {
+        match delivering {
+            Delivering::Delivered(running, status) => {
                 self.record("process_signals", status);
-                tracing::info!(
-                    port = input_port,
-                    signals = signals.len(),
-                    %status,
-                    "delivered"
-                );
+                tracing::info!(port = input_port, signals = count, %status, "delivered");
                 Some(running)
             }
-            Outcome::Dead(trap) => self.died(trap),
+            Delivering::Refused(running, refusal) => {
+                // The guest was never called, so there is no status to record and nothing
+                // added to its error count (ABI §8) — only something an operator should see.
+                let reason = refusal.to_string();
+                tracing::warn!(port = input_port, "{reason}");
+                self.send(Event::Refused { reason });
+                Some(running)
+            }
+            Delivering::Dead(trap) => self.died(trap),
         }
-    }
-
-    /// Whether this batch has somewhere to go and few enough signals (ABI §5.2, §9.7).
-    ///
-    /// ABI §9.7: the host "never delivers batches beyond" the limits it published in the
-    /// descriptor. A block that read them and sized its buffers accordingly is entitled to
-    /// that, so the check is here rather than left to the guest's allocator to find.
-    fn addressable(&self, input_port: u32, batch: &Batch) -> Result<(), String> {
-        if input_port as usize >= self.descriptor.inputs.len() {
-            return Err(format!(
-                "input port {input_port} is outside the block's {} input port(s): {:?}",
-                self.descriptor.inputs.len(),
-                self.descriptor.inputs
-            ));
-        }
-        let max_batch = self.descriptor.limits.max_batch;
-        if batch.len() as u64 > u64::from(max_batch) {
-            return Err(format!(
-                "the batch has {} signals, beyond this instance's max_batch of {max_batch}",
-                batch.len(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Reports a batch the host declined to deliver, leaving the instance untouched.
-    fn refuse(
-        &self,
-        running: Running<Guest>,
-        input_port: u32,
-        reason: String,
-    ) -> Option<Running<Guest>> {
-        tracing::warn!(port = input_port, "{reason}");
-        self.send(Event::Refused { reason });
-        Some(running)
     }
 
     /// One of the optional callbacks (ABI §4.2), with no payload to check first.
@@ -443,7 +391,7 @@ impl Live {
             self.send(Event::Refused { reason });
             return Some(running);
         }
-        let outcome = self.properties.during(None, || call(running));
+        let outcome = call(running);
         self.collect(name);
         match outcome {
             Outcome::Live(running, status) => {
@@ -456,7 +404,7 @@ impl Live {
 
     /// RUNNING → STOPPED (ABI §5.1 step 5), and the end of the instance either way.
     fn stop(&mut self, running: Running<Guest>) {
-        let outcome = self.properties.during(None, || running.stop());
+        let outcome = running.stop();
         self.collect("stop");
         match outcome {
             Outcome::Live(stopped, status) => {

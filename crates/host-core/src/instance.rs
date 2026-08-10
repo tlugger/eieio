@@ -36,6 +36,22 @@
 //! error surfaced to the deployer" — so [`Configuring::Rejected`] withholds the instance
 //! exactly as death does.
 //!
+//! # The property scope is the driver's, not the caller's
+//!
+//! ABI §7.1 answers `prop` "for the duration of the current callback", against "the batch of
+//! the current `eio_process_signals` call". Both halves of that are the *driver's* to get
+//! right, so the [`PropContext`] is taken once at [`Configured::configure`] and every guest
+//! entry below opens its own scope on it. A caller cannot forget to, cannot open one that
+//! outlives a callback, and — because `process_signals` takes the batch itself rather than
+//! bytes alongside it — cannot hand the guest one batch and `prop` another. The scopes are
+//! the reason `configure`, `on_http` and `process_signals` do their `Inbound::write` inside
+//! a closure: `eio_alloc` is a guest call like any other and runs in the same scope as the
+//! callback it is allocating for.
+//!
+//! [`abi_version`] is deliberately outside all of this. ABI §12 makes it readable before
+//! `eio_configure`, when there is no configuration and so no context a scope could carry;
+//! a guest calling `prop` from it is answered `ERR_INVALID_ARG`, which is the truth.
+//!
 //! # The illegal transitions, as compile errors
 //!
 //! These are the tests that cannot be written as tests: a test asserting that
@@ -55,9 +71,12 @@
 //! Nor stopped twice, nor asked to process anything:
 //!
 //! ```compile_fail,E0599
+//! # extern crate alloc;
+//! use alloc::rc::Rc;
 //! use eio_host_core::{Engine, Stopped};
+//! use eio_signal::Batch;
 //! fn deliver_to_a_stopped_instance<E: Engine>(stopped: Stopped<E>) {
-//!     stopped.process_signals(0, b"\x80");
+//!     stopped.process_signals(0, Rc::new(Batch::new()));
 //! }
 //! ```
 //!
@@ -65,9 +84,12 @@
 //! (ABI §5.1 step 3):
 //!
 //! ```compile_fail,E0599
+//! # extern crate alloc;
+//! use alloc::rc::Rc;
 //! use eio_host_core::{Configured, Engine};
+//! use eio_signal::Batch;
 //! fn deliver_before_start<E: Engine>(configured: Configured<E>) {
-//!     configured.process_signals(0, b"\x80");
+//!     configured.process_signals(0, Rc::new(Batch::new()));
 //! }
 //! ```
 //!
@@ -82,13 +104,18 @@
 //! }
 //! ```
 
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt;
 
-use crate::descriptor::Descriptor;
+use eio_signal::Batch;
+
+use crate::descriptor::{Descriptor, Limits};
 use crate::engine::{Engine, Trap, TrapKind};
 use crate::exports::{optional, required};
 use crate::memory::{DeliveryFailure, Inbound};
+use crate::prop::PropContext;
 use crate::status::{ErrorCode, Status};
 
 /// What a guest call did, for a call that leaves the instance in state `T`.
@@ -157,6 +184,78 @@ pub enum Starting<E> {
     Dead(Trap),
 }
 
+/// What `eio_process_signals` did (ABI §5.1 step 4).
+///
+/// Three arms rather than [`Outcome`]'s two, because ABI §9.7 gives the host its own way to
+/// say no. A batch the host declines is not a block-level error: the guest was never
+/// called, so there is no status it returned and nothing to count against it (§8). Folding
+/// that into `Live(_, Status::Failed(ERR_LIMIT))` would tell a caller the block reported an
+/// error it never saw.
+#[derive(Debug)]
+pub enum Delivering<E> {
+    /// The guest processed the batch and returned this.
+    Delivered(Running<E>, Status),
+    /// The host declined to deliver it (ABI §9.7). The guest was not called.
+    Refused(Running<E>, Refusal),
+    /// The instance died mid-callback.
+    Dead(Trap),
+}
+
+/// Why a batch was not delivered (ABI §9.7).
+///
+/// ABI §9.7: the host "never delivers batches beyond" the limits it published in the
+/// descriptor. A block that read them and sized its buffers accordingly is entitled to
+/// that, so these are checked here rather than left to the guest's allocator to discover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The port index is outside the block's declared inputs (ABI §5.2, §8).
+    UnknownPort {
+        /// The index that was asked for.
+        port: u32,
+        /// How many input ports the block declares.
+        inputs: usize,
+    },
+    /// More signals than `max_batch`.
+    Batch {
+        /// How many signals the batch holds.
+        signals: usize,
+        /// The instance's limit.
+        max_batch: u32,
+    },
+    /// The canonical encoding is longer than `max_payload`.
+    Payload {
+        /// How many bytes the batch encodes to.
+        bytes: usize,
+        /// The instance's limit.
+        max_payload: u32,
+    },
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::UnknownPort { port, inputs } => write!(
+                f,
+                "input port {port} is outside the block's {inputs} input port(s)"
+            ),
+            Refusal::Batch {
+                signals,
+                max_batch: limit,
+            } => write!(
+                f,
+                "the batch has {signals} signals, beyond this instance's max_batch of {limit}"
+            ),
+            Refusal::Payload {
+                bytes,
+                max_payload: limit,
+            } => write!(
+                f,
+                "the batch encodes to {bytes} bytes, beyond this instance's max_payload of {limit}"
+            ),
+        }
+    }
+}
+
 /// The shared innards of an instance in any state.
 ///
 /// Private, and reached only through the state types, so there is no way to hold one of
@@ -164,18 +263,80 @@ pub enum Starting<E> {
 #[derive(Debug)]
 struct Live<E> {
     engine: E,
+    /// The instance's identity, from its descriptor (ABI §5.2).
     instance_id: String,
+    /// How many input ports the block declares (ABI §5.2) — what §9.7's port check is
+    /// against. The names are the caller's business; only the count decides a delivery.
+    inputs: usize,
+    /// The limits this host published to the instance (ABI §5.2, §9.7).
+    limits: Limits,
+    /// This instance's property context (ABI §7.1). Held here, not by the caller, because
+    /// every guest call below opens a scope on it.
+    properties: PropContext,
     /// Non-zero callback returns, counted (ABI §8). Saturating: a block failing four
     /// billion times has made its point.
     errors: u32,
 }
 
 impl<E: Engine> Live<E> {
-    /// Calls `export` with no payload and decodes the status convention.
+    /// Calls `export` with no payload, inside a property scope, and decodes the status
+    /// convention.
     fn call(&mut self, export: &str, args: &[i32]) -> Result<Status, Trap> {
-        let status = Status::decode(self.engine.call(export, args)?);
+        let raw = self.in_scope(None, |engine| engine.call(export, args))?;
+        let status = Status::decode(raw);
         self.count(status);
         Ok(status)
+    }
+
+    /// Runs `call` against the engine inside a property scope carrying `signals`.
+    ///
+    /// The choke point ABI §7.1 needs: `prop` answers only inside a scope, and every guest
+    /// entry in this module goes through here, so "the scope matches the call" is not a
+    /// pairing a caller can get wrong.
+    fn in_scope<T>(&mut self, signals: Option<Rc<Batch>>, call: impl FnOnce(&mut E) -> T) -> T {
+        self.properties.during(signals, || call(&mut self.engine))
+    }
+
+    /// The two checks a batch answers without being encoded (ABI §5.2, §9.7).
+    ///
+    /// Split from [`accept_payload`](Self::accept_payload) because the encoding is the
+    /// expensive part: a batch refused for its port or its signal count never pays to be
+    /// encoded, which is the same ordering ABI §6.2 fixes for `emit`.
+    fn accept(&self, input_port: u32, batch: &Batch) -> Result<(), Refusal> {
+        if input_port as usize >= self.inputs {
+            return Err(Refusal::UnknownPort {
+                port: input_port,
+                inputs: self.inputs,
+            });
+        }
+        if batch.len() > self.limits.max_batch as usize {
+            return Err(Refusal::Batch {
+                signals: batch.len(),
+                max_batch: self.limits.max_batch,
+            });
+        }
+        Ok(())
+    }
+
+    /// The check that needs the encoding (ABI §9.7), asked of the exact bytes the guest is
+    /// about to be handed rather than of a predicted length.
+    fn accept_payload(&self, bytes: &[u8]) -> Result<(), Refusal> {
+        if bytes.len() > self.limits.max_payload as usize {
+            return Err(Refusal::Payload {
+                bytes: bytes.len(),
+                max_payload: self.limits.max_payload,
+            });
+        }
+        Ok(())
+    }
+
+    /// A payload the guest declined: counted, and reported as `ERR_LIMIT` (ABI §9.5).
+    ///
+    /// Counted, unlike a §9.7 refusal, because the guest is the one that said no.
+    fn refused(&mut self) -> Status {
+        let status = Status::Failed(ErrorCode::Limit);
+        self.count(status);
+        status
     }
 
     /// Records a non-zero return (ABI §8: the host logs it, counts it, and continues).
@@ -229,28 +390,41 @@ impl<E: Engine> Configured<E> {
     /// The descriptor is delivered by ABI §6.1's convention — host allocates, host writes,
     /// guest frees — so a guest that keeps a pointer to it after returning has kept a
     /// pointer to memory it owns and freed.
-    pub fn configure(mut engine: E, descriptor: &Descriptor) -> Configuring<E> {
+    ///
+    /// `properties` is this instance's compiled property context (ABI §7.1), taken here
+    /// because `eio_configure` is already a callback that may read properties under
+    /// `SIGNAL_NONE` — and because taking it at the first guest call is what leaves no
+    /// later call able to happen without it.
+    pub fn configure(
+        engine: E,
+        descriptor: &Descriptor,
+        properties: PropContext,
+    ) -> Configuring<E> {
         let bytes = descriptor.to_cbor();
-        let payload = match Inbound::write(&mut engine, &bytes) {
-            Ok(payload) => payload,
+        let mut live = Live {
+            engine,
+            instance_id: descriptor.instance_id.clone(),
+            inputs: descriptor.inputs.len(),
+            limits: descriptor.limits,
+            properties,
+            errors: 0,
+        };
+        let configured = live.in_scope(None, |engine| {
+            let payload = Inbound::write(engine, &bytes)?;
+            payload
+                .call(engine, required::CONFIGURE, &[])
+                .map_err(DeliveryFailure::Dead)
+        });
+        match configured {
+            Ok(Status::Ok) => Configuring::Configured(Configured { inner: live }),
+            // ABI §5.1: a non-zero configure return discards the instance. Dropping `live`
+            // here is that, and it is why this arm cannot hand one back.
+            Ok(Status::Failed(code)) => Configuring::Rejected(code),
             // The guest could not take its own descriptor, so there is nothing configured
             // here and nothing to keep driving — the same shape as a refusal, reported with
             // the code that says why (ABI §9.5).
-            Err(DeliveryFailure::Refused) => return Configuring::Rejected(ErrorCode::Limit),
-            Err(DeliveryFailure::Dead(trap)) => return Configuring::Dead(trap),
-        };
-        match payload.call(&mut engine, required::CONFIGURE, &[]) {
-            Ok(Status::Ok) => Configuring::Configured(Configured {
-                inner: Live {
-                    engine,
-                    instance_id: descriptor.instance_id.clone(),
-                    errors: 0,
-                },
-            }),
-            // ABI §5.1: a non-zero configure return discards the instance. Dropping
-            // `engine` here is that, and it is why this arm cannot hand one back.
-            Ok(Status::Failed(code)) => Configuring::Rejected(code),
-            Err(trap) => Configuring::Dead(trap),
+            Err(DeliveryFailure::Refused) => Configuring::Rejected(ErrorCode::Limit),
+            Err(DeliveryFailure::Dead(trap)) => Configuring::Dead(trap),
         }
     }
 
@@ -278,35 +452,52 @@ impl<E: Engine> Configured<E> {
 }
 
 impl<E: Engine> Running<E> {
-    /// Delivers a batch on an input port (ABI §6.1).
+    /// Delivers a batch on an input port (ABI §6.1, §7.1, §9.7).
     ///
-    /// `batch` is canonical CBOR (ABI §6.3.1) — encode it with `eio_signal`. The sequence
-    /// is §6.1's: the host allocates in the guest, writes, calls, and the *guest* frees.
-    /// This crate never frees a delivered payload, because from the moment the callback
-    /// begins the guest owns it (ABI §9.2), and a host-side free would be a second owner.
+    /// The batch arrives *decoded*, once, and is encoded here. That is not a convenience:
+    /// the guest is handed canonical CBOR (§6.3.1) while `prop`'s `signal_idx` indexes the
+    /// signals of this same call (§7.1), and a caller supplying those two by separate paths
+    /// could supply two different batches. There is one batch, so they cannot disagree.
     ///
-    /// Enforcing `max_payload` is the caller's: the driver has no opinion about which
-    /// limits apply to which port, and ABI §9.7 leaves the numbers to host configuration
-    /// with no floor (SCOPE §3.4). The descriptor already told the guest what they are.
-    pub fn process_signals(mut self, input_port: u32, batch: &[u8]) -> Outcome<Running<E>> {
-        let payload = match Inbound::write(&mut self.inner.engine, batch) {
-            Ok(payload) => payload,
+    /// ABI §9.7's inbound half is enforced here, before the encoding reaches the guest:
+    /// the port must exist and the batch must be within the `max_batch` and `max_payload`
+    /// this instance's descriptor published. A refusal never touches the guest, so it is
+    /// [`Delivering::Refused`] rather than a status — the instance made no error and its
+    /// §8 count does not move. This is the same rule as `emit`'s
+    /// [`Outbound::accept`](crate::Outbound::accept), on the other side of the boundary.
+    ///
+    /// Past those checks the sequence is §6.1's: the host allocates in the guest, writes,
+    /// calls, and the *guest* frees. This crate never frees a delivered payload, because
+    /// from the moment the callback begins the guest owns it (ABI §9.2), and a host-side
+    /// free would be a second owner.
+    pub fn process_signals(mut self, input_port: u32, signals: Rc<Batch>) -> Delivering<E> {
+        if let Err(refusal) = self.inner.accept(input_port, &signals) {
+            return Delivering::Refused(self, refusal);
+        }
+        let bytes = signals.to_cbor();
+        if let Err(refusal) = self.inner.accept_payload(&bytes) {
+            return Delivering::Refused(self, refusal);
+        }
+
+        let delivered = self.inner.in_scope(Some(signals), |engine| {
+            let payload = Inbound::write(engine, &bytes)?;
+            payload
+                .call(engine, required::PROCESS_SIGNALS, &[input_port as i32])
+                .map_err(DeliveryFailure::Dead)
+        });
+        match delivered {
+            Ok(status) => {
+                self.inner.count(status);
+                Delivering::Delivered(self, status)
+            }
             // ABI §9.5: the guest declined the allocation. The batch was not delivered, the
             // instance is untouched, and the caller hears `ERR_LIMIT` — which is what a
             // refused payload is.
-            Err(DeliveryFailure::Refused) => return self.refused(),
-            Err(DeliveryFailure::Dead(trap)) => return Outcome::Dead(trap),
-        };
-        match payload.call(
-            &mut self.inner.engine,
-            required::PROCESS_SIGNALS,
-            &[input_port as i32],
-        ) {
-            Ok(status) => {
-                self.inner.count(status);
-                Outcome::Live(self, status)
+            Err(DeliveryFailure::Refused) => {
+                let status = self.inner.refused();
+                Delivering::Delivered(self, status)
             }
-            Err(trap) => Outcome::Dead(trap),
+            Err(DeliveryFailure::Dead(trap)) => Delivering::Dead(trap),
         }
     }
 
@@ -328,26 +519,30 @@ impl<E: Engine> Running<E> {
     /// An HTTP response arrived: calls `eio_on_http` (ABI §4.2, §7.6).
     ///
     /// The body is delivered by §6.1's convention like any other inbound payload, so the
-    /// guest frees it.
+    /// guest frees it. It is deliberately *not* held to `max_payload`: ABI §9.7 bounds what
+    /// the host will accept from `emit` and the *batches* it delivers, and a response body is
+    /// neither. Adding the check here would be implementing past the spec; if §7.6 wants a
+    /// bound on a response body, that is a change to §7.6.
     pub fn on_http(mut self, req_id: u32, status_code: i32, body: &[u8]) -> Outcome<Running<E>> {
         if !self.inner.engine.has_export(optional::ON_HTTP) {
             return Outcome::Dead(missing_export(optional::ON_HTTP));
         }
-        let payload = match Inbound::write(&mut self.inner.engine, body) {
-            Ok(payload) => payload,
-            Err(DeliveryFailure::Refused) => return self.refused(),
-            Err(DeliveryFailure::Dead(trap)) => return Outcome::Dead(trap),
-        };
-        match payload.call(
-            &mut self.inner.engine,
-            optional::ON_HTTP,
-            &[req_id as i32, status_code],
-        ) {
+        let answered = self.inner.in_scope(None, |engine| {
+            let payload = Inbound::write(engine, body)?;
+            payload
+                .call(engine, optional::ON_HTTP, &[req_id as i32, status_code])
+                .map_err(DeliveryFailure::Dead)
+        });
+        match answered {
             Ok(status) => {
                 self.inner.count(status);
                 Outcome::Live(self, status)
             }
-            Err(trap) => Outcome::Dead(trap),
+            Err(DeliveryFailure::Refused) => {
+                let status = self.inner.refused();
+                Outcome::Live(self, status)
+            }
+            Err(DeliveryFailure::Dead(trap)) => Outcome::Dead(trap),
         }
     }
 
@@ -379,14 +574,6 @@ impl<E: Engine> Running<E> {
     /// How many non-zero callback returns this instance has produced (ABI §8).
     pub fn errors(&self) -> u32 {
         self.inner.errors
-    }
-
-    /// A payload the guest refused: alive, counted, and reported as `ERR_LIMIT`
-    /// (ABI §9.5).
-    fn refused(mut self) -> Outcome<Running<E>> {
-        let status = Status::Failed(ErrorCode::Limit);
-        self.inner.count(status);
-        Outcome::Live(self, status)
     }
 
     /// An optional callback that carries no payload.

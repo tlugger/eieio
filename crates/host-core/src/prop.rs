@@ -397,12 +397,21 @@ impl PropContext {
     /// called into a guest without opening one — is answered `ERR_INVALID_ARG` rather than
     /// served from whatever the last callback left behind.
     ///
-    /// Nested scopes are not a thing to guard against: ABI §1.2 forbids a guest→host call
-    /// from re-entering the guest, and [`Memory`](crate::Memory) has no `call` for it to
-    /// re-enter through.
+    /// The lifecycle driver opens these itself — [`Configured::configure`](crate::Configured::configure)
+    /// takes the context, and every guest call [`Running`](crate::Running) makes runs inside
+    /// a scope — so a host driving a block does not call this at all. It is public for the
+    /// other caller: a harness exercising `prop` as a guest would, with no lifecycle around
+    /// it (ABI §13).
+    ///
+    /// Nesting is a host bug rather than a case to support: ABI §1.2 forbids a guest→host
+    /// call from re-entering the guest, so the only way to reach a second scope is a caller
+    /// opening one around the driver, and the inner guard would close the outer scope on the
+    /// way out. Asserted in debug rather than handled, because there is no sensible handling
+    /// — the caller has already lost track of which callback is running.
     pub fn during<T>(&self, signals: Option<Rc<Batch>>, callback: impl FnOnce() -> T) -> T {
         {
             let mut state = self.inner.state.borrow_mut();
+            debug_assert!(!state.open, "a property scope was opened inside another");
             state.signals = signals;
             state.open = true;
             // Deliberately no `cache.clear()` here. The scope below clears on the way out,

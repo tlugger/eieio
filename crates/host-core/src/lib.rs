@@ -36,11 +36,19 @@
 //! - **A stopped instance is never restarted** (ABI §5.1). [`Stopped`] has no `start`, and
 //!   every call consumes the instance and returns its next state, so the illegal
 //!   transitions of §5.1 cannot be written at all.
+//! - **A guest call carries its property scope** (ABI §7.1). The driver holds the
+//!   [`PropContext`] and opens the scope itself, and `process_signals` takes the batch that
+//!   `prop` will index rather than bytes beside it — so a callback without a scope, or a
+//!   scope disagreeing with the batch the guest was handed, has no way to be written.
 //!
 //! # Example
 //!
 //! ```
-//! use eio_host_core::{Configured, Configuring, Descriptor, Limits, Outcome, Starting};
+//! use eio_host_core::{
+//!     Configured, Configuring, Descriptor, Limits, Outcome, PropContext, PropertySource,
+//!     Starting,
+//! };
+//! use eio_manifest::PropertyType;
 //! # use eio_host_core::{Engine, EngineError, HostFn, Trap};
 //! # use std::collections::BTreeMap;
 //! # /// A guest that accepts everything and allocates from a bump pointer.
@@ -82,8 +90,16 @@
 //!     limits: Limits::new(64 * 1024, 256),
 //! };
 //!
+//! // The property expressions, parsed and analysed before the guest sees anything
+//! // (ABI §7.1). The driver keeps it and opens a scope around every callback.
+//! let properties = PropContext::compile(&[PropertySource::new(
+//!     "predicate", PropertyType::Bool, "(> $temp 20)",
+//! )]).expect("the expression compiles");
+//!
 //! // instantiate → CONFIGURED
-//! let Configuring::Configured(configured) = Configured::configure(engine, &descriptor) else {
+//! let Configuring::Configured(configured) =
+//!     Configured::configure(engine, &descriptor, properties)
+//! else {
 //!     panic!("the guest accepted its configuration")
 //! };
 //!
@@ -118,7 +134,7 @@ pub mod exports;
 pub use descriptor::{Descriptor, Limits};
 pub use engine::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
 pub use instance::{
-    Configured, Configuring, Outcome, Running, Starting, Stopped, abi_version,
+    Configured, Configuring, Delivering, Outcome, Refusal, Running, Starting, Stopped, abi_version,
     check_required_exports,
 };
 pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer, Outbound};
