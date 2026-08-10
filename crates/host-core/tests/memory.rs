@@ -21,7 +21,7 @@ mod mock;
 
 use eio_host_core::{
     ALLOC_ALIGN, Arg, Engine, EngineError, ErrorCode, ExprBudgets, Limits, Memory, OutBuffer,
-    Outbound, Ret, exports,
+    Outbound, Ret, exports, memory_range,
 };
 use mock::MockGuest;
 
@@ -416,4 +416,64 @@ fn a_handler_cannot_outlive_its_call() {
         memory.read(32, 7).expect("in bounds")
     };
     assert_eq!(copied, b"payload");
+}
+
+/// ABI §9.1's arithmetic, in the one place every engine now shares.
+///
+/// Lived in the daemon's engine until eieio-7sj, where only one of the two implementations
+/// was covered by it — and the leaf runtime, which will be the third, was covered by
+/// neither.
+#[test]
+fn a_range_that_would_wrap_is_out_of_bounds() {
+    // The range came from a guest, so it is untrusted input: `u32::MAX + 8` must not
+    // compute to 3 and hand back a range inside memory.
+    assert_eq!(
+        memory_range(65_536, u32::MAX, 8u32),
+        Err(EngineError::OutOfBounds {
+            ptr: u32::MAX,
+            len: 8
+        })
+    );
+    // A length that overflows the *widened* addition too. This is the case that is
+    // observable at any pointer width: on a 64-bit host the `u32::MAX + 8` above cannot
+    // wrap in `usize` either, so it passes whether the arithmetic is checked or not, and
+    // only this one tells the two apart. It is also the case that would panic — a host
+    // crash on untrusted input, which ABI §9.1 rules out.
+    //
+    // The length is chosen so the sum lands exactly on 2^64: unchecked, `end` wraps to 0,
+    // which is *inside* memory, and the caller is handed a backwards range. A length that
+    // merely overflows is not enough — most of those still wrap to something above
+    // `memory_len` and get refused for the right answer by accident.
+    let wraps_to_zero = u64::MAX - u64::from(u32::MAX) + 1;
+    assert_eq!(
+        memory_range(65_536, u32::MAX, wraps_to_zero),
+        Err(EngineError::OutOfBounds {
+            ptr: u32::MAX,
+            len: u32::MAX
+        })
+    );
+}
+
+#[test]
+fn a_range_is_checked_at_both_edges() {
+    assert_eq!(
+        memory_range(16, 8, 8u32),
+        Ok(8..16),
+        "exactly to the end fits"
+    );
+    assert_eq!(
+        memory_range(16, 8, 9u32),
+        Err(EngineError::OutOfBounds { ptr: 8, len: 9 }),
+        "one byte past it does not"
+    );
+    assert_eq!(
+        memory_range(16, 0, 0u32),
+        Ok(0..0),
+        "an empty range is in bounds"
+    );
+    assert_eq!(
+        memory_range(16, 16, 0u32),
+        Ok(16..16),
+        "including at the very end"
+    );
 }

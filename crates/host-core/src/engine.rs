@@ -36,6 +36,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 
 /// A live guest instance, as much of one as this crate needs.
 ///
@@ -261,6 +262,51 @@ impl fmt::Display for TrapKind {
             TrapKind::Engine => "the engine failed",
         })
     }
+}
+
+/// The bounds check every [`Memory`] implementation owes ABI §9.1, in one place.
+///
+/// A `(ptr, len)` from a guest is untrusted input, so a range outside linear memory is
+/// [`EngineError::OutOfBounds`] — never a panic, never a truncated read. Exported rather
+/// than left to each engine because the arithmetic has one subtlety and a third
+/// implementation would be the one to get it wrong.
+///
+/// That subtlety is the width: `len` widens to `u64` before the addition, so a guest
+/// offering `(u32::MAX, 8)` is refused rather than computing `3` and being handed a range
+/// inside memory. `usize` is 32-bit on the leaf targets, which is exactly where doing this
+/// in `usize` would wrap.
+///
+/// Takes `impl Into<u64>` so a caller can pass the `u32` a guest gave it or the `u64` it
+/// derived from a slice length, without either having to cast at the call site and get
+/// *that* wrong instead.
+pub fn memory_range(
+    memory_len: usize,
+    ptr: u32,
+    len: impl Into<u64>,
+) -> Result<Range<usize>, EngineError> {
+    let len = len.into();
+    // Checked, not just widened. Widening alone makes the guest-sized case
+    // (`u32::MAX + 8`) exact, but leaves `+` able to overflow on a `u64` length — and a
+    // panic here would be a host crash on untrusted input, which is the one outcome ABI
+    // §9.1 rules out. It also gives the property a failure mode that is observable at any
+    // pointer width: on a 64-bit host, `ptr as usize + len as usize` cannot wrap for a
+    // `u32` pair, so a test written against that alone passes whether the arithmetic is
+    // right or not.
+    let Some(end) = u64::from(ptr).checked_add(len) else {
+        return Err(EngineError::OutOfBounds {
+            ptr,
+            len: u32::try_from(len).unwrap_or(u32::MAX),
+        });
+    };
+    if end > memory_len as u64 {
+        return Err(EngineError::OutOfBounds {
+            ptr,
+            // Reported as the `u32` the guest passed; a longer length could not have come
+            // from one.
+            len: u32::try_from(len).unwrap_or(u32::MAX),
+        });
+    }
+    Ok(ptr as usize..end as usize)
 }
 
 /// A failure that is the *host's* fault, or the engine's (ABI §9).

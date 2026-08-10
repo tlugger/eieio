@@ -134,7 +134,9 @@ pub mod exports;
 
 pub use budget::ExprBudgets;
 pub use descriptor::{Descriptor, Limits};
-pub use engine::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
+pub use engine::{
+    Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind, memory_range,
+};
 pub use instance::{
     Configured, Configuring, Delivering, Outcome, Refusal, Running, Starting, Stopped, abi_version,
     check_required_exports,

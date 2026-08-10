@@ -20,7 +20,7 @@ use std::vec::Vec;
 
 use eio_host_core::{
     Arg, Engine, EngineError, HostCall, HostFn, PropContext, PropertySource, Ret, Size, Trap,
-    TrapKind, exports,
+    TrapKind, exports, memory_range,
 };
 use eio_manifest::PropertyType;
 use eio_signal::{Batch, Signal, Value};
@@ -346,27 +346,16 @@ impl Engine for MockGuest {
     }
 
     fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError> {
-        let start = ptr as usize;
-        let end = start
-            .checked_add(len as usize)
-            .ok_or(EngineError::OutOfBounds { ptr, len })?;
-        self.memory
-            .get(start..end)
-            .map(<[u8]>::to_vec)
-            .ok_or(EngineError::OutOfBounds { ptr, len })
+        // ABI §9.1's check, from the crate under test rather than open-coded here — a mock
+        // with its own bounds arithmetic is a mock that can disagree with the host it
+        // stands in for (eieio-7sj).
+        let range = memory_range(self.memory.len(), ptr, len)?;
+        Ok(self.memory[range].to_vec())
     }
 
     fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError> {
-        let len = bytes.len() as u32;
-        let start = ptr as usize;
-        let end = start
-            .checked_add(bytes.len())
-            .ok_or(EngineError::OutOfBounds { ptr, len })?;
-        let slot = self
-            .memory
-            .get_mut(start..end)
-            .ok_or(EngineError::OutOfBounds { ptr, len })?;
-        slot.copy_from_slice(bytes);
+        let range = memory_range(self.memory.len(), ptr, bytes.len() as u64)?;
+        self.memory[range].copy_from_slice(bytes);
         Ok(())
     }
 
@@ -391,27 +380,16 @@ pub struct MockMemory<'a> {
 
 impl eio_host_core::Memory for MockMemory<'_> {
     fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError> {
-        let start = ptr as usize;
-        let end = start
-            .checked_add(len as usize)
-            .ok_or(EngineError::OutOfBounds { ptr, len })?;
-        self.memory
-            .get(start..end)
-            .map(<[u8]>::to_vec)
-            .ok_or(EngineError::OutOfBounds { ptr, len })
+        // ABI §9.1's check, from the crate under test rather than open-coded here — a mock
+        // with its own bounds arithmetic is a mock that can disagree with the host it
+        // stands in for (eieio-7sj).
+        let range = memory_range(self.memory.len(), ptr, len)?;
+        Ok(self.memory[range].to_vec())
     }
 
     fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError> {
-        let len = bytes.len() as u32;
-        let start = ptr as usize;
-        let end = start
-            .checked_add(bytes.len())
-            .ok_or(EngineError::OutOfBounds { ptr, len })?;
-        let slot = self
-            .memory
-            .get_mut(start..end)
-            .ok_or(EngineError::OutOfBounds { ptr, len })?;
-        slot.copy_from_slice(bytes);
+        let range = memory_range(self.memory.len(), ptr, bytes.len() as u64)?;
+        self.memory[range].copy_from_slice(bytes);
         Ok(())
     }
 }

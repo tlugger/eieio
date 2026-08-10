@@ -60,7 +60,9 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use eio_host_core::exports::{core_fn, namespace};
-use eio_host_core::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
+use eio_host_core::{
+    Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind, memory_range,
+};
 use eio_manifest::MEMORY_EXPORT;
 use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFeatures};
 
@@ -420,12 +422,12 @@ impl Engine for Guest {
 
     fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError> {
         let data = self.memory.data(&self.store);
-        range(data.len(), ptr, len).map(|r| data[r].to_vec())
+        memory_range(data.len(), ptr, len).map(|r| data[r].to_vec())
     }
 
     fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError> {
         let data = self.memory.data_mut(&mut self.store);
-        let range = range(data.len(), ptr, bytes.len() as u64)?;
+        let range = memory_range(data.len(), ptr, bytes.len() as u64)?;
         data[range].copy_from_slice(bytes);
         Ok(())
     }
@@ -606,37 +608,14 @@ struct View<'a>(&'a mut [u8]);
 
 impl Memory for View<'_> {
     fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError> {
-        range(self.0.len(), ptr, len).map(|r| self.0[r].to_vec())
+        memory_range(self.0.len(), ptr, len).map(|r| self.0[r].to_vec())
     }
 
     fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError> {
-        let range = range(self.0.len(), ptr, bytes.len() as u64)?;
+        let range = memory_range(self.0.len(), ptr, bytes.len() as u64)?;
         self.0[range].copy_from_slice(bytes);
         Ok(())
     }
-}
-
-/// The byte range `(ptr, len)` denotes, if it lies inside a memory of `size` bytes.
-///
-/// `len` is a `u64` so that the addition cannot wrap: a guest offering `(u32::MAX, 8)` is
-/// offering a range that ends past the end of any 32-bit memory, and the check has to say
-/// so rather than computing `3` (ABI §9.1).
-fn range(
-    size: usize,
-    ptr: u32,
-    len: impl Into<u64>,
-) -> Result<std::ops::Range<usize>, EngineError> {
-    let len = len.into();
-    let end = u64::from(ptr) + len;
-    if end > size as u64 {
-        return Err(EngineError::OutOfBounds {
-            ptr,
-            // Reported as the `u32` the guest passed; a longer length could not have come
-            // from one.
-            len: u32::try_from(len).unwrap_or(u32::MAX),
-        });
-    }
-    Ok(ptr as usize..end as usize)
 }
 
 /// Classifies an engine failure as one of ABI §5.1's deaths.
@@ -807,25 +786,6 @@ mod tests {
         assert!(
             wasmtime::Engine::new(&config).is_err(),
             "wasmparser's MVP set includes GC_TYPES, which this build refuses"
-        );
-    }
-
-    #[test]
-    fn a_range_that_would_wrap_is_out_of_bounds() {
-        // ABI §9.1: the range came from a guest, so it is untrusted input. `u32::MAX + 8`
-        // must not compute to 3.
-        assert_eq!(
-            range(65_536, u32::MAX, 8u32),
-            Err(EngineError::OutOfBounds {
-                ptr: u32::MAX,
-                len: 8
-            })
-        );
-        assert_eq!(range(16, 8, 8u32), Ok(8..16), "exactly to the end fits");
-        assert_eq!(
-            range(16, 8, 9u32),
-            Err(EngineError::OutOfBounds { ptr: 8, len: 9 }),
-            "one byte past it does not"
         );
     }
 }
