@@ -30,7 +30,7 @@ use eio_host_core::{Connection, Descriptor, Endpoint, Overflow, PORT_ERR, Routes
 use eio_signal::Batch;
 
 use crate::executor::{Events, Executor, Inbox, Instance, Mailbox, Undelivered, Work};
-use crate::instance::{InstanceSpec, Loaded};
+use crate::instance::{InstanceSpec, Loaded, Prepared};
 
 /// A batch the host routed but did not deliver (DAEMON §6, ABI §6.4).
 ///
@@ -86,6 +86,53 @@ struct Held {
     work: Work,
 }
 
+/// Every instance's *current* mailbox, shared by everything in a service (DAEMON §5, §8).
+///
+/// One slot per instance index — the same numbering the connection table uses — and the
+/// indirection that makes restart possible. An outlet reads its destination's slot at
+/// delivery time rather than holding a sender resolved when the service was built, so
+/// replacing an instance replaces the mailbox every peer will use next, with no outlet
+/// rebuilt and none of them consulted. Without it, a restarted instance would be routed to
+/// by nobody: the peers' senders would all name the mailbox the dead thread took with it.
+///
+/// The lock is a plain `RwLock` because the shape of the access decides it: reads happen on
+/// every delivery and are uncontended, writes happen when a supervisor restarts something.
+#[derive(Debug)]
+pub struct Mailboxes {
+    slots: Vec<std::sync::RwLock<Mailbox>>,
+}
+
+impl Mailboxes {
+    /// The registry for a service whose instances hold these mailboxes.
+    pub fn new(mailboxes: Vec<Mailbox>) -> Mailboxes {
+        Mailboxes {
+            slots: mailboxes.into_iter().map(std::sync::RwLock::new).collect(),
+        }
+    }
+
+    /// The mailbox instance `index` is reachable through *now*.
+    ///
+    /// A clone rather than a guard, so the lock is not held across the `await` a waiting
+    /// send performs — a backpressured emitter must not be able to block a restart.
+    pub fn get(&self, index: u32) -> Mailbox {
+        self.slots[index as usize]
+            .read()
+            .expect("a mailbox slot is never poisoned: nothing panics while holding it")
+            .clone()
+    }
+
+    /// Points instance `index` at a new mailbox (DAEMON §8).
+    ///
+    /// Installed *before* the replacement instance is spawned, so work addressed to it
+    /// queues rather than finding a closed channel — the same reason a service's mailboxes
+    /// all exist before any of its instances do (DAEMON §6).
+    pub fn replace(&self, index: u32, mailbox: Mailbox) {
+        *self.slots[index as usize]
+            .write()
+            .expect("a mailbox slot is never poisoned: nothing panics while holding it") = mailbox;
+    }
+}
+
 /// Where one instance's emissions go (DAEMON §6).
 ///
 /// Lives on the instance's thread, so it is reached only by the loop that drains that
@@ -97,9 +144,8 @@ pub struct Outlet {
     index: u32,
     /// The whole service's connection table; every instance holds the same one.
     routes: Arc<Routes>,
-    /// The mailbox of every instance this one can reach, indexed as the table indexes
-    /// instances. `None` for the instances it cannot.
-    mailboxes: Vec<Option<Mailbox>>,
+    /// Where every instance in the service is reachable *now* (DAEMON §5, §8).
+    mailboxes: Arc<Mailboxes>,
     /// What the drop-oldest connections are holding, keyed by [`Target::connection`].
     ///
     /// Only the connections actually holding something are in it — usually none — so the
@@ -111,26 +157,23 @@ pub struct Outlet {
 impl Outlet {
     /// The outlet for instance `index` of the service `routes` describes.
     ///
-    /// Keeps a sender only for the instances this one actually emits into. Holding all of
-    /// them would make every instance reachable from every other for as long as any of them
-    /// lived, and DAEMON §5's "a mailbox no sender can reach again is a stop" would stop
-    /// being true of a serviced instance — an instance nothing feeds any more would idle
-    /// instead of running its `eio_stop`.
+    /// Holds the service's mailbox registry rather than senders resolved here and now. That
+    /// is what makes DAEMON §8's restart possible at all: an instance that comes back has a
+    /// *new* mailbox, and outlets that had baked in the old one would keep routing to a
+    /// channel the dead thread took with it — supervision would restart the block and
+    /// silently sever it from the graph.
     ///
-    /// The senders are resolved once, here, which is the coupling supervision will have to
-    /// break: restarting one instance (DAEMON §8) gives it a *new* mailbox, and every peer
-    /// outlet would still hold a sender to the old one. Whatever indirection that needs
-    /// belongs to §8, not here — but it lands in this constructor.
-    pub fn new(index: u32, routes: Arc<Routes>, mailboxes: &[Mailbox]) -> Outlet {
-        let mut reachable: Vec<Option<Mailbox>> = vec![None; mailboxes.len()];
-        for target in routes.outgoing(index) {
-            reachable[target.to.instance as usize] =
-                Some(mailboxes[target.to.instance as usize].clone());
-        }
+    /// The consequence, stated in DAEMON §5: a serviced instance is reachable from the
+    /// registry whether or not anything routes into it, so it ends on an explicit
+    /// [`Work::Stop`] rather than on its last sender going away. That was already true — the
+    /// service holds a mailbox per instance regardless, which is why [`Service::stop`]
+    /// exists — and it is why the unwired path below has a registry of its own rather than
+    /// an empty one.
+    pub fn new(index: u32, routes: Arc<Routes>, mailboxes: Arc<Mailboxes>) -> Outlet {
         Outlet {
             index,
             routes,
-            mailboxes: reachable,
+            mailboxes,
             held: Vec::new(),
         }
     }
@@ -140,17 +183,19 @@ impl Outlet {
     /// Routes nothing, which is not the same as ignoring everything: an emission on
     /// `PORT_ERR` is still unrouted, and ABI §6.4 wants that logged and counted.
     pub fn unwired() -> Outlet {
-        Outlet::new(0, Arc::new(Routes::default()), &[])
+        Outlet::new(
+            0,
+            Arc::new(Routes::default()),
+            Arc::new(Mailboxes::new(Vec::new())),
+        )
     }
 
-    /// The mailbox of a target this outlet routes to.
+    /// The mailbox a target is reachable through now.
     ///
-    /// Always present: [`Outlet::new`] populated one for every target in `routes.outgoing`,
-    /// and a [`Target`] can only have come from there.
-    fn mailbox(&self, target: Target) -> &Mailbox {
-        self.mailboxes[target.to.instance as usize]
-            .as_ref()
-            .expect("an outlet holds a mailbox for every target it routes to")
+    /// Read per delivery, not cached: the whole point of the registry is that the answer can
+    /// change between one batch and the next.
+    fn mailbox(&self, target: Target) -> Mailbox {
+        self.mailboxes.get(target.to.instance)
     }
 
     /// Routes one emission to every receiver (ABI §6.2, DAEMON §6).
@@ -275,8 +320,25 @@ impl Outlet {
 )]
 #[derive(Debug)]
 pub struct Service {
-    instances: Vec<Instance>,
-    events: Vec<Events>,
+    /// One slot per instance index, empty while an instance is between lives.
+    ///
+    /// Indexed rather than pushed-and-popped because the index *is* the identity: the
+    /// connection table, the mailbox registry and every outlet all number instances the same
+    /// way (DAEMON §6), so a slot that shifted would rewire the service. `None` is what a
+    /// restart that could not bring the instance back leaves behind — a service one instance
+    /// down, not a service renumbered.
+    instances: Vec<Option<Instance>>,
+    events: Vec<Option<Events>>,
+    /// What each instance was built from, kept so a supervisor can build the next life of
+    /// one without recompiling or holding its bytes (DAEMON §8).
+    ///
+    /// Never empty and never reordered: it is what says how many instances the service has
+    /// and what each of them is, whether or not one is running right now.
+    prepared: Vec<Prepared>,
+    /// The connection table, shared with every outlet.
+    routes: Arc<Routes>,
+    /// Where each instance is reachable now — the thing a restart swaps (DAEMON §5, §8).
+    mailboxes: Arc<Mailboxes>,
 }
 
 #[cfg_attr(
@@ -310,22 +372,32 @@ impl Service {
             .map_err(|error| anyhow::anyhow!("this service is not wireable: {error}"))?;
         let routes = Arc::new(routes);
 
+        // Compiled before anything is spawned, for the same reason validation is: a block
+        // that will not compile fails without a thread, and the module a restart will
+        // re-instantiate from is what the service keeps (DAEMON §8).
+        let mut prepared = Vec::with_capacity(loaded.len());
+        for loaded in loaded {
+            prepared.push(executor.prepare(loaded).await?);
+        }
+
         let (mailboxes, inboxes): (Vec<Mailbox>, Vec<Inbox>) =
-            loaded.iter().map(|_| executor.mailbox()).unzip();
+            prepared.iter().map(|_| executor.mailbox()).unzip();
 
         let mut service = Service {
-            instances: Vec::with_capacity(loaded.len()),
-            events: Vec::with_capacity(loaded.len()),
+            instances: Vec::with_capacity(prepared.len()),
+            events: Vec::with_capacity(prepared.len()),
+            prepared: prepared.clone(),
+            routes: Arc::clone(&routes),
+            mailboxes: Arc::new(Mailboxes::new(mailboxes)),
         };
-        for (index, (loaded, inbox)) in loaded.into_iter().zip(inboxes).enumerate() {
-            let outlet = Outlet::new(index as u32, Arc::clone(&routes), &mailboxes);
-            let spawned = executor
-                .spawn_wired(loaded, mailboxes[index].clone(), inbox, outlet)
-                .await;
+        for (index, (prepared, inbox)) in prepared.into_iter().zip(inboxes).enumerate() {
+            let outlet = service.outlet_for(index as u32);
+            let mailbox = service.mailboxes.get(index as u32);
+            let spawned = executor.spawn_wired(prepared, mailbox, inbox, outlet).await;
             match spawned {
                 Ok((instance, events)) => {
-                    service.instances.push(instance);
-                    service.events.push(events);
+                    service.instances.push(Some(instance));
+                    service.events.push(Some(events));
                 }
                 // Whatever already started is stopped before the error is reported: a service
                 // that failed to come up must not leave half of itself running.
@@ -339,15 +411,82 @@ impl Service {
         Ok(service)
     }
 
-    /// The instance with this id.
+    /// Restarts one instance in place (ABI §5.1, DAEMON §8).
+    ///
+    /// The mechanism, and only the mechanism: *when* to restart, how many times, and with
+    /// what backoff is policy, and policy is OPEN (SCOPE §3.13).
+    ///
+    /// "Restart = new instance" (ABI §5.1): the old one is stopped and joined, and the new
+    /// one gets a fresh `eio_configure` on a fresh store, so a guest assuming linear-memory
+    /// continuity across lives is assuming something no host offers. Durable state crosses
+    /// only through `eio:state` (ABI §7.2).
+    ///
+    /// The order is what keeps the graph intact. The new mailbox is installed in the
+    /// registry *before* the replacement is spawned, so a peer emitting during the gap
+    /// queues its batch instead of finding a closed channel — the same reason a service's
+    /// mailboxes all exist before any of its instances do. Because every outlet reads the
+    /// registry per delivery, no peer is rebuilt and none is even consulted.
+    ///
+    /// Work the old instance had queued and not yet taken is gone with it. That is what a
+    /// restart is: the replacement did not run those callbacks and cannot be told it did.
+    pub async fn restart(&mut self, executor: &Executor, index: usize) -> anyhow::Result<()> {
+        let prepared = self
+            .prepared
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("this service has no instance {index}"))?
+            .clone();
+
+        // ABI §5.1 step 5 first, and joined, so the old life is over before the new one
+        // begins — two instances of one block answering the same connections would be a
+        // second caller, which ABI §1.2 does not admit. The slot is emptied rather than
+        // removed: if the replacement will not start, the service is one instance down and
+        // every other instance still has the index the connection table gave it.
+        if let Some(old) = self.instances[index].take() {
+            let _ = old.mailbox().send(Work::Stop).await;
+            old.join();
+        }
+        self.events[index] = None;
+
+        let (mailbox, inbox) = executor.mailbox();
+        self.mailboxes.replace(index as u32, mailbox.clone());
+
+        let outlet = self.outlet_for(index as u32);
+        let (instance, events) = executor
+            .spawn_wired(prepared, mailbox, inbox, outlet)
+            .await?;
+        self.instances[index] = Some(instance);
+        self.events[index] = Some(events);
+        Ok(())
+    }
+
+    /// Where instance `index`'s emissions go — the same wiring at spawn and at restart.
+    ///
+    /// One construction site, because the two arguments that matter are the service's and
+    /// not the instance's: the table every instance shares, and the registry that says where
+    /// each of them is reachable *now* (DAEMON §6, §8).
+    fn outlet_for(&self, index: u32) -> Outlet {
+        Outlet::new(index, Arc::clone(&self.routes), Arc::clone(&self.mailboxes))
+    }
+
+    /// Which index the service gave this instance id, running or not.
+    ///
+    /// Answered from `prepared` rather than from the live instances, so an id stays
+    /// resolvable while its instance is between lives (DAEMON §8).
+    fn index_of(&self, id: &str) -> Option<usize> {
+        self.prepared
+            .iter()
+            .position(|prepared| prepared.descriptor().instance_id == id)
+    }
+
+    /// The instance with this id, if it is running.
     pub fn instance(&self, id: &str) -> Option<&Instance> {
-        self.instances.iter().find(|instance| instance.id() == id)
+        self.instances[self.index_of(id)?].as_ref()
     }
 
     /// The event stream of the instance with this id (DAEMON §5).
     pub fn events(&mut self, id: &str) -> Option<&mut Events> {
-        let index = self.instances.iter().position(|i| i.id() == id)?;
-        self.events.get_mut(index)
+        let index = self.index_of(id)?;
+        self.events[index].as_mut()
     }
 
     /// Asks every instance to stop (ABI §5.1 step 5).
@@ -356,7 +495,7 @@ impl Service {
     /// mailbox in it reachable: the instances hold each other's senders, so "every sender
     /// gone" (DAEMON §5) never becomes true on its own.
     pub async fn stop(&self) {
-        for instance in &self.instances {
+        for instance in self.instances.iter().flatten() {
             // A gone instance is already stopped, which is what was asked for.
             let _ = instance.mailbox().send(Work::Stop).await;
         }
@@ -364,7 +503,7 @@ impl Service {
 
     /// Waits for every instance's thread to finish.
     pub fn join(self) {
-        for instance in self.instances {
+        for instance in self.instances.into_iter().flatten() {
             instance.join();
         }
     }
@@ -433,7 +572,10 @@ mod tests {
             Arc::new(Routes::resolve(&descriptors, &wire(overflow)).expect("the table resolves"));
         let (a, _) = mailbox(capacity);
         let (b, b_rx) = mailbox(capacity);
-        (Outlet::new(0, routes, &[a, b]), b_rx)
+        (
+            Outlet::new(0, routes, Arc::new(Mailboxes::new(vec![a, b]))),
+            b_rx,
+        )
     }
 
     #[tokio::test]
@@ -534,7 +676,7 @@ mod tests {
         )];
         let routes = Arc::new(Routes::resolve(&descriptors, &connections).expect("it resolves"));
         let (a, mut a_rx) = mailbox(1);
-        let mut outlet = Outlet::new(0, routes, &[a]);
+        let mut outlet = Outlet::new(0, routes, Arc::new(Mailboxes::new(vec![a])));
 
         let mut discards = Vec::new();
         outlet.route(0, batch(1), &mut discards).await;
@@ -581,6 +723,40 @@ mod tests {
             1,
             "an instance with no service still counts it"
         );
+    }
+
+    #[tokio::test]
+    async fn an_outlet_follows_a_replaced_mailbox() {
+        // The indirection itself, without a block in sight (DAEMON §5, §8). The outlet is
+        // built against the registry, the destination's slot is then replaced, and the next
+        // delivery goes to the new receiver — no outlet rebuilt and none consulted, which is
+        // what lets supervision restart one instance without severing it from the graph.
+        let descriptors = [descriptor("a"), descriptor("b")];
+        let routes = Arc::new(
+            Routes::resolve(&descriptors, &wire(Overflow::Backpressure)).expect("it resolves"),
+        );
+        let (a, _) = mailbox(4);
+        let (b, mut old) = mailbox(4);
+        let mailboxes = Arc::new(Mailboxes::new(vec![a, b]));
+        let mut outlet = Outlet::new(0, routes, Arc::clone(&mailboxes));
+
+        let mut discards = Vec::new();
+        outlet.route(0, batch(1), &mut discards).await;
+        assert_eq!(delivered(old.recv().await.expect("the first")), 1);
+
+        let (replacement, mut new) = mailbox(4);
+        mailboxes.replace(1, replacement);
+
+        outlet.route(0, batch(2), &mut discards).await;
+        assert_eq!(
+            delivered(new.recv().await.expect("the second")),
+            2,
+            "the outlet delivered to the mailbox that replaced the one it was built with"
+        );
+        assert!(discards.is_empty(), "{discards:?}");
+        // And nothing went to the old one, which is the half a stale sender would fail.
+        drop(outlet);
+        assert!(old.try_recv().is_err(), "the old mailbox got nothing more");
     }
 
     #[tokio::test]

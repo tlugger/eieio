@@ -106,7 +106,9 @@ The runtime embodiment of ABI §1 invariants:
 
 **Mailbox bound and what a full one means.** The mailbox is bounded and its depth is host configuration, with no floor. The executor offers a sender both answers to a full one and takes neither on the sender's behalf: a *waiting* send (backpressure, which propagates to whoever is producing too fast) and a *refusing* send that hands the work item back. Which one a connection uses is §6's per-connection overflow policy; the cross-device question is OPEN (SCOPE §3.4) and is not settled by the executor having a bound.
 
-**Every sender gone is a stop.** A mailbox no sender can reach again cannot receive work, so the instance runs `eio_stop` (ABI §5.1 step 5) rather than idling. An instance is therefore never left running with nothing that can reach it. This is why a routing instance holds a sender only for the receivers it actually emits into (§6): were it given the whole service's mailboxes, every instance would keep every other reachable and no serviced instance could ever stop this way. Instances in a cycle do hold each other's, and stop on an explicit `Stop`.
+**Every sender gone is a stop, and a serviced instance stops on an explicit `Stop`.** A mailbox no sender can reach again cannot receive work, so the instance runs `eio_stop` (ABI §5.1 step 5) rather than idling; an instance is never left running with nothing that can reach it. That is the terminator for an instance with no service around it — the single-block path.
+
+Inside a service it is not, and never was: the service holds a mailbox for every instance it owns, so "every sender gone" cannot become true while the service does. Cycles make the same point about the instances themselves. So a service stops its instances by posting `Stop` to each, and §6's delivery registry — which holds every instance's *current* mailbox so that §8 can replace one — does not change that. The rule a host must not break is the one above: an instance that nothing can reach must stop.
 
 **Inbound is bounded; outbound observation is not.** What an instance produces — callback statuses, `error` details, expression failures, emissions, its death or its clean stop — leaves on an unbounded stream, because an observer that could stall a guest by reading slowly would be a worse defect than a queue that grows. Backpressure belongs on the inbound side, where slowing the sender down is a correct response. Routed emissions are not this stream: they travel through the *destination's* bounded mailbox (§6), which is where a slow consumer should be felt.
 
@@ -167,6 +169,8 @@ What resolution does *not* check is whether a block declares a port named `err`.
 
 **`PORT_ERR` is routable and unrouted by default** (ABI §6.4). A service may wire it like any other output; one that does not gets §6.4's "logged and counted" for every error emission, and nothing else — an *ordinary* output nobody wired is an ordinary shape and says nothing.
 
+**Delivery goes through a per-service mailbox registry, not through senders resolved once.** The connection table fixes which `(instance, port)` reaches which; *where* an instance is reachable is a separate question with a changing answer, because §8 restarts an instance in place and a restarted instance has a new mailbox. So the registry holds one slot per instance index and an emitting instance reads its destination's slot at delivery time. Baking the senders into each outlet when the service was built would mean a restarted instance was routed to by nobody — every peer would still name the channel the dead thread took with it, and supervision would restart the block while silently severing it from the graph. The registry is also what makes §5's "every sender gone" not the terminator for a serviced instance.
+
 ### 6.1 Where routing happens
 
 **On the emitting instance's own thread, after its callback returned.** ABI §6.2 fixes the *when*; this fixes the *where*, and the two together are what make backpressure real: an instance waiting for room in a full destination is an instance not draining its own mailbox, so the pressure reaches whoever is feeding it. Routing from a central task draining §5's outbound event stream would look equivalent and quietly delete that, because that stream is unbounded on purpose (§5). An emission is therefore reported on the event stream **and** routed, through two different queues, deliberately.
@@ -196,9 +200,13 @@ The two policies are the two answers §5's mailbox offers a sender, and neither 
 
 Transport is OPEN (SCOPE §3.9). The bridge is the isolation layer that keeps it that way: a small trait (`publish(topic, batch)`, `subscribe(topic) -> stream`, connection lifecycle) implemented per transport candidate (MQTT first — **PROPOSED** rumqttc behind the trait), so the transport decision stays swappable until cross-node work forces it. Topic naming convention, QoS mapping, and retained-message posture are part of that later decision, not this spec.
 
-## 8. Supervision
-
 Policy is OPEN (SCOPE §3.13); the daemon ships the _mechanism_: per-instance restart with exponential backoff and a restart-count circuit breaker escalating to service-errored. Re-instantiation = fresh `eio_configure` (ABI §5.1); durable state via `eio:state` only. **PROPOSED default policy:** restart-instance up to N times per window, then stop service and surface. Callback error returns (ABI §8) are counted/logged, never restart-triggering.
+
+**Restarting one instance leaves the graph intact.** The old instance is stopped and joined before the new one is built, so no two lives of a block ever answer the same connections — ABI §1.2 admits one caller, not one per life. The replacement's mailbox is installed in §6's registry *before* it is spawned, for the same reason a service's mailboxes all exist before any of its instances do: a peer emitting during the gap queues its batch instead of finding a closed channel. Because every outlet reads the registry per delivery, no peer is rebuilt and none is consulted. The descriptor is unchanged, so the connection table resolved against it still describes the instance; a restart that renumbered a port would have rewired the service behind its own back.
+
+**A restart re-instantiates, it does not recompile.** The service keeps the compiled module each instance was built from. That is not the block's bytes: compiled code is already resident for as long as any instance of it is, so a retained handle costs a refcount, where keeping the `.wasm` would mean every instance paying for its whole life for the moment it was compiled. Where the module comes from on a *cold* start is §4's, not this section's.
+
+**Work the old instance had queued is gone with it.** That is what a restart is: the replacement did not run those callbacks and must not be told it did. Anything that had to survive was written through `eio:state` (ABI §7.2), which is the only continuity ABI §5.1 offers across lives.
 
 ## 9. Management API (SCOPE §3.10)
 

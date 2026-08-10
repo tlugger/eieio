@@ -248,17 +248,32 @@ impl Runtime {
         Ok(Runtime { engine, budgets })
     }
 
-    /// Compiles and instantiates `wasm`, with `eio:core` linked but not yet implemented.
+    /// Compiles `wasm` to a module this runtime can instantiate.
+    ///
+    /// Separate from [`instantiate`](Runtime::instantiate) because the two have different
+    /// lifetimes: a module is compiled once and instantiated once per *life* of the block
+    /// instance, and DAEMON §8's restart is a second life. Keeping the [`Module`] is what
+    /// lets a supervisor re-instantiate without either recompiling or holding the block's
+    /// bytes resident — the module's compiled code is already alive for as long as any
+    /// instance of it is, so a retained handle costs a refcount.
+    ///
+    /// No guest code runs here. ABI §5.1 step 1 is *instantiation*, which is where module
+    /// initialisation executes and where a budget therefore has to be armed; compilation is
+    /// the host reading a file.
+    pub fn compile(&self, wasm: &[u8]) -> anyhow::Result<Module> {
+        Ok(Module::new(&self.engine, wasm)?)
+    }
+
+    /// Instantiates `module`, with `eio:core` linked but not yet implemented.
     ///
     /// ABI §5.1 step 1. Validation of the module against the ABI — exports, imports,
     /// signatures, manifest agreement — is `eio_manifest`'s and happens before this; what
-    /// is left here is what only an engine can do: compile it, link its imports, and give
-    /// back something callable.
+    /// is left here is what only an engine can do: link its imports and give back something
+    /// callable.
     ///
     /// The returned guest answers every `eio:core` import with `ERR_UNSUPPORTED` until
     /// [`Engine::register`] supplies a handler.
-    pub fn instantiate(&self, wasm: &[u8]) -> anyhow::Result<Guest> {
-        let module = Module::new(&self.engine, wasm)?;
+    pub fn instantiate(&self, module: &Module) -> anyhow::Result<Guest> {
         let mut linker = Linker::new(&self.engine);
         link_core(&mut linker)?;
 
@@ -273,7 +288,7 @@ impl Runtime {
         // starts with none, and instantiation runs the module's own initialisation (ABI §5.1
         // step 1). Unarmed, every block would die on the way in.
         arm(&mut store, self.budgets)?;
-        let instance = linker.instantiate(&mut store, &module)?;
+        let instance = linker.instantiate(&mut store, module)?;
 
         let memory = instance
             .get_memory(&mut store, MEMORY_EXPORT)
@@ -670,16 +685,16 @@ mod tests {
         assert_eq!(CoreFn::from_name("frobnicate"), None);
     }
 
-    /// Compiles `wat` on a real [`Runtime`], as [`Runtime::instantiate`] would.
+    /// Compiles `wat` on a real [`Runtime`], through the same call production code uses.
     ///
-    /// `Module::new` rather than the whole of `instantiate`, because a post-MVP module is
-    /// refused while it is being *validated* — before there is anything to link, and long
-    /// before the `eio:core` imports or the `memory` export these snippets deliberately lack
-    /// would be looked for. A fixture carrying the full ABI surface would test the same
-    /// rejection while hiding which of several reasons produced it.
-    fn compile(runtime: &Runtime, wat: &str) -> Result<(), wasmtime::Error> {
+    /// [`Runtime::compile`] rather than the whole of [`Runtime::instantiate`], because a
+    /// post-MVP module is refused while it is being *validated* — before there is anything
+    /// to link, and long before the `eio:core` imports or the `memory` export these snippets
+    /// deliberately lack would be looked for. A fixture carrying the full ABI surface would
+    /// test the same rejection while hiding which of several reasons produced it.
+    fn compile(runtime: &Runtime, wat: &str) -> anyhow::Result<()> {
         let wasm = wat::parse_str(wat).expect("the snippet assembles");
-        Module::new(&runtime.engine, &wasm).map(drop)
+        runtime.compile(&wasm).map(drop)
     }
 
     #[test]

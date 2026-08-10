@@ -39,6 +39,7 @@ use crate::core_fns::{Core, Emission};
 use crate::engine::{Guest, Runtime};
 use crate::executor::{Event, Work};
 use crate::router::{Discard, Outlet};
+use wasmtime::Module;
 
 /// Everything needed to build one instance, as a caller supplies it.
 ///
@@ -89,7 +90,7 @@ impl InstanceSpec {
     }
 }
 
-/// A validated block, ready for a thread to compile and configure.
+/// A validated block, ready to be compiled.
 #[derive(Debug)]
 pub struct Loaded {
     manifest: Manifest,
@@ -100,15 +101,56 @@ pub struct Loaded {
 }
 
 impl Loaded {
+    /// What this instance will be told about itself (ABI §5.2).
+    ///
+    /// The router resolves a service's connection table against these, before any instance
+    /// is spawned (DAEMON §6).
+    pub fn descriptor(&self) -> &Descriptor {
+        &self.descriptor
+    }
+
+    /// Compiles the module, and with it stops holding the block's bytes.
+    ///
+    /// Off the instance's thread, deliberately: compilation runs no guest code, so it needs
+    /// no budget and no `Rc`, and a module that will not compile fails before a thread is
+    /// spawned — the same shape as ABI §4's validation above.
+    pub fn compile(self, runtime: &Runtime) -> anyhow::Result<Prepared> {
+        let module = runtime
+            .compile(&self.wasm)
+            .with_context(|| format!("compiling {}", self.manifest.name))?;
+        Ok(Prepared {
+            manifest: self.manifest,
+            descriptor: self.descriptor,
+            module,
+            props: self.props,
+            service: self.service,
+        })
+    }
+}
+
+/// A compiled block, ready for a thread to configure and start — once, or again.
+///
+/// Cloning is cheap and is what DAEMON §8's restart needs: `Module` is a handle to compiled
+/// code that is already alive for as long as any instance of it is, so a supervisor holding
+/// one to re-instantiate from pays a refcount rather than a second copy of the block. That
+/// is the distinction [`Loaded`] draws — an instance that ran for a month must not still be
+/// holding its own `.wasm`, but keeping the thing it was compiled *into* costs nothing.
+#[derive(Debug, Clone)]
+pub struct Prepared {
+    manifest: Manifest,
+    descriptor: Descriptor,
+    module: Module,
+    props: BTreeMap<String, String>,
+    service: String,
+}
+
+impl Prepared {
     /// The service it belongs to.
     pub fn service(&self) -> &str {
         &self.service
     }
 
     /// What this instance will be told about itself (ABI §5.2).
-    ///
-    /// The router resolves a service's connection table against these, before any instance
-    /// is spawned (DAEMON §6).
     pub fn descriptor(&self) -> &Descriptor {
         &self.descriptor
     }
@@ -121,7 +163,7 @@ impl Loaded {
 /// completions of ABI §7.3 and §7.6 will be awaited when they exist.
 pub fn run_instance(
     runtime: Arc<Runtime>,
-    loaded: Loaded,
+    prepared: Prepared,
     work: mpsc::Receiver<Work>,
     events: mpsc::UnboundedSender<Event>,
     started: oneshot::Sender<anyhow::Result<()>>,
@@ -136,7 +178,7 @@ pub fn run_instance(
         // `LocalSet` (DAEMON §5) — the place ABI §7.3's and §7.6's completions will be
         // awaited alongside the mailbox when those capabilities exist.
         let task = tokio::task::spawn_local(instance_task(
-            runtime, loaded, work, events, started, outlet,
+            runtime, prepared, work, events, started, outlet,
         ));
         // The task owns the instance, so nothing here can observe it half-dropped. A panic
         // inside it has already been logged by the panic hook; `Executor::spawn` and
@@ -148,7 +190,7 @@ pub fn run_instance(
 /// The one task the instance's `LocalSet` runs.
 async fn instance_task(
     runtime: Arc<Runtime>,
-    loaded: Loaded,
+    prepared: Prepared,
     mut work: mpsc::Receiver<Work>,
     events: mpsc::UnboundedSender<Event>,
     started: oneshot::Sender<anyhow::Result<()>>,
@@ -159,13 +201,13 @@ async fn instance_task(
     // because a span guard must not live across an `await`.
     let span = tracing::info_span!(
         "instance",
-        service = %loaded.service,
-        instance = %loaded.descriptor.instance_id,
-        block = %loaded.manifest.name,
+        service = %prepared.service,
+        instance = %prepared.descriptor.instance_id,
+        block = %prepared.manifest.name,
     );
 
     let (mut live, mut running) =
-        match span.in_scope(|| Live::start(&runtime, loaded, events, outlet)) {
+        match span.in_scope(|| Live::start(&runtime, prepared, events, outlet)) {
             Ok(started) => started,
             Err(error) => {
                 // Nothing was spawned that needs unwinding: `start` reports only failures that
@@ -241,37 +283,37 @@ struct Live {
 }
 
 impl Live {
-    /// Compiles, configures and starts the block (ABI §5.1 steps 1–3).
+    /// Instantiates, configures and starts the block (ABI §5.1 steps 1–3).
     ///
-    /// Consumes `loaded`, which is how the module's raw bytes stop being resident: wasmtime
-    /// needs them once, to compile, and an instance that ran for a month holding a second
-    /// copy of its own `.wasm` would be paying for its whole life for that one moment.
+    /// Consumes `prepared` rather than borrowing it, because everything in it — the props,
+    /// the descriptor, the manifest — is this instance's for its life. A supervisor keeps
+    /// its own clone to start the *next* life from (DAEMON §8).
     fn start(
         runtime: &Runtime,
-        loaded: Loaded,
+        prepared: Prepared,
         events: mpsc::UnboundedSender<Event>,
         outlet: Outlet,
     ) -> anyhow::Result<(Live, Running<Guest>)> {
         // ABI §11.1's `required`/`default` rule, then EXPR §10's static analysis. Both are
         // configuration-time gates, and a failure of either is a rejection the deployer
         // reads.
-        let sources = resolve(&loaded.manifest, &loaded.props)?;
+        let sources = resolve(&prepared.manifest, &prepared.props)?;
         let properties = PropContext::compile(&sources)
             .map_err(|error| anyhow::anyhow!("this configuration is invalid: {error}"))?;
 
         let mut guest = runtime
-            .instantiate(&loaded.wasm)
-            .with_context(|| format!("instantiating {}", loaded.manifest.name))?;
+            .instantiate(&prepared.module)
+            .with_context(|| format!("instantiating {}", prepared.manifest.name))?;
 
         // Wired before the first guest call of any kind. `eio_abi_version` is a constant in
         // every block anyone would write, but nothing in ABI §4.1 says so, and a host that
         // read the version through an unwired `eio:core` would be answering `ERR_UNSUPPORTED`
         // to a guest that had done nothing wrong.
-        let descriptor = loaded.descriptor;
+        let descriptor = prepared.descriptor;
         let core = Core::new(descriptor.limits, descriptor.outputs.len() as u32);
         core.register(&mut guest, &properties)
             .map_err(|error| anyhow::anyhow!("wiring eio:core: {error}"))?;
-        check_abi_version(&mut guest, &loaded.manifest)?;
+        check_abi_version(&mut guest, &prepared.manifest)?;
 
         let mut live = Live {
             core,

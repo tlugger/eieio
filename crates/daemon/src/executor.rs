@@ -52,7 +52,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::core_fns::{Detail, Emission};
 use crate::engine::{Budgets, Runtime};
-use crate::instance::{InstanceSpec, Loaded, run_instance};
+use crate::instance::{InstanceSpec, Loaded, Prepared, run_instance};
 use crate::router::{Discard, Outlet};
 
 /// One item of work for an instance (DAEMON §5).
@@ -279,10 +279,29 @@ impl Executor {
     pub async fn spawn(&self, spec: InstanceSpec) -> anyhow::Result<(Instance, Events)> {
         // ABI §4 first, off the instance's thread: a block that was never loadable fails
         // before one is spawned, and the deployer gets a return value rather than a log line.
-        let loaded = spec.validate()?;
+        let prepared = self.prepare(spec.validate()?).await?;
         let (mailbox, inbox) = self.mailbox();
-        self.spawn_wired(loaded, mailbox, inbox, Outlet::unwired())
+        self.spawn_wired(prepared, mailbox, inbox, Outlet::unwired())
             .await
+    }
+
+    /// Compiles a validated block, off the runtime's thread.
+    ///
+    /// JIT compilation is synchronous CPU work with no `await` in it, and the daemon's
+    /// runtime is single-threaded (`main`), so compiling inline would stall every other task
+    /// on it for the duration — the management API included (DAEMON §9). It used to happen
+    /// on the instance's own thread and stalled nothing; keeping the compiled module means
+    /// it happens here instead, and `spawn_blocking` is what keeps that a relocation rather
+    /// than a regression.
+    ///
+    /// Serial across a service's blocks, which is what it already was: `spawn_wired` awaits
+    /// each instance's start before the next begins. Compiling them concurrently would be a
+    /// startup-latency change nobody has asked for.
+    pub async fn prepare(&self, loaded: Loaded) -> anyhow::Result<Prepared> {
+        let runtime = Arc::clone(&self.runtime);
+        tokio::task::spawn_blocking(move || loaded.compile(&runtime))
+            .await
+            .map_err(|error| anyhow::anyhow!("the compiler task did not finish: {error}"))?
     }
 
     /// The same, for an instance whose mailbox and outlet the router has already built.
@@ -295,12 +314,12 @@ impl Executor {
     /// already gone.
     pub async fn spawn_wired(
         &self,
-        loaded: Loaded,
+        prepared: Prepared,
         mailbox: Mailbox,
         inbox: Inbox,
         outlet: Outlet,
     ) -> anyhow::Result<(Instance, Events)> {
-        let descriptor = loaded.descriptor().clone();
+        let descriptor = prepared.descriptor().clone();
 
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = oneshot::channel();
@@ -311,10 +330,12 @@ impl Executor {
             // operator asks "which block is eating this machine" (DAEMON §11).
             .name(format!(
                 "eio-{}-{}",
-                loaded.service(),
+                prepared.service(),
                 descriptor.instance_id
             ))
-            .spawn(move || run_instance(runtime, loaded, inbox.rx, event_tx, started_tx, outlet))?;
+            .spawn(move || {
+                run_instance(runtime, prepared, inbox.rx, event_tx, started_tx, outlet)
+            })?;
 
         match started_rx.await {
             Ok(Ok(())) => Ok((
@@ -362,6 +383,19 @@ impl Instance {
     }
 
     /// The instance id from its descriptor (ABI §5.2).
+    ///
+    /// The *running* instance's own answer. A service resolves an id to an index without
+    /// it, so that an id stays resolvable while its instance is between lives (DAEMON §8),
+    /// which leaves this for whoever holds an `Instance` and nothing else — the management
+    /// API (§9, eieio-8yq.4), and the tests below.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the management API (eieio-8yq.4) is the first non-test caller; a \
+                      running instance knowing its own id is not something to rediscover"
+        )
+    )]
     pub fn id(&self) -> &str {
         &self.descriptor.instance_id
     }
