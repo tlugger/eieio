@@ -143,8 +143,10 @@ impl Batch {
     ///
     /// A host MUST NOT pass a bound below its own configured expression
     /// `MAX_DEPTH`, or an expression could build a value this then refuses
-    /// (ABI §6.3.1 rule 9). That coupling is the host's to maintain: this crate
-    /// cannot see the expression budget.
+    /// (ABI §6.3.1 rule 9). This crate cannot see the expression budget, so it
+    /// cannot check that; `eio_host_core::Budgets` is where the two are held
+    /// together and the relationship is enforced at construction. Callers that
+    /// take their bound from there cannot pass a violating one.
     pub fn from_cbor_with_max_depth(bytes: &[u8], max_depth: u32) -> Result<Self, DecodeError> {
         let mut d = Decoder::new(bytes);
         let batch = Self::decode_from(&mut d, max_depth.max(MIN_DEPTH))?;

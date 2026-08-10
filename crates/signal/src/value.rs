@@ -31,7 +31,11 @@ pub type Map = BTreeMap<String, Value>;
 ///
 /// A host MUST NOT decode with a bound below its own configured expression
 /// `MAX_DEPTH`, or an expression could construct a value this boundary then
-/// refuses (ABI §6.3.1 rule 9).
+/// refuses (ABI §6.3.1 rule 9). This crate cannot check that — it has no idea an
+/// expression language exists — so the constraint has a structural home instead:
+/// `eio_host_core::Budgets` holds both budgets and cannot be constructed
+/// violating the relationship. A host that gets its bound from there has it by
+/// construction rather than by remembering this paragraph.
 pub const MAX_DEPTH: u32 = 128;
 
 /// Lowest nesting bound decoding will honour: EXPR §9's `MAX_DEPTH` floor.

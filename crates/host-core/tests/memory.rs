@@ -20,8 +20,8 @@
 mod mock;
 
 use eio_host_core::{
-    ALLOC_ALIGN, Arg, Engine, EngineError, ErrorCode, Limits, Memory, OutBuffer, Outbound, Ret,
-    exports,
+    ALLOC_ALIGN, Arg, Budgets, Engine, EngineError, ErrorCode, Limits, Memory, OutBuffer, Outbound,
+    Ret, exports,
 };
 use mock::MockGuest;
 
@@ -180,13 +180,16 @@ fn an_out_buffer_outside_guest_memory_is_invalid_arg() {
 /// An instance with two output ports and a small payload limit.
 const LIMITS: Limits = Limits::new(64, 8);
 
+/// The reference budgets — what `decode` bounds nesting by (ABI §6.3.1 rule 9).
+const BUDGETS: Budgets = Budgets::DEFAULT;
+
 #[test]
 fn an_emission_on_a_declared_port_is_accepted() {
     let accepted = Outbound::accept(1, 8, 2, LIMITS).expect("port 1 of 2, eight bytes");
     assert_eq!(accepted.port(), 1);
     // CBOR `[{"a": 1}]`.
     let batch = accepted
-        .decode(&[0x81, 0xa1, 0x61, 0x61, 0x01])
+        .decode(&[0x81, 0xa1, 0x61, 0x61, 0x01], BUDGETS)
         .expect("canonical");
     assert_eq!(batch.len(), 1);
 }
@@ -233,19 +236,19 @@ fn the_port_is_checked_before_the_length() {
 fn bytes_that_are_not_a_canonical_batch_are_invalid_arg() {
     // ABI §6.2, §6.3.1. Never a trap: the guest passed a bad parameter and lives (§8).
     let accepted = || Outbound::accept(0, 8, 2, LIMITS).expect("accepted");
-    assert_eq!(accepted().decode(&[]), Err(ErrorCode::InvalidArg));
+    assert_eq!(accepted().decode(&[], BUDGETS), Err(ErrorCode::InvalidArg));
     assert_eq!(
-        accepted().decode(&[0xa1, 0x61, 0x61, 0x01]),
+        accepted().decode(&[0xa1, 0x61, 0x61, 0x01], BUDGETS),
         Err(ErrorCode::InvalidArg),
         "a bare map is a signal, not a batch"
     );
     assert_eq!(
-        accepted().decode(&[0x81, 0xa1, 0x61, 0x61, 0x01, 0x00]),
+        accepted().decode(&[0x81, 0xa1, 0x61, 0x61, 0x01, 0x00], BUDGETS),
         Err(ErrorCode::InvalidArg),
         "trailing bytes are corruption, not a batch carrying extra data (§6.3.1 rule 10)"
     );
     assert!(
-        accepted().decode(&[0x80]).is_ok(),
+        accepted().decode(&[0x80], BUDGETS).is_ok(),
         "an empty batch is legal and MUST stay routable (§6.3)"
     );
 }

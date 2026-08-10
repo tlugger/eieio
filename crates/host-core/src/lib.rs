@@ -121,6 +121,7 @@
 
 extern crate alloc;
 
+mod budget;
 mod descriptor;
 mod engine;
 mod instance;
@@ -131,6 +132,7 @@ mod status;
 
 pub mod exports;
 
+pub use budget::Budgets;
 pub use descriptor::{Descriptor, Limits};
 pub use engine::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
 pub use instance::{
