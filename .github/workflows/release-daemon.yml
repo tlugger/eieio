@@ -53,13 +53,13 @@ jobs:
           # which is a rule to remember instead of a value to read.
           - target: x86_64-unknown-linux-gnu
             packages: ""
-            linker: ""
+            toolchain_prefix: ""
           - target: aarch64-unknown-linux-gnu
             # Rust can emit the code; it cannot link it without a cross-linker. Named per
             # target rather than installed unconditionally, so the native build stays a
             # native build.
-            packages: gcc-aarch64-linux-gnu
-            linker: aarch64-linux-gnu-gcc
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            toolchain_prefix: aarch64-linux-gnu-
     steps:
       - name: Check out the repository
         # actions/checkout v7.0.1
@@ -99,9 +99,20 @@ jobs:
 
       - name: Build and package
         env:
-          # Cargo's per-target linker knob, spelled the way cargo reads it from the
-          # environment. Empty for a native build, where cargo's default is correct.
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
+          # Two different tools need telling, and setting only the first is a trap this
+          # pipeline fell into on its first rehearsal:
+          #
+          #   - **cargo** links Rust objects, and reads its linker per target from here.
+          #   - **the `cc` crate** compiles the C that `wasmtime`'s build script brings, and
+          #     defaults to the *host* compiler. Left unset, it reaches for the host's
+          #     glibc headers and fails on the first `#include` — with a message about
+          #     `bits/libc-header-start.h` that says nothing about cross-compiling.
+          #
+          # All empty for the native build, where every default is already correct.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.toolchain_prefix && format('{0}gcc', matrix.toolchain_prefix) }}
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.toolchain_prefix && format('{0}gcc', matrix.toolchain_prefix) }}
+          CXX_aarch64_unknown_linux_gnu: ${{ matrix.toolchain_prefix && format('{0}g++', matrix.toolchain_prefix) }}
+          AR_aarch64_unknown_linux_gnu: ${{ matrix.toolchain_prefix && format('{0}ar', matrix.toolchain_prefix) }}
         run: just release-daemon ${{ matrix.target }}
 
       - name: Upload the artifact
