@@ -9,6 +9,9 @@
 //! [`corpus_covers_the_language`] audits it for completeness; while the corpus is being
 //! written, a missing area should not drown out a real failure.
 
+#[path = "support/vector_format.rs"]
+mod vector_format;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -16,8 +19,9 @@ use eio_expr::{
     BUILTINS, ErrorCode, EvalLimits, Expr, ExprKind, ParseLimits, SPECIAL_FORMS, eval_with_limits,
     parse_with_limits, render,
 };
-use eio_signal::{Signal, Value};
+use eio_signal::Signal;
 use serde::Deserialize;
+use vector_format::VectorValue;
 
 /// One vector. Field names and semantics are `expr-tests/README.md`'s.
 ///
@@ -74,59 +78,6 @@ struct Budget {
     expr_bytes: Option<u32>,
 }
 
-/// A value in the suite's typed notation: one key, naming the §2 type.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "lowercase")]
-enum VectorValue {
-    Null(NullTag),
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Bytes(String),
-    Arr(Vec<VectorValue>),
-    Map(BTreeMap<String, VectorValue>),
-}
-
-/// The payload of `{"null": null}`. A unit struct would accept `{"null": {}}` too; this
-/// accepts JSON `null` and nothing else, so there is one spelling.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NullTag;
-
-impl VectorValue {
-    /// The `signal` crate value this notation denotes.
-    fn value(&self) -> Value {
-        match self {
-            VectorValue::Null(_) => Value::Null,
-            VectorValue::Bool(b) => Value::Bool(*b),
-            VectorValue::Int(i) => Value::Int(*i),
-            VectorValue::Float(f) => Value::Float(*f),
-            VectorValue::Str(s) => Value::Str(s.clone()),
-            VectorValue::Bytes(hex) => Value::Bytes(unhex(hex)),
-            VectorValue::Arr(items) => Value::Array(items.iter().map(VectorValue::value).collect()),
-            VectorValue::Map(entries) => Value::Map(
-                entries
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.value()))
-                    .collect(),
-            ),
-        }
-    }
-}
-
-/// Decodes the suite's lowercase-hex byte notation.
-fn unhex(hex: &str) -> Vec<u8> {
-    assert!(
-        hex.len().is_multiple_of(2) && hex.bytes().all(|b| b.is_ascii_hexdigit()),
-        "{hex:?} is not lowercase hex with two digits per byte",
-    );
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex digit pair"))
-        .collect()
-}
-
 /// One vector file.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +94,11 @@ fn corpus_dir() -> PathBuf {
 ///
 /// Rejects a malformed file rather than skipping it: a corpus that silently loses a file
 /// is a corpus that silently stops asserting things.
+///
+/// Top-level files only, which is what keeps `expr-tests/properties/` — the host's
+/// property-type suite (ABI §7.1, §11.1), run by `eio_host_core` — out of this one. Those
+/// vectors carry a `type` field this runner would reject, and asserting a *host* rule is
+/// not something the interpreter can do.
 fn corpus() -> Vec<(String, Vector)> {
     let dir = corpus_dir();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -354,8 +310,9 @@ fn corpus_covers_the_language() {
     );
 
     // RESULT_TYPE is the host's property-type check (ABI §7.1, §11), not an interpreter
-    // outcome: no expression can produce it, so no vector here can cover it. Its vectors
-    // belong with the host's property-evaluation protocol. Every other code is required.
+    // outcome: no expression can produce it, so no vector here can cover it. It has its own
+    // vectors, in `expr-tests/properties/`, run by `eio_host_core` where the check lives.
+    // Every other code is required here.
     let missing_codes: Vec<&str> = [
         ErrorCode::Parse,
         ErrorCode::Unbound,

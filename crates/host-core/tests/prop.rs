@@ -20,65 +20,14 @@ mod mock;
 
 use std::rc::Rc;
 
-use eio_host_core::{
-    Arg, Engine, ErrorCode, PropContext, PropertySource, Ret, SIGNAL_NONE, Size, exports,
-};
+use eio_host_core::{ErrorCode, PropContext, PropertySource, SIGNAL_NONE, Size};
 use eio_manifest::PropertyType;
 use eio_signal::{Batch, Signal, Value};
-use mock::MockGuest;
-
-/// Where a test's out-buffer lives in the mock's memory: past the bump allocator's start,
-/// and well clear of anything the driver would allocate.
-const BUF: u32 = 4096;
-
-/// A batch of `temp` readings, one signal per value.
-fn batch(temps: &[i64]) -> Rc<Batch> {
-    let mut batch = Batch::new();
-    for temp in temps {
-        let mut signal = Signal::new();
-        signal.set("temp", Value::Int(*temp));
-        batch.push(signal);
-    }
-    Rc::new(batch)
-}
-
-/// A guest with `prop` registered against `context`, as a host wires it (ABI §7.0).
-fn guest_with(context: &PropContext) -> MockGuest {
-    let mut guest = MockGuest::healthy();
-    guest
-        .register(
-            exports::namespace::CORE,
-            exports::core_fn::PROP,
-            context.host_fn(),
-        )
-        .expect("prop registers");
-    guest
-}
-
-/// Calls `prop(prop_id, signal_idx, BUF, cap)` as a guest would, and decodes ABI §8's size
-/// convention against the `cap` that was offered.
-fn prop(guest: &mut MockGuest, prop_id: u32, signal_idx: u32, cap: u32) -> Size {
-    let raw = guest
-        .call_import(
-            exports::namespace::CORE,
-            exports::core_fn::PROP,
-            &[
-                Arg::I32(prop_id as i32),
-                Arg::I32(signal_idx as i32),
-                Arg::I32(BUF as i32),
-                Arg::I32(cap as i32),
-            ],
-        )
-        .expect("prop is registered");
-    let Ret::I32(raw) = raw else {
-        panic!("prop answers with an i32 (ABI §7.0)")
-    };
-    Size::decode(raw, cap as usize)
-}
+use mock::{MockGuest, PROP_OUT, batch, guest_with, prop};
 
 /// The value `prop` wrote, decoded — the whole round trip a guest performs.
 fn read(guest: &MockGuest, written: usize) -> Value {
-    Value::from_cbor(guest.bytes_at(BUF, written as u32)).expect("prop writes canonical CBOR")
+    Value::from_cbor(guest.bytes_at(PROP_OUT, written as u32)).expect("prop writes canonical CBOR")
 }
 
 /// `prop`'s answer as a plain value, with a buffer large enough that no retry is needed.
@@ -693,7 +642,7 @@ fn a_buffer_one_byte_short_writes_nothing() {
             Size::Required(short) if short == needed
         ));
         assert!(
-            guest.bytes_at(BUF, needed as u32).iter().all(|byte| *byte == 0),
+            guest.bytes_at(PROP_OUT, needed as u32).iter().all(|byte| *byte == 0),
             "a too-small buffer was written to"
         );
         assert!(matches!(prop(&mut guest, 0, SIGNAL_NONE, needed as u32), Size::Written(w) if w == needed));

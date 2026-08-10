@@ -416,6 +416,46 @@ impl eio_host_core::Memory for MockMemory<'_> {
     }
 }
 
+/// Where a property read's out-buffer lives in the mock's memory (ABI §7.1, §9.4).
+///
+/// Past the bump allocator's start, so a `prop` call never writes over a payload the
+/// driver allocated.
+pub const PROP_OUT: u32 = 4096;
+
+/// A guest with `prop` registered against `context`, as a host wires it (ABI §7.0).
+pub fn guest_with(context: &PropContext) -> MockGuest {
+    let mut guest = MockGuest::healthy();
+    guest
+        .register(
+            exports::namespace::CORE,
+            exports::core_fn::PROP,
+            context.host_fn(),
+        )
+        .expect("prop registers");
+    guest
+}
+
+/// Calls `prop(prop_id, signal_idx, PROP_OUT, cap)` as a guest would, and decodes ABI §8's
+/// size convention against the `cap` that was offered.
+pub fn prop(guest: &mut MockGuest, prop_id: u32, signal_idx: u32, cap: u32) -> Size {
+    let raw = guest
+        .call_import(
+            exports::namespace::CORE,
+            exports::core_fn::PROP,
+            &[
+                Arg::I32(prop_id as i32),
+                Arg::I32(signal_idx as i32),
+                Arg::I32(PROP_OUT as i32),
+                Arg::I32(cap as i32),
+            ],
+        )
+        .expect("prop is registered");
+    let Ret::I32(raw) = raw else {
+        panic!("prop answers with an i32 (ABI §7.0)")
+    };
+    Size::decode(raw, cap as usize)
+}
+
 /// A descriptor to configure with, so each test states only what it varies.
 pub fn descriptor() -> eio_host_core::Descriptor {
     eio_host_core::Descriptor {

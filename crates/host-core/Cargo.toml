@@ -31,5 +31,13 @@ eio-manifest.workspace = true
 # WASM engine is involved, which is what keeps this crate's tests runnable on a
 # target that has no engine to offer.
 
+# `expr-tests/properties/` is JSON, and this crate runs it (ABI §7.1, §11.1) —
+# it is the only one that depends on both halves of the rule. Dev-only, and on
+# the workspace's `alloc`-only feature set rather than turning `std` on: a
+# dev-dependency that enabled a feature would enable it for every crate cargo
+# unifies with, which is the one way a test could reach into the `no_std` gate.
+serde.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
