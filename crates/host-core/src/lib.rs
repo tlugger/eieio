@@ -9,6 +9,9 @@
 //! one meet: `eio_expr` parses and evaluates, `eio_signal` supplies the batch and carries
 //! the result, `eio_manifest` says what type that result must be.
 //!
+//! …and the router core (DAEMON §1, §6): the connection table and fan-out, which are about
+//! the service graph rather than about any queue a host delivers into.
+//!
 //! `no_std` (`alloc` permitted) is a hard requirement, because the leaf runtime compiles
 //! this crate onto an MCU (DAEMON §1). Its dependencies are the other three ★ crates, and
 //! there is no engine anywhere in it.
@@ -107,6 +110,7 @@ mod engine;
 mod instance;
 mod memory;
 mod prop;
+mod router;
 mod status;
 
 pub mod exports;
@@ -119,6 +123,10 @@ pub use instance::{
 };
 pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer, Outbound};
 pub use prop::{CompileError, PropContext, PropFailure, PropertySource};
+pub use router::{
+    Connection, Deliveries, End, Endpoint, Overflow, PORT_ERR_NAME, Port, RouteError, Routes,
+    Target,
+};
 pub use status::{ErrorCode, Id, Size, Status};
 
 /// No signal context: property evaluation outside `process_signals` (ABI §3, §7.1).
@@ -130,5 +138,6 @@ pub const SIGNAL_NONE: u32 = 0xFFFF_FFFF;
 /// The reserved error output port (ABI §3, §6.4).
 ///
 /// Every block has it without declaring it, which is why it is a sentinel rather than an
-/// index into the descriptor's `outputs`.
+/// index into the descriptor's `outputs` — and why it needs a name of its own,
+/// [`PORT_ERR_NAME`], for a service file to route it by.
 pub const PORT_ERR: u32 = 0xFFFF_FFFE;

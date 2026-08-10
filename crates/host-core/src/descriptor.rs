@@ -36,6 +36,21 @@ pub struct Descriptor {
     pub limits: Limits,
 }
 
+impl Descriptor {
+    /// What an output port index is called (ABI §5.2, §6.4).
+    ///
+    /// The reserved error port answers with [`PORT_ERR_NAME`](crate::PORT_ERR_NAME) despite
+    /// being absent from `outputs`, which is the whole reason this is a method rather than an
+    /// index: a log line, a tap and a service file all name that port, and a host that spelled
+    /// the rule out at each of those places would have three chances to spell it differently.
+    pub fn output_name(&self, port: u32) -> Option<&str> {
+        if port == crate::PORT_ERR {
+            return Some(crate::PORT_ERR_NAME);
+        }
+        self.outputs.get(port as usize).map(String::as_str)
+    }
+}
+
 /// The limits a host imposes, as the descriptor reports them (ABI §5.2, §9.7).
 ///
 /// **There is no default and no floor.** Both values are host configuration, and ABI §9.7
