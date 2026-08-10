@@ -132,7 +132,7 @@ mod status;
 
 pub mod exports;
 
-pub use budget::Budgets;
+pub use budget::ExprBudgets;
 pub use descriptor::{Descriptor, Limits};
 pub use engine::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
 pub use instance::{

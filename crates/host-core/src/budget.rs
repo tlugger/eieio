@@ -6,6 +6,11 @@ use eio_signal::MAX_DEPTH;
 
 /// An instance's expression and decode budgets, with rule 9's coupling enforced.
 ///
+/// `Expr`-prefixed to keep it distinct from the daemon's `Budgets`, which is ABI §10's
+/// fuel and wall-clock deadline per guest entry — a different thing that the spec also
+/// calls a budget. These two never appear together, and a reader should not have to work
+/// out which one a bare `Budgets` meant.
+///
 /// ABI §6.3.1 rule 9 makes the decode depth bound host configuration "subject to two
 /// constraints: it MUST be at least EXPR §9's `MAX_DEPTH` **floor**, and it MUST be at
 /// least that host's own configured expression `MAX_DEPTH` — otherwise an expression could
@@ -19,27 +24,27 @@ use eio_signal::MAX_DEPTH;
 /// host up next.
 ///
 /// So the two budgets are held together and the constructor is the only way in. A
-/// `Budgets` that violates rule 9 is not a thing that can be built, which is the same
+/// `ExprBudgets` that violates rule 9 is not a thing that can be built, which is the same
 /// shape as `PropertyType`'s single `accepts` implementation: an invariant the leaf
 /// runtime inherits by construction rather than by remembering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Budgets {
+pub struct ExprBudgets {
     eval: EvalLimits,
     decode_depth: u32,
 }
 
-impl Budgets {
+impl ExprBudgets {
     /// The reference budgets: EXPR §9's defaults, and `eio_signal`'s default decode bound.
     ///
     /// What a daemon-class node runs until it is told otherwise. `node.toml` is where an
     /// operator will state them (DAEMON §3); until it exists, this is the one place the
     /// numbers come from rather than each call site picking its own.
-    pub const DEFAULT: Budgets = Budgets {
+    pub const DEFAULT: ExprBudgets = ExprBudgets {
         eval: EvalLimits::DEFAULT,
         decode_depth: MAX_DEPTH,
     };
 
-    /// Budgets for a host imposing `eval` on expressions and asking for `decode_depth` at
+    /// ExprBudgets for a host imposing `eval` on expressions and asking for `decode_depth` at
     /// the decode boundary.
     ///
     /// `decode_depth` is **raised** to the expression depth when it is below it, rather
@@ -48,9 +53,9 @@ impl Budgets {
     /// reasoning `eio_signal` gives for clamping up to `MIN_DEPTH` instead of erroring.
     /// The expression budget is clamped first, so the comparison is against the depth
     /// expressions will *actually* run at, not the one that was asked for.
-    pub fn new(eval: EvalLimits, decode_depth: u32) -> Budgets {
+    pub fn new(eval: EvalLimits, decode_depth: u32) -> ExprBudgets {
         let eval = eval.clamped();
-        Budgets {
+        ExprBudgets {
             eval,
             decode_depth: decode_depth.max(eval.max_depth),
         }

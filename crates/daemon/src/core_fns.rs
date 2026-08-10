@@ -25,7 +25,7 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use eio_host_core::{
-    Arg, Budgets, Engine, EngineError, ErrorCode, HostCall, Limits, Outbound, PropContext, Ret,
+    Arg, Engine, EngineError, ErrorCode, ExprBudgets, HostCall, Limits, Outbound, PropContext, Ret,
     Status,
     exports::{core_fn, namespace},
 };
@@ -63,7 +63,7 @@ struct Shared {
     /// The limits this host imposes (ABI §5.2, §9.7). `emit` enforces `max_payload`.
     limits: Limits,
     /// The expression and decode budgets (ABI §6.3.1 rule 9). `emit` decodes under them.
-    budgets: Budgets,
+    budgets: ExprBudgets,
     /// How many output ports the instance declares, for `emit`'s index check.
     outputs: u32,
     /// The origin `time_mono_ms` counts from.
@@ -89,7 +89,7 @@ impl Core {
     /// `budgets` is the same one the instance's properties were compiled under, which is
     /// what makes ABI §6.3.1 rule 9 hold across the two: an expression cannot construct a
     /// value deeper than `emit` will decode.
-    pub fn new(limits: Limits, budgets: Budgets, outputs: u32) -> Core {
+    pub fn new(limits: Limits, budgets: ExprBudgets, outputs: u32) -> Core {
         Core {
             shared: Rc::new(RefCell::new(Shared {
                 limits,

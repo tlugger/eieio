@@ -20,8 +20,8 @@
 mod mock;
 
 use eio_host_core::{
-    ALLOC_ALIGN, Arg, Budgets, Engine, EngineError, ErrorCode, Limits, Memory, OutBuffer, Outbound,
-    Ret, exports,
+    ALLOC_ALIGN, Arg, Engine, EngineError, ErrorCode, ExprBudgets, Limits, Memory, OutBuffer,
+    Outbound, Ret, exports,
 };
 use mock::MockGuest;
 
@@ -181,7 +181,7 @@ fn an_out_buffer_outside_guest_memory_is_invalid_arg() {
 const LIMITS: Limits = Limits::new(64, 8);
 
 /// The reference budgets — what `decode` bounds nesting by (ABI §6.3.1 rule 9).
-const BUDGETS: Budgets = Budgets::DEFAULT;
+const BUDGETS: ExprBudgets = ExprBudgets::DEFAULT;
 
 #[test]
 fn an_emission_on_a_declared_port_is_accepted() {

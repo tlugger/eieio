@@ -36,7 +36,7 @@ use alloc::vec::Vec;
 
 use eio_signal::Batch;
 
-use crate::budget::Budgets;
+use crate::budget::ExprBudgets;
 use crate::descriptor::Limits;
 use crate::engine::{Engine, Trap, TrapKind};
 use crate::exports::required;
@@ -244,11 +244,11 @@ impl Outbound {
     /// that are not a batch, which is a bad parameter, and ABI §8 keeps the instance alive
     /// for it. Consuming `self` is what stops one accepted emission being decoded twice.
     ///
-    /// The depth bound comes from [`Budgets`] rather than as a bare number, because rule 9
+    /// The depth bound comes from [`ExprBudgets`] rather than as a bare number, because rule 9
     /// constrains it against the expression budget and a `u32` parameter here would be one
-    /// more place to pass the wrong one. A `Budgets` cannot hold a bound that violates the
+    /// more place to pass the wrong one. A `ExprBudgets` cannot hold a bound that violates the
     /// rule, so this call site cannot apply one.
-    pub fn decode(self, bytes: &[u8], budgets: Budgets) -> Result<Batch, ErrorCode> {
+    pub fn decode(self, bytes: &[u8], budgets: ExprBudgets) -> Result<Batch, ErrorCode> {
         Batch::from_cbor_with_max_depth(bytes, budgets.decode_depth())
             .map_err(|_| ErrorCode::InvalidArg)
     }

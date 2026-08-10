@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use eio_host_core::{
-    Budgets, Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext,
+    Configured, Configuring, Delivering, Descriptor, ExprBudgets, Limits, Outcome, PropContext,
     Running, Starting, Status, Trap, exports::optional, resolve,
 };
 use eio_manifest::{Abi, Manifest};
@@ -297,11 +297,11 @@ impl Live {
         // ABI §11.1's `required`/`default` rule, then EXPR §10's static analysis. Both are
         // configuration-time gates, and a failure of either is a rejection the deployer
         // reads.
-        // One `Budgets` for the instance, feeding both the expression compile and `emit`'s
+        // One `ExprBudgets` for the instance, feeding both the expression compile and `emit`'s
         // decode bound. That is what makes ABI §6.3.1 rule 9 hold here rather than being a
         // thing to remember: the two numbers cannot drift because there is one source of
         // them. `DEFAULT` until `node.toml` states them (DAEMON §3).
-        let budgets = Budgets::DEFAULT;
+        let budgets = ExprBudgets::DEFAULT;
         let sources = resolve(&prepared.manifest, &prepared.props)?;
         let properties = PropContext::compile_with_limits(&sources, budgets.eval())
             .map_err(|error| anyhow::anyhow!("this configuration is invalid: {error}"))?;
