@@ -35,10 +35,11 @@ use eio_manifest::{Abi, Manifest};
 use eio_signal::Batch;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::core_fns::Core;
+use crate::core_fns::{Core, Emission};
 use crate::engine::{Guest, Runtime};
 use crate::executor::{Event, Work};
 use crate::props::resolve;
+use crate::router::{Discard, Outlet};
 
 /// Everything needed to build one instance, as a caller supplies it.
 ///
@@ -100,19 +101,17 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// The instance id its descriptor will carry (ABI §5.2).
-    pub fn instance_id(&self) -> &str {
-        &self.descriptor.instance_id
-    }
-
     /// The service it belongs to.
     pub fn service(&self) -> &str {
         &self.service
     }
 
-    /// The output port names, by index (ABI §5.2).
-    pub fn outputs(&self) -> &[String] {
-        &self.descriptor.outputs
+    /// What this instance will be told about itself (ABI §5.2).
+    ///
+    /// The router resolves a service's connection table against these, before any instance
+    /// is spawned (DAEMON §6).
+    pub fn descriptor(&self) -> &Descriptor {
+        &self.descriptor
     }
 }
 
@@ -127,6 +126,7 @@ pub fn run_instance(
     work: mpsc::Receiver<Work>,
     events: mpsc::UnboundedSender<Event>,
     started: oneshot::Sender<anyhow::Result<()>>,
+    outlet: Outlet,
 ) {
     let local = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -136,7 +136,9 @@ pub fn run_instance(
         // Spawned rather than awaited inline so that the instance really is a task on a
         // `LocalSet` (DAEMON §5) — the place ABI §7.3's and §7.6's completions will be
         // awaited alongside the mailbox when those capabilities exist.
-        let task = tokio::task::spawn_local(instance_task(runtime, loaded, work, events, started));
+        let task = tokio::task::spawn_local(instance_task(
+            runtime, loaded, work, events, started, outlet,
+        ));
         // The task owns the instance, so nothing here can observe it half-dropped. A panic
         // inside it has already been logged by the panic hook; `Executor::spawn` and
         // `Instance::join` report it as a dead thread.
@@ -151,6 +153,7 @@ async fn instance_task(
     mut work: mpsc::Receiver<Work>,
     events: mpsc::UnboundedSender<Event>,
     started: oneshot::Sender<anyhow::Result<()>>,
+    outlet: Outlet,
 ) {
     // DAEMON §11: every line from here on — the daemon's own and the guest's `log` calls
     // alike — carries this identity. Entered per callback rather than held across the loop,
@@ -162,18 +165,27 @@ async fn instance_task(
         block = %loaded.manifest.name,
     );
 
-    let (mut live, mut running) = match span.in_scope(|| Live::start(&runtime, loaded, events)) {
-        Ok(started) => started,
-        Err(error) => {
-            // Nothing was spawned that needs unwinding: `start` reports only failures that
-            // leave no instance behind (ABI §5.1 discards a rejected configuration).
-            let _ = started.send(Err(error));
-            return;
-        }
-    };
-    if started.send(Ok(())).is_err() {
+    let (mut live, mut running) =
+        match span.in_scope(|| Live::start(&runtime, loaded, events, outlet)) {
+            Ok(started) => started,
+            Err(error) => {
+                // Nothing was spawned that needs unwinding: `start` reports only failures that
+                // leave no instance behind (ABI §5.1 discards a rejected configuration).
+                let _ = started.send(Err(error));
+                return;
+            }
+        };
+    // Answered before anything is routed: RUNNING is what the caller is waiting to hear, and
+    // an instance that had to wait for room in a destination before saying so would make one
+    // slow receiver look like a block that would not start.
+    let abandoned = started.send(Ok(())).is_err();
+    // ABI §5.1 step 3 lets `eio_start` emit; those emissions are routed like any other, which
+    // is why the whole service's mailboxes exist before its first instance runs (DAEMON §6).
+    route(&mut live, &span).await;
+    if abandoned {
         // Nobody is waiting for this instance any more. It still gets its ABI §5.1 step 5.
         span.in_scope(|| live.stop(running));
+        route(&mut live, &span).await;
         return;
     }
 
@@ -181,7 +193,14 @@ async fn instance_task(
         if matches!(item, Work::Stop) {
             break;
         }
-        match span.in_scope(|| live.handle(running, item)) {
+        let next = span.in_scope(|| live.handle(running, item));
+        // After the callback returned, and before the next work item is taken: ABI §6.2's
+        // "the host buffers the batch and routes it after the current callback returns", as
+        // the shape of the loop. Routing precedes the death check because a batch `emit`
+        // already answered zero to was accepted, and a guest that trapped afterwards does not
+        // un-accept it.
+        route(&mut live, &span).await;
+        match next {
             Some(next) => running = next,
             // Dead, and already reported. There is no instance left to stop.
             None => return,
@@ -190,6 +209,19 @@ async fn instance_task(
     // Either a `Stop`, or every sender dropped — which means no work can ever arrive again,
     // so it is a stop too. The guest gets step 5 either way.
     span.in_scope(|| live.stop(running));
+    route(&mut live, &span).await;
+}
+
+/// Routes what the last callback emitted, and reports what could not be delivered.
+///
+/// Split from [`Live`] because routing is the one part of an instance's loop that awaits: a
+/// `tracing` span guard must not live across an `await`, so the awaiting happens here and the
+/// span is entered again for the logging.
+async fn route(live: &mut Live, span: &tracing::Span) {
+    let discards = live.route().await;
+    if !discards.is_empty() {
+        span.in_scope(|| live.report(discards));
+    }
 }
 
 /// One instance's host-side state, for the life of the instance.
@@ -203,6 +235,10 @@ struct Live {
     properties: PropContext,
     descriptor: Descriptor,
     events: mpsc::UnboundedSender<Event>,
+    /// Where this instance's emissions go (DAEMON §6).
+    outlet: Outlet,
+    /// What the last callback emitted, waiting to be routed (ABI §6.2).
+    pending: Vec<Emission>,
 }
 
 impl Live {
@@ -215,6 +251,7 @@ impl Live {
         runtime: &Runtime,
         loaded: Loaded,
         events: mpsc::UnboundedSender<Event>,
+        outlet: Outlet,
     ) -> anyhow::Result<(Live, Running<Guest>)> {
         // ABI §11.1's `required`/`default` rule, then EXPR §10's static analysis. Both are
         // configuration-time gates, and a failure of either is a rejection the deployer
@@ -242,6 +279,8 @@ impl Live {
             properties,
             descriptor,
             events,
+            outlet,
+            pending: Vec::new(),
         };
 
         // ABI §5.1 step 2. `during` opens the property scope: a guest MAY read properties in
@@ -473,7 +512,50 @@ impl Live {
             self.send(Event::Failure(failure));
         }
         for emission in self.core.take_emissions() {
+            // Reported *and* routed, from two different queues on purpose: an observer reads
+            // an unbounded stream so that watching cannot stall a guest, and the routed copy
+            // travels through the destination's bounded mailbox so that a slow consumer can
+            // (DAEMON §5, §6). The clone is the price of the batch being in both.
+            self.pending.push(emission.clone());
             self.send(Event::Emitted { callback, emission });
+        }
+    }
+
+    /// Routes everything the last callback emitted (ABI §6.2, DAEMON §6).
+    ///
+    /// Awaits, because the default overflow policy is to wait for room — and an instance
+    /// waiting here is an instance not draining its own mailbox, which is how the pressure
+    /// reaches whoever is feeding it.
+    async fn route(&mut self) -> Vec<Discard> {
+        let mut discards = Vec::new();
+        // Ahead of the new emissions, so a batch a drop-oldest connection is holding keeps
+        // its place in front of the ones that came after it.
+        self.outlet.flush(&mut discards);
+        // Drained rather than taken, so a block that emits on every callback grows this
+        // buffer once instead of on every callback.
+        let Live {
+            pending, outlet, ..
+        } = self;
+        for emission in pending.drain(..) {
+            outlet
+                .route(emission.port, emission.batch, &mut discards)
+                .await;
+        }
+        discards
+    }
+
+    /// Logs and reports batches that did not arrive (DAEMON §6, ABI §6.4).
+    ///
+    /// §6.4 asks for exactly this of an unrouted error emission — "logged and counted" — and
+    /// the other reasons a batch can be discarded want the same treatment: a signal that
+    /// existed and then did not arrive is never nothing.
+    fn report(&self, discards: Vec<Discard>) {
+        for discard in discards {
+            // Unreachable as `None`: the port was accepted by `emit`, which checked it
+            // against this same descriptor (ABI §6.2).
+            let port = self.descriptor.output_name(discard.port).unwrap_or("?");
+            tracing::warn!(port, "a batch was not delivered: {}", discard.reason);
+            self.send(Event::Discarded(discard));
         }
     }
 

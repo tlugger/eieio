@@ -487,7 +487,7 @@ async fn post(instance: &Instance, work: Work) {
 }
 
 /// Drains an instance's events to the end — which is where its thread has finished.
-async fn drain(mut events: crate::executor::Events) -> Vec<Event> {
+async fn drain(events: &mut crate::executor::Events) -> Vec<Event> {
     let mut all = Vec::new();
     while let Some(event) = events.recv().await {
         all.push(event);
@@ -521,13 +521,13 @@ async fn callbacks_never_overlap_however_full_the_mailbox_is() {
     // assertion. Port 0 emits, which puts the guest on the host's stack — the one opening a
     // host would have to re-enter through (ABI §6.2).
     let executor = Executor::new(Budgets::default(), 4).expect("an executor");
-    let (instance, events) = executor.spawn(spec("canary.wat")).await.expect("it starts");
+    let (instance, mut events) = executor.spawn(spec("canary.wat")).await.expect("it starts");
 
     for _ in 0..64 {
         post(&instance, deliver(0)).await;
     }
     post(&instance, Work::Stop).await;
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
     instance.join();
 
     assert_eq!(
@@ -548,12 +548,12 @@ async fn the_canary_can_tell_when_it_has_been_re_entered() {
     // indistinguishable from one that cannot. Port 2 enters without leaving, which is the
     // depth a re-entering host would produce, so the *next* callback must report it.
     let executor = Executor::new(Budgets::default(), 4).expect("an executor");
-    let (instance, events) = executor.spawn(spec("canary.wat")).await.expect("it starts");
+    let (instance, mut events) = executor.spawn(spec("canary.wat")).await.expect("it starts");
 
     post(&instance, deliver(2)).await;
     post(&instance, deliver(1)).await;
     post(&instance, Work::Stop).await;
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
     instance.join();
 
     assert_eq!(
@@ -578,13 +578,13 @@ async fn a_spinning_guest_runs_out_of_fuel_and_dies() {
         deadline: Duration::from_secs(60),
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
-    let (instance, events) = executor
+    let (instance, mut events) = executor
         .spawn(spec("spinner.wat"))
         .await
         .expect("it starts");
 
     post(&instance, deliver(0)).await;
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
     instance.join();
 
     match ending(&events) {
@@ -607,13 +607,13 @@ async fn a_guest_that_overruns_its_deadline_dies_of_the_deadline() {
         deadline: Duration::from_millis(50),
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
-    let (instance, events) = executor
+    let (instance, mut events) = executor
         .spawn(spec("spinner.wat"))
         .await
         .expect("it starts");
 
     post(&instance, deliver(0)).await;
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
     instance.join();
 
     match ending(&events) {
@@ -626,13 +626,13 @@ async fn a_guest_that_overruns_its_deadline_dies_of_the_deadline() {
 async fn a_trap_kills_the_instance_and_a_non_zero_return_does_not() {
     // ABI §8's rule, both halves, from the executor's side.
     let executor = Executor::new(Budgets::default(), 4).expect("an executor");
-    let (instance, events) = executor
+    let (instance, mut events) = executor
         .spawn(spec("trapper.wat"))
         .await
         .expect("it starts");
 
     post(&instance, deliver(0)).await;
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
     instance.join();
 
     match ending(&events) {
@@ -653,7 +653,7 @@ async fn a_spinning_instance_does_not_stall_another_one() {
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
     let (spinner, mut spinner_events) = executor.spawn(spec("spinner.wat")).await.expect("starts");
-    let (echo, echo_events) = executor
+    let (echo, mut echo_events) = executor
         .spawn(InstanceSpec {
             props: echo_props(),
             ..spec("echo.wat")
@@ -665,7 +665,7 @@ async fn a_spinning_instance_does_not_stall_another_one() {
     let began = Instant::now();
     post(&echo, deliver(0)).await;
     post(&echo, Work::Stop).await;
-    let events = drain(echo_events).await;
+    let events = drain(&mut echo_events).await;
     let elapsed = began.elapsed();
     echo.join();
 
@@ -698,7 +698,7 @@ async fn an_instance_whose_senders_are_all_gone_stops_itself() {
     // A mailbox nothing can post to again is a stop: the guest still gets ABI §5.1 step 5
     // rather than being left running with nothing to do.
     let executor = Executor::new(Budgets::default(), 4).expect("an executor");
-    let (instance, events) = executor
+    let (instance, mut events) = executor
         .spawn(InstanceSpec {
             props: echo_props(),
             ..spec("echo.wat")
@@ -707,7 +707,7 @@ async fn an_instance_whose_senders_are_all_gone_stops_itself() {
         .expect("it starts");
 
     instance.join();
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
 
     assert!(
         matches!(ending(&events), Some(Event::Stopped { errors: 0 })),
@@ -720,7 +720,7 @@ async fn a_batch_beyond_the_limits_is_refused_without_entering_the_guest() {
     // ABI §9.7 from the executor's side: the instance lives, no callback ran, and the
     // refusal says which limit and by how much.
     let executor = Executor::new(Budgets::default(), 4).expect("an executor");
-    let (instance, events) = executor
+    let (instance, mut events) = executor
         .spawn(InstanceSpec {
             props: echo_props(),
             limits: Limits::new(4, 1024),
@@ -731,7 +731,7 @@ async fn a_batch_beyond_the_limits_is_refused_without_entering_the_guest() {
 
     post(&instance, deliver(0)).await;
     post(&instance, Work::Stop).await;
-    let events = drain(events).await;
+    let events = drain(&mut events).await;
     instance.join();
 
     let refused = events.iter().find_map(|event| match event {
@@ -749,4 +749,278 @@ async fn a_batch_beyond_the_limits_is_refused_without_entering_the_guest() {
         [Status::Ok, Status::Ok, Status::Ok],
         "configure, start and stop — process_signals was never called"
     );
+}
+
+// ── the router (DAEMON §6) ──────────────────────────────────────────────────
+
+use eio_host_core::{Connection, PORT_ERR, Port};
+
+use crate::router::{Discard, DiscardReason, Service};
+
+/// The block `name`, as instance `id`, with `props`.
+fn instance(name: &str, id: &str, props: BTreeMap<String, String>) -> InstanceSpec {
+    InstanceSpec {
+        instance: Some(String::from(id)),
+        props,
+        ..spec(name)
+    }
+}
+
+/// `from.port → to.port`, by name, with the default overflow policy.
+fn connect(from: (&str, &str), to: (&str, &str)) -> Connection {
+    Connection::new(Port::new(from.0, from.1), Port::new(to.0, to.1))
+}
+
+/// Reads an instance's events until `count` callback statuses have arrived.
+///
+/// Every test below has to wait for something rather than post `Stop` up front, and the
+/// reason is the property under test: a routed batch reaches its destination's mailbox
+/// *after* the callback that emitted it returned (ABI §6.2), so a `Stop` queued beforehand
+/// would be taken first and the delivery would never happen. Waiting on the events is what
+/// makes the order these tests assert the order they also arranged.
+async fn until_statuses(events: &mut crate::executor::Events, count: usize) -> Vec<Event> {
+    let mut all = Vec::new();
+    while statuses(&all).len() < count {
+        match events.recv().await {
+            Some(event) => all.push(event),
+            // The instance ended early. The assertions report what it did instead.
+            None => break,
+        }
+    }
+    all
+}
+
+/// The batch of the first emission in `events`.
+fn emitted(events: &[Event]) -> &eio_signal::Batch {
+    events
+        .iter()
+        .find_map(|event| match event {
+            Event::Emitted { emission, .. } => Some(&emission.batch),
+            _ => None,
+        })
+        .expect("an emission")
+}
+
+#[tokio::test]
+async fn a_self_connection_is_delivered_after_the_callback_returns_and_never_during_it() {
+    // ABI §6.2: "the host buffers the batch and routes it after the current callback
+    // returns", and its first consequence — "emitting N batches to M downstream instances
+    // cannot recurse into this instance or any other mid-call". The hardest case is an
+    // instance wired to *itself*, where a host that delivered inline would recurse
+    // immediately; the canary reports any such overlap as a non-zero status on that callback
+    // and every later one (ABI §8), so all-zero statuses is the assertion.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![instance("canary.wat", "loop", BTreeMap::new())],
+        &[connect(("loop", "out"), ("loop", "quiet"))],
+    )
+    .await
+    .expect("it starts");
+
+    // Port 0 emits; the copy arrives on port 1, which does not.
+    post(service.instance("loop").expect("it is there"), deliver(0)).await;
+    let seen = until_statuses(service.events("loop").expect("its events"), 4).await;
+
+    assert_eq!(
+        statuses(&seen),
+        [Status::Ok; 4],
+        "configure, start, the delivery, and the copy it emitted to itself — no overlap: \
+         {seen:#?}"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|event| matches!(event, Event::Emitted { .. }))
+            .count(),
+        1,
+        "one emission, delivered once: the routed copy did not emit again"
+    );
+
+    service.stop().await;
+    service.join();
+}
+
+#[tokio::test]
+async fn fan_out_delivers_a_copy_to_every_receiver() {
+    // DAEMON §6: "fan-out (duplicate batch per receiver — nio semantics)". Both sinks echo
+    // what they were given, so the assertion is on the batch each of them actually received
+    // rather than on the router's bookkeeping.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![
+            instance("canary.wat", "source", BTreeMap::new()),
+            instance("echo.wat", "sink-a", echo_props()),
+            instance("echo.wat", "sink-b", echo_props()),
+        ],
+        &[
+            connect(("source", "out"), ("sink-a", "in")),
+            connect(("source", "out"), ("sink-b", "in")),
+        ],
+    )
+    .await
+    .expect("it starts");
+
+    post(service.instance("source").expect("it is there"), deliver(0)).await;
+
+    for sink in ["sink-a", "sink-b"] {
+        // configure, start, and the delivery.
+        let seen = until_statuses(service.events(sink).expect("its events"), 3).await;
+        let batch = emitted(&seen);
+        assert_eq!(batch.len(), 1, "{sink} received one signal: {seen:#?}");
+        assert_eq!(
+            batch.get(0).and_then(|signal| signal.get("n")),
+            Some(&Value::Int(1)),
+            "{sink} received the batch the source emitted"
+        );
+    }
+
+    service.stop().await;
+    service.join();
+}
+
+#[tokio::test]
+async fn backpressure_at_a_mailbox_depth_of_one_loses_nothing() {
+    // DAEMON §6's default policy, end to end and at the tightest bound the executor allows:
+    // every batch arrives, however far behind the receiver is, because an emitter that
+    // cannot get in waits rather than dropping.
+    let executor = Executor::new(Budgets::default(), 1).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![
+            instance("canary.wat", "source", BTreeMap::new()),
+            instance("canary.wat", "sink", BTreeMap::new()),
+        ],
+        &[connect(("source", "out"), ("sink", "quiet"))],
+    )
+    .await
+    .expect("it starts");
+
+    const BATCHES: usize = 16;
+    for _ in 0..BATCHES {
+        post(service.instance("source").expect("it is there"), deliver(0)).await;
+    }
+
+    // configure, start, and one delivery per batch the source emitted.
+    let seen = until_statuses(service.events("sink").expect("its events"), 2 + BATCHES).await;
+    assert_eq!(
+        statuses(&seen)
+            .iter()
+            .filter(|status| status.is_ok())
+            .count(),
+        2 + BATCHES,
+        "every batch arrived, and none of them overlapped: {seen:#?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|event| matches!(event, Event::Discarded(_))),
+        "backpressure discards nothing: {seen:#?}"
+    );
+
+    service.stop().await;
+    service.join();
+}
+
+#[tokio::test]
+async fn a_service_that_cannot_be_wired_starts_nothing() {
+    // The connection table is resolved before any instance is spawned, so a typo in a port
+    // name is a deployment error rather than a service that half comes up and then reports a
+    // connection that carries nothing.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let error = Service::spawn(
+        &executor,
+        vec![instance("echo.wat", "echo", echo_props())],
+        &[connect(("echo", "out"), ("echo", "inn"))],
+    )
+    .await
+    .expect_err("echo has no input named `inn`");
+    assert!(error.to_string().contains("inn"), "{error}");
+    assert!(error.to_string().contains("wireable"), "{error}");
+}
+
+#[tokio::test]
+async fn a_service_whose_second_instance_will_not_configure_leaves_none_running() {
+    // A block that validates and then rejects its configuration (ABI §5.1 step 2) is only
+    // discovered on its own thread, by which time the first instance is already running.
+    // Reaching the assertion at all is the proof that it was stopped: `Service::spawn` joins
+    // what it started, so a leaked instance thread would hang this test rather than fail it.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let error = Service::spawn(
+        &executor,
+        vec![
+            instance("echo.wat", "first", echo_props()),
+            instance("echo.wat", "second", BTreeMap::new()),
+        ],
+        &[connect(("first", "out"), ("second", "in"))],
+    )
+    .await
+    .expect_err("`label` is required and `second` has no value for it");
+    assert!(error.to_string().contains("label"), "{error}");
+}
+
+#[test]
+fn an_unrouted_error_port_emission_is_counted_and_never_fatal() {
+    // ABI §6.4: `PORT_ERR` is routable, routing it is a service-level choice, and "unrouted
+    // error emissions are logged and counted". `dev run-block` has no service around it, so
+    // every error emission there is unrouted — and the instance still finishes its lifecycle.
+    let mut args = args("emitter.wat");
+    args.input_port = 4;
+    args.batch = Some(String::from(r#"[{"a": 1}]"#));
+
+    let report = run_block(&args).expect("an unrouted error emission is not a failure");
+    assert_eq!(
+        report.discarded,
+        [Discard {
+            port: PORT_ERR,
+            reason: DiscardReason::Unrouted
+        }]
+    );
+    assert_eq!(
+        report.statuses,
+        [
+            ("configure", Status::Ok),
+            ("start", Status::Ok),
+            ("process_signals", Status::Ok),
+            ("stop", Status::Ok),
+        ],
+        "the emit itself was accepted: PORT_ERR is a legal output port"
+    );
+}
+
+#[test]
+fn an_emission_on_an_ordinary_unrouted_output_is_not_counted() {
+    // The contrast that makes the test above about the *error* port rather than about
+    // unrouted emissions in general: a block emitting on an output nobody wired is an
+    // ordinary service shape, and ABI §6.4 singles out only the error port.
+    let mut args = args("emitter.wat");
+    args.batch = Some(String::from(r#"[{"a": 1}]"#));
+
+    let report = run_block(&args).expect("the block runs");
+    assert!(report.discarded.is_empty(), "{:?}", report.discarded);
+    assert_eq!(report.emissions.len(), 1, "and it was still emitted");
+}
+
+#[tokio::test]
+async fn a_wired_instance_still_stops_when_every_sender_is_gone() {
+    // DAEMON §5's "every sender gone is a stop", for an instance inside a service. It holds
+    // only for as long as a routing instance holds senders for the receivers it emits into
+    // and no others: an outlet given the whole service's mailboxes would keep every instance
+    // — itself included — reachable forever, and nothing here would ever stop.
+    //
+    // No `Stop` is posted. Dropping the handles is the whole test: the source loses its last
+    // sender and stops, which drops its outlet, which is the sink's last sender.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let service = Service::spawn(
+        &executor,
+        vec![
+            instance("echo.wat", "source", echo_props()),
+            instance("echo.wat", "sink", echo_props()),
+        ],
+        &[connect(("source", "out"), ("sink", "in"))],
+    )
+    .await
+    .expect("it starts");
+
+    service.join();
 }

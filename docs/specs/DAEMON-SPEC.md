@@ -99,7 +99,7 @@ The runtime embodiment of ABI §1 invariants:
 
 **Mailbox bound and what a full one means.** The mailbox is bounded and its depth is host configuration, with no floor. The executor offers a sender both answers to a full one and takes neither on the sender's behalf: a *waiting* send (backpressure, which propagates to whoever is producing too fast) and a *refusing* send that hands the work item back. Which one a connection uses is §6's per-connection overflow policy; the cross-device question is OPEN (SCOPE §3.4) and is not settled by the executor having a bound.
 
-**Every sender gone is a stop.** A mailbox no sender can reach again cannot receive work, so the instance runs `eio_stop` (ABI §5.1 step 5) rather than idling. An instance is therefore never left running with nothing that can reach it.
+**Every sender gone is a stop.** A mailbox no sender can reach again cannot receive work, so the instance runs `eio_stop` (ABI §5.1 step 5) rather than idling. An instance is therefore never left running with nothing that can reach it. This is why a routing instance holds a sender only for the receivers it actually emits into (§6): were it given the whole service's mailboxes, every instance would keep every other reachable and no serviced instance could ever stop this way. Instances in a cycle do hold each other's, and stop on an explicit `Stop`.
 
 **Inbound is bounded; outbound observation is not.** What an instance produces — callback statuses, `error` details, expression failures, emissions, its death or its clean stop — leaves on an unbounded stream, because an observer that could stall a guest by reading slowly would be a worse defect than a queue that grows. Backpressure belongs on the inbound side, where slowing the sender down is a correct response. Routed emissions are not this stream: they travel through the *destination's* bounded mailbox (§6), which is where a slow consumer should be felt.
 
@@ -139,8 +139,36 @@ A host function reaches guest memory through `Memory::data_and_store_mut`, which
 
 ## 6. Router
 
-- Owns the service graph: connection table, fan-out (duplicate batch per receiver — nio semantics), delivery into destination mailboxes.
-- **Bounded mailboxes; overflow policy per connection** (OPEN backpressure, SCOPE §3.4 — **PROPOSED default:** block the emitter's queue-drain, i.e. natural backpressure within a node; drop-oldest available as opt-in for sensor-style flows).
+Owns the service graph: the connection table, fan-out (duplicate batch per receiver — nio semantics), and delivery into destination mailboxes.
+
+**The table is ★-shared; the delivery is not.** Which `(instance, output port)` reaches which `(instance, input port)`, the resolution of a service's *names* into the port indices ABI §5.2 fixes, and the duplication of a batch per receiver have no engine and no queue in them, so they live in `host-core` (§1) and the leaf runtime routes with the same code. What is host-specific is what a queue is and what a full one means.
+
+Endpoints are indices, resolved once at build time, because ABI §5.2 makes the descriptor's name lists *be* the numbering and a table carrying names would re-derive it on every emission. Resolution refuses, rather than warns about: a name nothing declares; the error port as a *destination*, since ABI §6.4 makes it an output; the same connection declared twice, which would deliver one batch twice; and a block that declares an output actually named `err`, which would make that name in a service file mean two things. Fan-out order is declaration order.
+
+**`PORT_ERR` is routable and unrouted by default** (ABI §6.4). A service may wire it like any other output; one that does not gets §6.4's "logged and counted" for every error emission, and nothing else — an *ordinary* output nobody wired is an ordinary shape and says nothing.
+
+### 6.1 Where routing happens
+
+**On the emitting instance's own thread, after its callback returned.** ABI §6.2 fixes the *when*; this fixes the *where*, and the two together are what make backpressure real: an instance waiting for room in a full destination is an instance not draining its own mailbox, so the pressure reaches whoever is feeding it. Routing from a central task draining §5's outbound event stream would look equivalent and quietly delete that, because that stream is unbounded on purpose (§5). An emission is therefore reported on the event stream **and** routed, through two different queues, deliberately.
+
+Two consequences worth stating:
+
+- **`eio_start` may emit** (ABI §5.1 step 3), so every mailbox in a service exists before its first instance is spawned. That is also the only order in which a *cyclic* graph can be wired at all.
+- **A callback that trapped still has its emissions routed.** `emit` already returned zero, so the host has taken those batches; the guest dying afterwards does not un-take them. The instance is discarded (ABI §5.1 step 6) either way.
+
+### 6.2 Bounded mailboxes and the overflow policy
+
+**Bounded mailboxes; overflow policy per connection.** The default is to **block the emitter's queue-drain** — natural backpressure within a node. **Drop-oldest** is available as an opt-in for sensor-style flows. The cross-*device* question — delivery guarantees, ordering, and backpressure between nodes — is a different one and stays OPEN (SCOPE §3.4).
+
+The two policies are the two answers §5's mailbox offers a sender, and neither is free-standing:
+
+- **Backpressure** is the waiting send. Nothing is lost; a saturated graph slows down.
+- **Drop-oldest** is the refusing send plus a **one-batch slot on the connection**. When the destination is full the newest batch takes the slot, and the batch it finds there is the one dropped; the slot is retried ahead of the next round of emissions. The batch a connection discards is always one of *its own*: a per-connection policy MUST NOT discard work another connection put in the shared mailbox, so a control flow set to backpressure keeps its guarantee even when a sensor flow into the same block does not.
+
+**A connection whose destination is its own source never waits**, however it is configured. An instance is the only drain of its own mailbox, so waiting there cannot succeed — it is a deadlock rather than backpressure, and the batch is discarded and counted instead. Longer cycles are not locally detectable: a saturated cycle of two or more instances stalls those instances, which is the cost of in-node backpressure and is stated here rather than papered over. Every discard — unrouted error emission, drop-oldest replacement, full self-connection, gone receiver — is logged and counted.
+
+### 6.3 Taps and system blocks
+
 - **Taps** (SCOPE §3.12): any connection can be tapped at runtime via API — sampled copies into a per-tap ring buffer, streamed over the API (§9) and/or published to a system topic. Zero cost untapped. Expression evaluation failures (EXPR §8) are injected into taps as annotated events.
 - **System blocks (PROPOSED):** `publisher` and `subscriber` blocks are **host-native**, not WASM — they appear in the palette/manifest system like any block but their implementation is the router's pub/sub bridge (§7). Rationale: they need transport internals and credentials no sandboxed block should hold; and every node class must have them even when it can't load WASM dynamically. The precedent is deliberate and narrow: system blocks are limited to transport endpoints (logger stays an ordinary WASM block).
 

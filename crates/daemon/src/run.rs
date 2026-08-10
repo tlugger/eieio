@@ -22,6 +22,7 @@ use crate::engine::Budgets;
 use crate::executor::{Event, Executor, Instance, Work};
 use crate::instance::InstanceSpec;
 use crate::json_batch::batch_from_json;
+use crate::router::Discard;
 
 /// What a run produced, beyond what it printed.
 ///
@@ -38,6 +39,8 @@ pub struct RunReport {
     pub failures: Vec<PropFailure>,
     /// Detail the guest attached to a non-zero return (ABI §7.0).
     pub details: Vec<(&'static str, Detail)>,
+    /// Batches that were emitted and then not delivered (DAEMON §6, ABI §6.4).
+    pub discarded: Vec<Discard>,
 }
 
 /// What `dev run-block` was asked to do.
@@ -126,6 +129,10 @@ pub async fn run_block(args: &RunBlock) -> anyhow::Result<RunReport> {
             Event::Status { callback, status } => report.statuses.push((callback, status)),
             Event::Detail { callback, detail } => report.details.push((callback, detail)),
             Event::Failure(failure) => report.failures.push(failure),
+            // `run-block` has no service around it, so the only thing it can route is
+            // nothing: an emission on the error port with no connection (ABI §6.4). It is
+            // already logged; the report carries it so a test can assert on it.
+            Event::Discarded(discard) => report.discarded.push(discard),
             Event::Emitted { callback, emission } => {
                 print_emission(&instance, &emission);
                 report.emissions.push((callback, emission));

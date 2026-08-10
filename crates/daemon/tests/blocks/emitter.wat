@@ -45,8 +45,14 @@
     (if (i32.eq (local.get $port) (i32.const 3))
       (then (return (call $emit (i32.const 0) (local.get $ptr) (i32.const 100000)))))
 
+    ;; Port 4: the reserved error port (ABI §6.4), which every block has without declaring
+    ;; it. Accepted like any other output — 0xFFFFFFFE is -2 as an i32 — and then routed, or
+    ;; in a service that has not routed it, logged and counted.
+    (if (i32.eq (local.get $port) (i32.const 4))
+      (then (return (call $emit (i32.const -2) (local.get $ptr) (local.get $len)))))
+
     ;; Port 0: the well-formed case, so the others are a contrast rather than a baseline.
     (call $emit (i32.const 0) (local.get $ptr) (local.get $len)))
 
-  (@custom "eio:manifest" "{\"name\":\"emitter\",\"version\":\"1.0.0\",\"abi\":{\"major\":1,\"minor\":0},\"inputs\":[{\"name\":\"ok\"},{\"name\":\"malformed\"},{\"name\":\"badport\"},{\"name\":\"oversize\"}],\"outputs\":[{\"name\":\"out\"}]}")
+  (@custom "eio:manifest" "{\"name\":\"emitter\",\"version\":\"1.0.0\",\"abi\":{\"major\":1,\"minor\":0},\"inputs\":[{\"name\":\"ok\"},{\"name\":\"malformed\"},{\"name\":\"badport\"},{\"name\":\"oversize\"},{\"name\":\"onerr\"}],\"outputs\":[{\"name\":\"out\"}]}")
 )

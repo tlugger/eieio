@@ -33,26 +33,27 @@
 //! handles a full one: [`Mailbox::send`] waits for capacity — natural backpressure, which
 //! propagates up the graph to whoever is producing too fast — and [`Mailbox::try_send`]
 //! refuses immediately, for a sender that cannot wait. Which of the two a *connection* uses
-//! is the router's overflow policy (DAEMON §6, eieio-35h.5), and the cross-device question
-//! stays OPEN (SCOPE §3.4); the executor's part is to have a bound at all and to offer both
-//! answers to a full one.
+//! is the router's overflow policy (DAEMON §6, [`crate::router`]), and the cross-device
+//! question stays OPEN (SCOPE §3.4); the executor's part is to have a bound at all and to
+//! offer both answers to a full one.
 //!
 //! **Outbound events are unbounded.** [`Event`]s are what the instance observed — statuses,
 //! `error` details, expression failures, emissions, death — and an observer that could stall
 //! a guest by reading slowly would be a worse defect than a queue that grows. Backpressure
-//! belongs on the inbound side, where it can actually slow the producer down. When the
-//! router lands, routed emissions travel through the *destination's* bounded mailbox, which
-//! is where a slow consumer should be felt.
+//! belongs on the inbound side, where it can actually slow the producer down. Routed
+//! emissions are deliberately *not* this stream: they travel through the destination's
+//! bounded mailbox ([`crate::router`]), which is where a slow consumer should be felt.
 
 use std::sync::Arc;
 
-use eio_host_core::{PropFailure, Status, Trap};
+use eio_host_core::{Descriptor, PropFailure, Status, Trap};
 use eio_signal::Batch;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::core_fns::{Detail, Emission};
 use crate::engine::{Budgets, Runtime};
-use crate::instance::{InstanceSpec, run_instance};
+use crate::instance::{InstanceSpec, Loaded, run_instance};
+use crate::router::{Discard, Outlet};
 
 /// One item of work for an instance (DAEMON §5).
 ///
@@ -155,27 +156,38 @@ impl Mailbox {
     /// wait — a drop-oldest connection, or a host callback that must not block (ABI §1.2:
     /// a guest→host call must never re-enter the guest, and waiting on a mailbox the guest
     /// itself is draining would be a way to try).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the router (eieio-35h.5) is the first caller; the full-mailbox contract \
-                      is defined and tested now because the bound is meaningless without it"
-        )
-    )]
     pub fn try_send(&self, work: Work) -> Result<(), Undelivered> {
         self.tx.try_send(work).map_err(|error| match error {
             mpsc::error::TrySendError::Full(work) => Undelivered::Full(work),
             mpsc::error::TrySendError::Closed(work) => Undelivered::Gone(work),
         })
     }
+
+    /// A mailbox of `capacity` and the receiver behind it, for a test with no instance.
+    #[cfg(test)]
+    pub fn pair(capacity: usize) -> (Mailbox, mpsc::Receiver<Work>) {
+        let (tx, rx) = mpsc::channel(capacity);
+        (Mailbox { tx }, rx)
+    }
+}
+
+/// The receiving half of a [`Mailbox`], before an instance has been given it.
+///
+/// Exists because the router builds every mailbox in a service *before* spawning anything
+/// (DAEMON §6): a cycle has no order in which every destination already exists, so wiring
+/// cannot follow spawning.
+#[derive(Debug)]
+pub struct Inbox {
+    rx: mpsc::Receiver<Work>,
 }
 
 /// Something an instance did, as everything outside its thread sees it.
 ///
 /// The whole observable surface of a running instance. Today `dev run-block` collects these
-/// into a report and the daemon logs them; the router (eieio-35h.5) takes
-/// [`Event::Emitted`], and supervision (DAEMON §8) takes [`Event::Died`].
+/// into a report and the daemon logs them; taps (DAEMON §6, eieio-8yq.6) will attach here,
+/// and supervision (DAEMON §8) takes [`Event::Died`]. Routing does *not*: an emission is
+/// reported here **and** routed from the instance's own thread, and the two are separate on
+/// purpose — see the module docs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     /// A callback returned (ABI §8). `Status::Ok` or a block-level error — either way the
@@ -195,6 +207,8 @@ pub enum Event {
     },
     /// A property expression failed for a signal (ABI §7.1, EXPR §8).
     Failure(PropFailure),
+    /// A batch the guest emitted was routed but not delivered (DAEMON §6, ABI §6.4).
+    Discarded(Discard),
     /// The guest emitted a batch (ABI §6.2). Enqueued during `callback`, reported after it.
     Emitted {
         /// The callback that emitted it.
@@ -250,7 +264,28 @@ impl Executor {
         })
     }
 
+    /// A mailbox and its receiving half, before there is an instance to give it to.
+    ///
+    /// Depth is the executor's configuration, so every instance in a node has the same one.
+    pub fn mailbox(&self) -> (Mailbox, Inbox) {
+        let (tx, rx) = mpsc::channel(self.mailbox);
+        (Mailbox { tx }, Inbox { rx })
+    }
+
     /// Loads a block, drives it to RUNNING, and leaves it on its own thread (ABI §5.1).
+    ///
+    /// The instance routes nothing: this is the single-block path, `dev run-block`'s. A
+    /// service's instances are spawned by the router, which wires them first (DAEMON §6).
+    pub async fn spawn(&self, spec: InstanceSpec) -> anyhow::Result<(Instance, Events)> {
+        // ABI §4 first, off the instance's thread: a block that was never loadable fails
+        // before one is spawned, and the deployer gets a return value rather than a log line.
+        let loaded = spec.validate()?;
+        let (mailbox, inbox) = self.mailbox();
+        self.spawn_wired(loaded, mailbox, inbox, Outlet::unwired())
+            .await
+    }
+
+    /// The same, for an instance whose mailbox and outlet the router has already built.
     ///
     /// Returns once the instance has accepted its configuration and started, because ABI
     /// §5.1 begins delivery only after `eio_start` returns zero — so a [`Mailbox`] that
@@ -258,14 +293,15 @@ impl Executor {
     /// (validation, an unimplemented capability, a property that will not compile, a
     /// rejected configuration, a death) comes back here as an error, and the thread is
     /// already gone.
-    pub async fn spawn(&self, spec: InstanceSpec) -> anyhow::Result<(Instance, Events)> {
-        // ABI §4 first, off the instance's thread: a block that was never loadable fails
-        // before one is spawned, and the deployer gets a return value rather than a log line.
-        let loaded = spec.validate()?;
-        let id = String::from(loaded.instance_id());
-        let outputs = loaded.outputs().to_vec();
+    pub async fn spawn_wired(
+        &self,
+        loaded: Loaded,
+        mailbox: Mailbox,
+        inbox: Inbox,
+        outlet: Outlet,
+    ) -> anyhow::Result<(Instance, Events)> {
+        let descriptor = loaded.descriptor().clone();
 
-        let (work_tx, work_rx) = mpsc::channel(self.mailbox);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = oneshot::channel();
 
@@ -273,15 +309,18 @@ impl Executor {
         let thread = std::thread::Builder::new()
             // Visible in `top`, in a core file, and in a profiler — which is where an
             // operator asks "which block is eating this machine" (DAEMON §11).
-            .name(format!("eio-{}-{id}", loaded.service()))
-            .spawn(move || run_instance(runtime, loaded, work_rx, event_tx, started_tx))?;
+            .name(format!(
+                "eio-{}-{}",
+                loaded.service(),
+                descriptor.instance_id
+            ))
+            .spawn(move || run_instance(runtime, loaded, inbox.rx, event_tx, started_tx, outlet))?;
 
         match started_rx.await {
             Ok(Ok(())) => Ok((
                 Instance {
-                    id,
-                    outputs,
-                    mailbox: Mailbox { tx: work_tx },
+                    descriptor,
+                    mailbox,
                     thread,
                 },
                 event_rx,
@@ -309,8 +348,9 @@ impl Executor {
 /// reach it and nothing will end it.
 #[derive(Debug)]
 pub struct Instance {
-    id: String,
-    outputs: Vec<String>,
+    /// What the instance was told about itself (ABI §5.2), and the answer to every question
+    /// anyone outside its thread asks about its identity and its ports.
+    descriptor: Descriptor,
     mailbox: Mailbox,
     thread: std::thread::JoinHandle<()>,
 }
@@ -321,16 +361,17 @@ impl Instance {
         &self.mailbox
     }
 
+    /// The instance id from its descriptor (ABI §5.2).
+    pub fn id(&self) -> &str {
+        &self.descriptor.instance_id
+    }
+
     /// What an [`Event::Emitted`]'s port index is called (ABI §5.2, §6.4).
     ///
     /// Kept here rather than in the event, because it is the same answer for every emission
     /// this instance will ever make and the descriptor fixes it for the instance's life.
     pub fn output_name(&self, port: u32) -> Option<&str> {
-        if port == eio_host_core::PORT_ERR {
-            // ABI §6.4: reserved, on every block, absent from the manifest's outputs.
-            return Some("err");
-        }
-        self.outputs.get(port as usize).map(String::as_str)
+        self.descriptor.output_name(port)
     }
 
     /// Waits for the instance's thread to finish.
@@ -342,7 +383,7 @@ impl Instance {
     pub fn join(self) {
         drop(self.mailbox);
         if self.thread.join().is_err() {
-            tracing::error!(instance = %self.id, "the instance thread panicked");
+            tracing::error!(instance = %self.descriptor.instance_id, "the instance thread panicked");
         }
     }
 }
@@ -353,8 +394,7 @@ mod tests {
 
     /// A mailbox with no reader, so `try_send` fills it and `send` would wait forever.
     fn mailbox(capacity: usize) -> (Mailbox, mpsc::Receiver<Work>) {
-        let (tx, rx) = mpsc::channel(capacity);
-        (Mailbox { tx }, rx)
+        Mailbox::pair(capacity)
     }
 
     /// A work item that is not [`Work::Stop`], so a test can tell the two apart.
