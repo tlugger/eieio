@@ -28,6 +28,18 @@ One file per area of the specification. Each is a JSON object with a `vectors` a
 |`budgets.json`|§9 bounds, at the floors|
 |`analysis.json`|§10 static analysis, signal-dependence classification|
 
+`properties/` is a **second suite** in the same directory, and a different question: not
+what an expression evaluates to, but whether that value satisfies the property type a
+manifest declared, and what a guest decodes when it does (ABI §7.1, §11.1). Its vectors
+carry a `type` field the language runner would reject, so it is a subdirectory rather than
+another file — the language runner reads top-level files only. `crates/host-core/tests/`
+runs it, because `host-core` is the only crate that depends on both halves of the rule:
+`expr` evaluates and `manifest`'s `PropertyType` decides.
+
+|File|Covers|
+|---|---|
+|`properties/types.json`|ABI §11.1 property types: what each satisfies, the int → float promotion and its exactness boundaries, and `RESULT_TYPE`|
+
 ## A vector
 
 ```json
@@ -52,6 +64,14 @@ One file per area of the specification. Each is a JSON object with a `vectors` a
 |`budget`|no|Budget overrides, for vectors about §9. Any subset of `fuel`, `depth`, `range`, `value_bytes`, `expr_bytes`. Omitted knobs take the §9 reference defaults, and a host clamps any value below its §9 floor *up* — so a vector asking for `{"fuel": 1}` is asserting behaviour at the floor, not at 1.|
 |`spec`|no|The section this vector comes from. Documentation for the reader.|
 |`note`|no|Why this vector exists, when that is not obvious.|
+
+A vector in `properties/` uses the same fields with two differences: it carries a required
+`type` — the declared property type, spelled as ABI §11.1 spells it (`bool`, `int`, `float`,
+`string`, `bytes`, `any`) — and its `expect` is the value a **guest decodes**, after the
+type check and any promotion. `{"type": "float", "expr": "22", "expect": {"float": 22}}` is
+the promotion asserted end to end: an int expression, a float property, and a float on the
+wire. The only `error` it admits is `RESULT_TYPE`; `budget`, `render` and `signal_dependent`
+are the language suite's and are not accepted there.
 
 `"error": "ANY"` asserts that the expression is **rejected**, without pinning which code
 says so. It exists because §10 makes exactly that distinction: for a statically-invalid
@@ -98,10 +118,12 @@ trusting it: `crates/expr/tests/vectors.rs` walks the builtin table, the special
 list, and the §8 error codes, and fails if any of them has no vector. Adding a builtin
 without a vector breaks the build, which is the intended outcome.
 
-`RESULT_TYPE` is the one exempt error code. It is the *host* checking an evaluated value
-against the manifest's declared property type (ABI §7.1, §11), not an interpreter
-outcome — no expression can produce it, so no vector here can. It gets its vectors where
-the behaviour lives, with the host's property-evaluation protocol.
+`RESULT_TYPE` is the one error code exempt from *that* audit. It is the *host* checking an
+evaluated value against the manifest's declared property type (ABI §7.1, §11), not an
+interpreter outcome — no expression can produce it, so no vector in the language files can.
+It is covered instead by `properties/`, which has an audit of its own: every ABI §11.1
+property type must have a vector showing what satisfies it and, `any` excepted, one showing
+what it refuses. Adding a property type without vectors breaks the build too.
 
 ## Adding vectors
 

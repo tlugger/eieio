@@ -358,7 +358,7 @@ The vector file format is itself a contract, and **`expr-tests/README.md` is its
 
 Two rules of this document shape the format and are worth restating where an implementer will meet them. A vector asserting a **static** rejection (§10) does not pin an error code — hosts MUST agree on whether an expression is rejected, not on how they describe the fault — and a vector asserting `FUEL` pins the code and the floor guarantee, never the step at which the code arrives (§9.1).
 
-Coverage is not left to good intentions: the suite's runner enumerates the builtin table, the special forms, and this section's error codes, and fails if any of them has no vector. `RESULT_TYPE` is the sole exemption, being the host's property-type check (ABI §7.1) rather than an interpreter outcome.
+Coverage is not left to good intentions: the suite's runner enumerates the builtin table, the special forms, and this section's error codes, and fails if any of them has no vector. `RESULT_TYPE` is the sole exemption *there*, being the host's property-type check (ABI §7.1, §11.1) rather than an interpreter outcome — no expression can produce it. It is not uncovered: `expr-tests/properties/` is a second host-agnostic suite in the same corpus, whose vectors carry the declared property type alongside the expression and assert the value a guest decodes after the check and any promotion. It is audited the same way — every ABI §11.1 property type must have a vector for what it accepts and, `any` excepted, one for what it refuses — and a host that implements the expression language without the property check passes one suite and fails the other, which is the distinction being drawn.
 
 ---
 

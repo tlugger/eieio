@@ -1,0 +1,296 @@
+{
+  "vectors": [
+    {
+      "name": "bool-property-takes-a-bool",
+      "expr": "(> 2 1)",
+      "type": "bool",
+      "expect": {
+        "bool": true
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "int-property-takes-an-int",
+      "expr": "(+ 20 2)",
+      "type": "int",
+      "expect": {
+        "int": 22
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "float-property-takes-a-float",
+      "expr": "21.5",
+      "type": "float",
+      "expect": {
+        "float": 21.5
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "string-property-takes-a-string",
+      "expr": "(str \"t=\" 21)",
+      "type": "string",
+      "expect": {
+        "str": "t=21"
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "bytes-property-takes-bytes",
+      "expr": "$raw",
+      "type": "bytes",
+      "expect": {
+        "bytes": "61"
+      },
+      "spec": "ABI §11.1",
+      "signal": {
+        "raw": {
+          "bytes": "61"
+        }
+      }
+    },
+    {
+      "name": "any-takes-a-null",
+      "expr": "null",
+      "type": "any",
+      "expect": {
+        "null": null
+      },
+      "spec": "ABI §11.1",
+      "note": "`any` is the whole §6.3 space, and the only type a null can reach"
+    },
+    {
+      "name": "any-takes-an-array",
+      "expr": "(arr 1 2)",
+      "type": "any",
+      "expect": {
+        "arr": [
+          {
+            "int": 1
+          },
+          {
+            "int": 2
+          }
+        ]
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "any-takes-a-map",
+      "expr": "(dict \"a\" 1)",
+      "type": "any",
+      "expect": {
+        "map": {
+          "a": {
+            "int": 1
+          }
+        }
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "a-string-does-not-satisfy-float",
+      "expr": "\"hot\"",
+      "type": "float",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §7.1",
+      "note": "the shape every mistyped property takes: statically valid, wrong at the boundary"
+    },
+    {
+      "name": "a-bool-does-not-satisfy-int",
+      "expr": "true",
+      "type": "int",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "an-int-does-not-satisfy-bool",
+      "expr": "1",
+      "type": "bool",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "truthiness (§4.1) decides what an `if` does with a value, never what a type accepts"
+    },
+    {
+      "name": "a-string-does-not-satisfy-bytes",
+      "expr": "\"a\"",
+      "type": "bytes",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "bytes reach an expression only from a signal (§6.3); there is no builtin that makes them, so the two types are never interchangeable by accident"
+    },
+    {
+      "name": "bytes-do-not-satisfy-string",
+      "expr": "$raw",
+      "type": "string",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "signal": {
+        "raw": {
+          "bytes": "61"
+        }
+      }
+    },
+    {
+      "name": "a-null-does-not-satisfy-string",
+      "expr": "null",
+      "type": "string",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "null reaches `any` and nothing else"
+    },
+    {
+      "name": "an-array-does-not-satisfy-string",
+      "expr": "(arr 1)",
+      "type": "string",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "a-map-does-not-satisfy-int",
+      "expr": "(dict \"a\" 1)",
+      "type": "int",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "an-int-reaches-a-float-property-as-a-float",
+      "expr": "22",
+      "type": "float",
+      "expect": {
+        "float": 22
+      },
+      "spec": "ABI §7.1, §11.1",
+      "note": "the promotion is encoded, not merely permitted: a guest reading a `float` never decodes an int"
+    },
+    {
+      "name": "int-to-float-is-exact-at-two-to-the-53",
+      "expr": "9007199254740992",
+      "type": "float",
+      "expect": {
+        "float": 9007199254740992
+      },
+      "spec": "ABI §11.1",
+      "note": "the largest integer with every integer below it representable"
+    },
+    {
+      "name": "int-to-float-is-exact-at-minus-two-to-the-53",
+      "expr": "-9007199254740992",
+      "type": "float",
+      "expect": {
+        "float": -9007199254740992
+      },
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "int-to-float-is-exact-at-two-to-the-62",
+      "expr": "4611686018427387904",
+      "type": "float",
+      "expect": {
+        "float": 4611686018427387904
+      },
+      "spec": "ABI §11.1",
+      "note": "exactness is significant bits, not magnitude: one bit set, however large"
+    },
+    {
+      "name": "int-to-float-is-exact-at-i64-min",
+      "expr": "-9223372036854775808",
+      "type": "float",
+      "expect": {
+        "float": -9223372036854775808
+      },
+      "spec": "ABI §11.1",
+      "note": "-2^63 is a power of two and therefore exact, at the very edge of the int range"
+    },
+    {
+      "name": "int-to-float-is-inexact-at-two-to-the-53-plus-one",
+      "expr": "9007199254740993",
+      "type": "float",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "fifty-four significant bits; the first integer binary64 cannot hold"
+    },
+    {
+      "name": "int-to-float-is-inexact-at-i64-max",
+      "expr": "9223372036854775807",
+      "type": "float",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "the case a round-trip gets wrong: i64::MAX rounds up to 2^63, which a saturating float-to-int conversion returns as i64::MAX, reporting an exactness that did not happen"
+    },
+    {
+      "name": "a-float-never-satisfies-int",
+      "expr": "1.5",
+      "type": "int",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "promotion goes one way; `(int x)` is how an expression asks for the truncation"
+    },
+    {
+      "name": "an-integral-float-still-never-satisfies-int",
+      "expr": "1.0",
+      "type": "int",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1",
+      "note": "accepting it would make the check depend on how the value was spelled"
+    },
+    {
+      "name": "negative-zero-never-satisfies-int",
+      "expr": "-0.0",
+      "type": "int",
+      "error": "RESULT_TYPE",
+      "spec": "ABI §11.1"
+    },
+    {
+      "name": "the-type-check-applies-per-signal",
+      "expr": "$temp",
+      "type": "float",
+      "signal": {
+        "temp": {
+          "int": 21
+        }
+      },
+      "expect": {
+        "float": 21
+      },
+      "spec": "ABI §7.1, §11.1",
+      "note": "the declared type constrains the evaluated value, so it is checked against the signal in hand"
+    },
+    {
+      "name": "a-signal-attribute-of-the-wrong-type-is-result-type",
+      "expr": "$label",
+      "type": "float",
+      "signal": {
+        "label": {
+          "str": "kitchen"
+        }
+      },
+      "error": "RESULT_TYPE",
+      "spec": "ABI §7.1",
+      "note": "per-signal, and the instance is unaffected — the failure belongs to this call"
+    },
+    {
+      "name": "any-accepts-whatever-a-signal-carries",
+      "expr": "$anything",
+      "type": "any",
+      "signal": {
+        "anything": {
+          "arr": [
+            {
+              "bool": false
+            }
+          ]
+        }
+      },
+      "expect": {
+        "arr": [
+          {
+            "bool": false
+          }
+        ]
+      },
+      "spec": "ABI §11.1"
+    }
+  ]
+}
