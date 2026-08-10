@@ -123,8 +123,43 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  publish:
+  # A binary that builds and does not run is a release nobody can use, and the artifact
+  # is the only thing anyone downloads. This job takes it from the artifact store onto a
+  # runner that has never seen this repository — no checkout, no toolchain, nothing the
+  # build left behind — and runs it.
+  #
+  # Native target only: an aarch64 binary cannot execute on an x86_64 runner without an
+  # emulator, and standing one up to run `--version` would be testing the emulator. The
+  # cross artifact's architecture is asserted instead, which is the failure that actually
+  # happens — a "cross" build that silently produced the host's architecture.
+  smoke:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the artifacts
+        # actions/download-artifact v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Run the native binary, and check the cross one is cross
+        run: |
+          set -euo pipefail
+          ( cd dist && sha256sum --check --strict ./*.sha256 )
+
+          tar --extract --gzip --file dist/eio-daemon-x86_64-unknown-linux-gnu.tar.gz
+          ./eio-daemon --version
+          ./eio-daemon --help > /dev/null
+          echo "the native binary runs on a machine that only downloaded it"
+
+          rm -f eio-daemon
+          tar --extract --gzip --file dist/eio-daemon-aarch64-unknown-linux-gnu.tar.gz
+          file ./eio-daemon | tee /dev/stderr | grep --quiet "ARM aarch64"
+          echo "the cross binary is genuinely aarch64"
+
+  publish:
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     # Only a tag is a release. A `workflow_dispatch` rehearsal builds and stops here,
     # which is what makes it safe to run against a branch.
