@@ -122,7 +122,7 @@ pub use instance::{
     check_required_exports,
 };
 pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer, Outbound};
-pub use prop::{CompileError, PropContext, PropFailure, PropertySource};
+pub use prop::{CompileError, PropContext, PropFailure, PropertySource, ResolveError, resolve};
 pub use router::{
     Connection, Deliveries, End, Endpoint, Overflow, PORT_ERR_NAME, Port, RouteError, Routes,
     Target,

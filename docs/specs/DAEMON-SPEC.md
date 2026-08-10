@@ -13,7 +13,8 @@ Monorepo workspace. The load-bearing split is **host-core vs daemon**: everythin
 ```
 crates/
   host-core/     ★ ABI implementation: lifecycle driver, memory conventions,
-                   status/size protocol, capability validation, router core
+                   status/size protocol, capability validation, router core,
+                   property resolution (ABI §11.1's required/default rule)
   expr/          ★ Expression language: parser, static analysis, interpreter,
                    budgets (EXPR-SPEC). no_std. Also compiled to WASM for
                    Designer in-browser linting (DESIGNER-SPEC §5)
@@ -31,6 +32,8 @@ The expression conformance vectors are **not** here: they are data files at the 
 ★-marked crates are shared with the leaf runtime and MUST stay `no_std`-compatible (`alloc` allowed). `daemon` and `cargo-eio` are `std` binaries; `block-sdk` is `no_std` by necessity (it compiles into guests).
 
 Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (leaf) MUST pass the same harness — the shared crate is how divergence is prevented structurally, not just tested for.
+
+**Where a rule lives follows from what it is about, not from who happens to call it.** ABI §11.1's `required`/`default` precedence is the worked example, because all three plausible homes were arguable. Not `manifest`: a manifest describes what a *block* says about itself, and a deployment's supplied values are not that. Not `daemon`: the rule is pure ABI semantics with no engine and no configuration *format* in it, and leaving it there would mean the leaf runtime — whose configuration source is shaped differently — reimplementing the precedence from scratch, which is the silent divergence this split exists to prevent. So `host-core`, which is also the only crate that *can* hold it: the rule consumes `manifest`'s `Manifest` and produces `host-core`'s `PropertySource`, and the dependency runs host-core → manifest. The daemon reaches it from `--prop` flags today and from service files later; the leaf reaches it from whatever it reads. One implementation, two hosts.
 
 **Naming.** Directory names are exactly as listed above. Package names are `eio`-prefixed and imported with underscores:
 

@@ -20,7 +20,6 @@ mod engine;
 mod executor;
 mod instance;
 mod json_batch;
-mod props;
 mod router;
 mod run;
 

@@ -55,7 +55,7 @@ use core::cell::RefCell;
 use core::fmt;
 
 use eio_expr::{EvalLimits, Evaluator, Expr};
-use eio_manifest::PropertyType;
+use eio_manifest::{Manifest, PropertyType};
 use eio_signal::Batch;
 
 use crate::SIGNAL_NONE;
@@ -628,4 +628,98 @@ fn code_for(error: eio_expr::Error) -> ErrorCode {
         eio_expr::ErrorCode::NoSignal => ErrorCode::NoSignalContext,
         _ => ErrorCode::Expr,
     }
+}
+
+// ── resolving a deployment's values against the manifest (ABI §11.1) ─────────
+
+/// Why a property table could not be resolved (ABI §11.1).
+///
+/// Lives here rather than in `eio_manifest` because §11.1's `required`/`default` rule is
+/// about a *deployment*, and a manifest describes what a block says about itself. It lives
+/// in a shared crate rather than in the daemon because the rule is pure ABI semantics with
+/// no engine and no configuration *format* in it: the daemon reaches it from `--prop` flags
+/// and later from service files, the leaf runtime from whatever its configuration is, and
+/// both get the same precedence rather than one each (DAEMON §1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolveError {
+    /// A `required` property with no supplied value and no `default`.
+    Required {
+        /// The property's name, which is what the deployer wrote or failed to.
+        name: String,
+    },
+    /// A supplied value for a property the block does not declare.
+    ///
+    /// Rejected rather than ignored, for the reason ABI §11.1 rejects an unknown manifest
+    /// field: a silently ignored `--prop tempreature=...` is a block running with its
+    /// default and a deployer who believes otherwise.
+    Unknown {
+        /// The name that was supplied.
+        name: String,
+    },
+}
+
+impl fmt::Display for ResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveError::Required { name } => write!(
+                f,
+                "property {name:?} is required and has no value: supply one, or give the block a \
+                 manifest default (ABI §11.1)"
+            ),
+            ResolveError::Unknown { name } => {
+                write!(f, "the block declares no property named {name:?}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for ResolveError {}
+
+/// Resolves every property the block declares, in `prop_id` order (ABI §11.1).
+///
+/// `supplied` is what the deployment provided, keyed by property name. Every entry in it
+/// must name a declared property; every declared property comes back, in manifest order,
+/// whether or not it has a value.
+///
+/// The rule, in full:
+///
+/// 1. The supplied expression, if the deployment gave one.
+/// 2. Otherwise the manifest's `default`, if it has one. A default is an expression like any
+///    other and may be signal-dependent.
+/// 3. Otherwise nothing — and *that* is a configuration failure exactly when the property is
+///    `required`. An unrequired property with no value keeps its `prop_id` and answers
+///    `ERR_NOT_FOUND` (ABI §7.1).
+///
+/// Order is the manifest's, because position in `properties` *is* the `prop_id` (ABI §5.2,
+/// §11), and the instance descriptor is built from the same list. Nothing here evaluates
+/// anything: the result is expression *sources*, which [`PropContext::compile`] turns into
+/// something callable.
+pub fn resolve<'a>(
+    manifest: &'a Manifest,
+    supplied: &'a BTreeMap<String, String>,
+) -> Result<Vec<PropertySource<'a>>, ResolveError> {
+    if let Some(name) = supplied
+        .keys()
+        .find(|name| manifest.prop_id(name).is_none())
+    {
+        return Err(ResolveError::Unknown { name: name.clone() });
+    }
+
+    manifest
+        .properties
+        .iter()
+        .map(|property| {
+            let source = supplied
+                .get(&property.name)
+                .map(String::as_str)
+                .or(property.default.as_deref());
+            match source {
+                Some(source) => Ok(PropertySource::new(&property.name, property.ty, source)),
+                None if property.required => Err(ResolveError::Required {
+                    name: property.name.clone(),
+                }),
+                None => Ok(PropertySource::unset(&property.name, property.ty)),
+            }
+        })
+        .collect()
 }

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use eio_host_core::{
     Configured, Configuring, Descriptor, Limits, Outcome, PropContext, Running, Starting, Status,
-    Trap, exports::optional,
+    Trap, exports::optional, resolve,
 };
 use eio_manifest::{Abi, Manifest};
 use eio_signal::Batch;
@@ -38,7 +38,6 @@ use tokio::sync::{mpsc, oneshot};
 use crate::core_fns::{Core, Emission};
 use crate::engine::{Guest, Runtime};
 use crate::executor::{Event, Work};
-use crate::props::resolve;
 use crate::router::{Discard, Outlet};
 
 /// Everything needed to build one instance, as a caller supplies it.
