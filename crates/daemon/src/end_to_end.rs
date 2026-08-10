@@ -1019,16 +1019,37 @@ fn an_emission_on_an_ordinary_unrouted_output_is_not_counted() {
 }
 
 #[tokio::test]
-async fn a_wired_instance_still_stops_when_every_sender_is_gone() {
-    // DAEMON §5's "every sender gone is a stop", for an instance inside a service. It holds
-    // only for as long as a routing instance holds senders for the receivers it emits into
-    // and no others: an outlet given the whole service's mailboxes would keep every instance
-    // — itself included — reachable forever, and nothing here would ever stop.
-    //
-    // No `Stop` is posted. Dropping the handles is the whole test: the source loses its last
-    // sender and stops, which drops its outlet, which is the sink's last sender.
+async fn an_unserviced_instance_stops_when_every_sender_is_gone() {
+    // DAEMON §5's "every sender gone is a stop", where it is the terminator: an instance with
+    // no service around it. No `Stop` is posted — dropping the handle is the whole test, and
+    // reaching the assertion means `eio_stop` ran rather than the thread idling forever.
     let executor = Executor::new(Budgets::default(), 4).expect("an executor");
-    let service = Service::spawn(
+    let (instance, mut events) = executor
+        .spawn(InstanceSpec {
+            props: echo_props(),
+            ..spec("echo.wat")
+        })
+        .await
+        .expect("it starts");
+
+    instance.join();
+    let events = drain(&mut events).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Stopped { .. })),
+        "the instance ran eio_stop rather than idling: {events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_serviced_instance_stops_on_an_explicit_stop() {
+    // The other half of DAEMON §5, and the reason `Service::stop` exists. A service holds a
+    // mailbox for every instance — through its handles and through the registry every outlet
+    // routes by (§6, §8) — so "every sender gone" never becomes true while the service does.
+    // The explicit `Stop` is what ends a serviced instance, and this is the test that it does.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
         &executor,
         vec![
             instance("echo.wat", "source", echo_props()),
@@ -1039,6 +1060,140 @@ async fn a_wired_instance_still_stops_when_every_sender_is_gone() {
     .await
     .expect("it starts");
 
+    service.stop().await;
+    for id in ["source", "sink"] {
+        let events = drain(service.events(id).expect("its events")).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Stopped { .. })),
+            "{id} ran eio_stop: {events:#?}"
+        );
+    }
+    service.join();
+}
+
+// ── restart (DAEMON §8's mechanism) ──────────────────────────────────────────
+
+#[tokio::test]
+async fn restarting_an_instance_leaves_every_inbound_connection_delivering_to_it() {
+    // The whole reason mailboxes are reached through a registry (DAEMON §5, §6, §8). `b` is
+    // restarted, which gives it a mailbox `a`'s outlet has never seen; `a` then emits, and
+    // the batch has to arrive at `c` through the *new* `b`. With senders resolved once at
+    // spawn time, `a` would still hold the dead thread's channel and every delivery into the
+    // restarted instance would be `DiscardReason::Gone` forever — supervision would restart
+    // the block and silently sever it from the graph.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![
+            instance("echo.wat", "a", echo_props()),
+            instance("echo.wat", "b", echo_props()),
+            instance("echo.wat", "c", echo_props()),
+        ],
+        &[
+            connect(("a", "out"), ("b", "in")),
+            connect(("b", "out"), ("c", "in")),
+        ],
+    )
+    .await
+    .expect("it starts");
+
+    // The middle one, so the assertion needs both an inbound connection that must follow the
+    // restart and an outbound one that must still reach the far end.
+    service.restart(&executor, 1).await.expect("b restarts");
+
+    // ABI §5.1: "restart = new instance". The replacement configured and started from
+    // scratch rather than resuming anything.
+    let booted = until_statuses(service.events("b").expect("its events"), 2).await;
+    assert_eq!(
+        statuses(&booted),
+        [Status::Ok, Status::Ok],
+        "a fresh eio_configure and eio_start: {booted:#?}"
+    );
+
+    post(service.instance("a").expect("it is there"), deliver(0)).await;
+
+    // Walked down the chain rather than waited on at the far end, and the order is what
+    // makes it deterministic: an instance routes what a callback emitted *before* it takes
+    // the next work item, so an instance that has stopped has already routed everything it
+    // is going to. Draining `a` therefore proves the batch reached `b`'s mailbox, and
+    // draining `b` proves it reached `c`'s — at which point `c`'s own `Stop` queues behind
+    // it. The alternative, waiting on `c` for a batch that a severed graph never sends,
+    // would hang CI instead of failing it.
+    // `b`'s configure and start were read above, so only its delivery and its stop are left.
+    for (id, remaining) in [("a", 4), ("b", 2)] {
+        post(service.instance(id).expect("it is there"), Work::Stop).await;
+        let seen = drain(service.events(id).expect("its events")).await;
+        assert_eq!(
+            statuses(&seen).len(),
+            remaining,
+            "{id} took the delivery and then the stop: {seen:#?}"
+        );
+        assert!(
+            statuses(&seen).iter().all(|status| status.is_ok()),
+            "{id}: {seen:#?}"
+        );
+    }
+
+    post(service.instance("c").expect("it is there"), Work::Stop).await;
+    let seen = drain(service.events("c").expect("its events")).await;
+    assert_eq!(
+        statuses(&seen),
+        [Status::Ok; 4],
+        "the downstream still receives across a restart: {seen:#?}"
+    );
+
+    service.join();
+}
+
+#[tokio::test]
+async fn a_restarted_instance_keeps_its_identity_and_its_ports() {
+    // A restart replaces the instance, not the deployment: it is the same descriptor (ABI
+    // §5.2), so the connection table resolved against it at spawn time still describes it.
+    // A restart that renumbered a port would have rewired the service behind its own back.
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![instance("echo.wat", "solo", echo_props())],
+        &[],
+    )
+    .await
+    .expect("it starts");
+
+    let before = service
+        .instance("solo")
+        .expect("it is there")
+        .output_name(0)
+        .map(String::from);
+    service.restart(&executor, 0).await.expect("it restarts");
+    let after = service.instance("solo").expect("it is back");
+
+    assert_eq!(after.id(), "solo");
+    assert_eq!(after.output_name(0).map(String::from), before);
+
+    service.stop().await;
+    service.join();
+}
+
+#[tokio::test]
+async fn restarting_an_instance_a_service_does_not_have_is_an_error() {
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![instance("echo.wat", "solo", echo_props())],
+        &[],
+    )
+    .await
+    .expect("it starts");
+
+    let error = service
+        .restart(&executor, 9)
+        .await
+        .expect_err("there is no instance 9");
+    assert!(error.to_string().contains("instance 9"), "{error}");
+
+    service.stop().await;
     service.join();
 }
 
