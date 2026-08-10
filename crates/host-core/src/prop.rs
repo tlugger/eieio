@@ -116,7 +116,7 @@ impl<'a> PropertySource<'a> {
 /// Carries the name as well as the `prop_id` because this is read by a *deployer*, and
 /// "property 3" is not what they wrote in the service file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompileError {
+pub struct PropertyError {
     /// Which property, by index — its `prop_id`, had it compiled.
     pub prop_id: u32,
     /// Which property, by name.
@@ -125,13 +125,60 @@ pub struct CompileError {
     pub error: eio_expr::Error,
 }
 
-impl fmt::Display for CompileError {
+impl fmt::Display for PropertyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "property {} ({}): {}",
             self.name, self.prop_id, self.error
         )
+    }
+}
+
+impl core::error::Error for PropertyError {}
+
+/// Every property that does not compile, in `prop_id` order.
+///
+/// Collected rather than reported one at a time, which is what EXPR §10 asks for: "a
+/// deploy that surfaces one typo per attempt wastes the operator's time". The gate is
+/// conformant either way — the configuration is rejected — so this is §10's diagnostics
+/// half, not its normative one.
+///
+/// Never empty. "This configuration is invalid, and here is nothing" is not a state worth
+/// representing, which is why the list is private and [`first`](Self::first) answers with
+/// a `&PropertyError` rather than an `Option`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileError {
+    properties: Vec<PropertyError>,
+}
+
+impl CompileError {
+    /// Every failing property, in `prop_id` order.
+    pub fn properties(&self) -> &[PropertyError] {
+        &self.properties
+    }
+
+    /// The first failing property — what a caller with room for one line reports.
+    pub fn first(&self) -> &PropertyError {
+        &self.properties[0]
+    }
+}
+
+impl fmt::Display for CompileError {
+    /// One failure reads exactly as it did before this type held a list, so the ordinary
+    /// case did not get noisier for the sake of the rare one.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let [only] = &self.properties[..] {
+            return write!(f, "{only}");
+        }
+        write!(f, "{} properties are invalid: ", self.properties.len())?;
+        for (n, property) in self.properties.iter().enumerate() {
+            if n > 0 {
+                write!(f, "; ")?;
+            }
+            write!(f, "{property}")?;
+        }
+        Ok(())
     }
 }
 
@@ -279,6 +326,9 @@ impl PropContext {
     /// produce. A failure is a configuration rejection, which is why it comes back as
     /// `Err` rather than as something a later `prop` call would discover.
     ///
+    /// **Every** failing property is reported, not just the first (EXPR §10): a deploy that
+    /// surfaces one typo per attempt wastes the operator's time. See [`CompileError`].
+    ///
     /// A folded expression that *fails* is not a rejection (ABI §11.1): budgets are host
     /// configuration and an evaluation failure is a per-signal outcome, so `(/ 1 0)` is a
     /// valid declaration whose `prop` calls answer `ERR_EXPR`. The failure is recorded once,
@@ -301,56 +351,47 @@ impl PropContext {
         let limits = limits.clamped();
         let mut compiled = Vec::with_capacity(props.len());
         let mut failures = Vec::new();
+        let mut rejected: Vec<PropertyError> = Vec::new();
 
         for (index, property) in props.iter().enumerate() {
             let prop_id = index as u32;
-            let fail = |error| CompileError {
-                prop_id,
-                name: property.name.to_owned(),
-                error,
-            };
 
             let body = match property.source {
                 // ABI §11.1: no service value and no default. Nothing to parse, and not a
                 // rejection — `required` is the enforceable half of the pair and whoever
                 // resolved this source already applied it.
-                None => Body::Unset,
-                Some(source) => {
-                    // EXPR §10.1: a PARSE error is a configuration rejection.
-                    let expr = eio_expr::parse(source).map_err(fail)?;
-                    // EXPR §10.3 and the shape rules it obliges. Diagnostics are collected
-                    // by the analyser so an editor can show them all (DESIGNER §5); a host
-                    // has room for one, and rejects on the first.
-                    let analysis = eio_expr::analyze(&expr);
-                    if let Some(error) = analysis.first_error() {
-                        return Err(fail(*error));
-                    }
-
-                    // EXPR §10.2's classification, taken from the analysis that just
-                    // computed it rather than walked for a second time.
-                    if analysis.signal_dependent {
-                        Body::PerSignal(expr)
-                    } else {
-                        // `None` is SIGNAL_NONE, which is what a signal-independent
-                        // expression is defined against; the classifier above is what
-                        // guarantees no sigil can reach it and turn this into NO_SIGNAL.
-                        let answer = evaluate(&expr, property.ty, None, limits);
-                        if let Err(error) = &answer {
-                            failures.push(PropFailure {
-                                prop_id,
-                                signal: None,
-                                error: *error,
-                            });
-                        }
-                        Body::Folded(answer)
-                    }
-                }
+                None => Ok(Body::Unset),
+                Some(source) => Self::compile_one(source, property.ty, prop_id, limits).map(
+                    |(body, failure)| {
+                        failures.extend(failure);
+                        body
+                    },
+                ),
             };
 
-            compiled.push(Compiled {
-                name: property.name.to_owned(),
-                ty: property.ty,
-                body,
+            match body {
+                Ok(body) => compiled.push(Compiled {
+                    name: property.name.to_owned(),
+                    ty: property.ty,
+                    body,
+                }),
+                // Collected, not returned: EXPR §10 asks for every diagnostic at once, so
+                // three bad expressions cost one deploy attempt rather than three.
+                Err(error) => rejected.push(PropertyError {
+                    prop_id,
+                    name: property.name.to_owned(),
+                    error,
+                }),
+            }
+        }
+
+        // `compiled` is indexed by `prop_id`, so it is only sound when nothing was skipped
+        // — which is exactly when `rejected` is empty. Returning here is what keeps the two
+        // in step; a partial `compiled` would misindex every property after the first bad
+        // one.
+        if !rejected.is_empty() {
+            return Err(CompileError {
+                properties: rejected,
             });
         }
 
@@ -371,6 +412,47 @@ impl PropContext {
                 }),
             }),
         })
+    }
+
+    /// One property's source: parsed, analysed, and folded if it is signal-independent.
+    ///
+    /// Returns the body and, for a folded expression that failed, the [`PropFailure`] to
+    /// record. A folded failure is *not* a rejection (ABI §11.1) — budgets are host
+    /// configuration and an evaluation failure is a per-signal outcome — which is why the
+    /// two travel separately rather than as one `Result`.
+    fn compile_one(
+        source: &str,
+        ty: PropertyType,
+        prop_id: u32,
+        limits: EvalLimits,
+    ) -> Result<(Body, Option<PropFailure>), eio_expr::Error> {
+        // EXPR §10.1: a PARSE error is a configuration rejection.
+        let expr = eio_expr::parse(source)?;
+        // EXPR §10.3 and the shape rules it obliges. The analyser collects every
+        // diagnostic within one expression so an editor can show them all (DESIGNER §5);
+        // reporting the first of them is enough to reject this property, and the caller
+        // collects across properties.
+        let analysis = eio_expr::analyze(&expr);
+        if let Some(error) = analysis.first_error() {
+            return Err(*error);
+        }
+
+        // EXPR §10.2's classification, taken from the analysis that just computed it
+        // rather than walked for a second time.
+        if analysis.signal_dependent {
+            return Ok((Body::PerSignal(expr), None));
+        }
+
+        // `None` is SIGNAL_NONE, which is what a signal-independent expression is defined
+        // against; the classifier above is what guarantees no sigil can reach it and turn
+        // this into NO_SIGNAL.
+        let answer = evaluate(&expr, ty, None, limits);
+        let failure = answer.as_ref().err().map(|error| PropFailure {
+            prop_id,
+            signal: None,
+            error: *error,
+        });
+        Ok((Body::Folded(answer), failure))
     }
 
     /// The `eio:core` `prop` implementation, ready to

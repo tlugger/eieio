@@ -58,9 +58,11 @@ fn a_parse_error_rejects_the_configuration() {
     ])
     .expect_err("an unterminated list does not parse");
 
-    assert_eq!(error.prop_id, 1);
-    assert_eq!(error.name, "predicate");
-    assert_eq!(error.error.code, eio_expr::ErrorCode::Parse);
+    assert_eq!(error.first().prop_id, 1);
+    assert_eq!(error.first().name, "predicate");
+    assert_eq!(error.first().error.code, eio_expr::ErrorCode::Parse);
+    // The good property before it is not a failure, so only one is reported.
+    assert_eq!(error.properties().len(), 1);
 }
 
 #[test]
@@ -74,8 +76,8 @@ fn an_unbound_symbol_rejects_the_configuration() {
     )])
     .expect_err("frobnicate is not a builtin");
 
-    assert_eq!(error.name, "predicate");
-    assert_eq!(error.error.code, eio_expr::ErrorCode::Unbound);
+    assert_eq!(error.first().name, "predicate");
+    assert_eq!(error.first().error.code, eio_expr::ErrorCode::Unbound);
 }
 
 #[test]
@@ -89,7 +91,69 @@ fn a_malformed_special_form_rejects_the_configuration() {
     )])
     .expect_err("a let binding must be a (name expr) pair");
 
-    assert_eq!(error.name, "scaled");
+    assert_eq!(error.first().name, "scaled");
+}
+
+#[test]
+fn every_failing_property_is_reported_in_one_pass() {
+    // EXPR §10: "Diagnostics SHOULD be collected rather than reported one at a time...
+    // a deploy that surfaces one typo per attempt wastes the operator's time." Three
+    // distinct faults, three deploy attempts before this collected them.
+    let error = PropContext::compile(&[
+        PropertySource::new("good", PropertyType::Int, "20"),
+        PropertySource::new("unparsable", PropertyType::Bool, "(> $temp"),
+        PropertySource::new("typo", PropertyType::Int, "(frobnicate 1)"),
+        PropertySource::new("also-good", PropertyType::Int, "$n"),
+        PropertySource::new("malformed", PropertyType::Int, "(let (x) x)"),
+    ])
+    .expect_err("three of the five do not compile");
+
+    let reported: Vec<(&str, eio_expr::ErrorCode)> = error
+        .properties()
+        .iter()
+        .map(|property| (property.name.as_str(), property.error.code))
+        .collect();
+    assert_eq!(
+        reported,
+        [
+            ("unparsable", eio_expr::ErrorCode::Parse),
+            ("typo", eio_expr::ErrorCode::Unbound),
+            ("malformed", eio_expr::ErrorCode::Type),
+        ],
+        "every failing property, in prop_id order, with its EXPR §8 code"
+    );
+
+    // `prop_id` is the index in the *original* list, not in the failures: it is what the
+    // guest would have asked for, so renumbering it around the properties that compiled
+    // would point the deployer at the wrong line.
+    let ids: Vec<u32> = error.properties().iter().map(|p| p.prop_id).collect();
+    assert_eq!(ids, [1, 2, 4]);
+
+    // One line per fault, and the count up front (Display).
+    let rendered = error.to_string();
+    assert!(
+        rendered.starts_with("3 properties are invalid: "),
+        "{rendered}"
+    );
+    for name in ["unparsable", "typo", "malformed"] {
+        assert!(rendered.contains(name), "{name} missing from {rendered}");
+    }
+}
+
+#[test]
+fn one_failing_property_reads_as_one_line() {
+    // The ordinary case did not get noisier for the sake of the rare one: a single failure
+    // renders exactly as it did when this error held one property rather than a list.
+    let error = PropContext::compile(&[PropertySource::new(
+        "predicate",
+        PropertyType::Bool,
+        "(frobnicate 1)",
+    )])
+    .expect_err("frobnicate is not a builtin");
+
+    assert_eq!(error.properties().len(), 1);
+    assert_eq!(error.to_string(), error.first().to_string());
+    assert!(error.to_string().starts_with("property predicate (0): "));
 }
 
 #[test]
