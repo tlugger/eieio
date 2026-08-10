@@ -50,10 +50,11 @@
 //! thread that does — one per engine, not one per instance. It holds a *weak* handle, so the
 //! last [`Runtime`] dropping is what ends it; nothing has to remember to shut it down.
 //!
-//! # What is deliberately not here
+//! # Core WASM MVP, and nothing past it
 //!
-//! - **The post-MVP proposal list** (ABI §1, §4.3). [`Runtime::new`] takes wasmtime's
-//!   defaults today, which accept more than core MVP; disabling them is its own issue.
+//! ABI §4.3 puts MVP conformance here and nowhere else — `eio_manifest` deliberately does no
+//! feature gating — so [`MVP`] is the *only* thing standing between a block that uses a
+//! post-MVP proposal and a leaf runtime that will refuse it at flash time.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -61,7 +62,7 @@ use std::time::Duration;
 use eio_host_core::exports::{core_fn, namespace};
 use eio_host_core::{Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind};
 use eio_manifest::MEMORY_EXPORT;
-use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val};
+use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFeatures};
 
 /// The one `eio:core` function a handler could not answer.
 ///
@@ -70,6 +71,17 @@ use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val};
 /// plausible number: ABI §8's `ERR_UNSUPPORTED` is "a valid call, unimplemented on this
 /// host", which is precisely the situation.
 const UNIMPLEMENTED: i32 = eio_host_core::ErrorCode::Unsupported.as_i32();
+
+/// The WebAssembly this host accepts: core MVP, and nothing past it (ABI §1.1, §4.3).
+///
+/// wasmparser's own `MVP` set, less `GC_TYPES`. That flag gates the `externref`/`anyref`
+/// *types* rather than a proposal, and wasmparser folds it into `MVP` only so the later sets
+/// need not repeat it; a wasmtime built without the `gc` cargo feature — this one (DAEMON
+/// §5.1) — refuses to build an engine that leaves it on at all. So the feature set decision
+/// and this one agree, and removing the flag here is what lets them.
+///
+/// What stays enabled is `FLOATS`: MVP has floating point, and so does `expr`.
+const MVP: WasmFeatures = WasmFeatures::MVP.difference(WasmFeatures::GC_TYPES);
 
 /// How often the epoch ticker advances the engine's epoch.
 ///
@@ -216,13 +228,19 @@ pub struct Runtime {
 impl Runtime {
     /// Builds the engine and starts its epoch ticker.
     ///
-    /// The configuration is wasmtime's default plus the two budget mechanisms, which is
-    /// **not yet** ABI §1's "core WASM only": wasmtime enables several post-MVP proposals by
-    /// default, and disabling them is eieio-35h.7's subject. What is already narrower than
-    /// the default is the *feature* set (workspace `Cargo.toml`): threads, the component
-    /// model and GC are compiled out, so no configuration can turn them back on.
+    /// The configuration is ABI §1.1's "core WASM only" plus the two budget mechanisms of
+    /// §10. Narrower still is the *feature* set (workspace `Cargo.toml`): threads, the
+    /// component model and GC are compiled out, so no configuration can turn them back on.
     pub fn new(budgets: Budgets) -> anyhow::Result<Runtime> {
         let mut config = Config::new();
+        // Every proposal off, then exactly [`MVP`] back on — not a list of `wasm_*(false)`
+        // calls. The difference is what happens to the proposal wasmtime enables by default
+        // in some later release: a list admits it silently on the next `cargo update`, and
+        // blocks using it would run here and be refused by wasm3 at flash time, which is the
+        // two-hosts divergence the shared crates exist to prevent (DAEMON §1). Subtracting
+        // from `all()` refuses it instead, on a host nobody has touched.
+        config.wasm_features(WasmFeatures::all(), false);
+        config.wasm_features(MVP, true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
         let engine = wasmtime::Engine::new(&config)?;
@@ -650,6 +668,131 @@ mod tests {
             assert_eq!(CoreFn::from_name(function.name()), Some(function));
         }
         assert_eq!(CoreFn::from_name("frobnicate"), None);
+    }
+
+    /// Compiles `wat` on a real [`Runtime`], as [`Runtime::instantiate`] would.
+    ///
+    /// `Module::new` rather than the whole of `instantiate`, because a post-MVP module is
+    /// refused while it is being *validated* — before there is anything to link, and long
+    /// before the `eio:core` imports or the `memory` export these snippets deliberately lack
+    /// would be looked for. A fixture carrying the full ABI surface would test the same
+    /// rejection while hiding which of several reasons produced it.
+    fn compile(runtime: &Runtime, wat: &str) -> Result<(), wasmtime::Error> {
+        let wasm = wat::parse_str(wat).expect("the snippet assembles");
+        Module::new(&runtime.engine, &wasm).map(drop)
+    }
+
+    #[test]
+    fn a_core_mvp_module_is_accepted() {
+        // The control for every rejection below: this config refuses post-MVP features
+        // rather than refusing WebAssembly. Every instruction here is in the 2017 MVP.
+        compile(
+            &Runtime::new(Budgets::default()).expect("an engine"),
+            r#"(module
+                 (memory (export "memory") 1)
+                 (global $g (mut i32) (i32.const 0))
+                 (func (export "f") (param i32) (result i32)
+                   (global.set $g (local.get 0))
+                   (i32.add (global.get $g) (i32.load (i32.const 0)))))"#,
+        )
+        .expect("core MVP is what this host runs");
+    }
+
+    #[test]
+    fn a_post_mvp_module_is_refused_by_the_engine() {
+        // One engine for the whole table. Each case is a fresh `Module::new`, which is where
+        // the refusal happens; rebuilding the engine per case would re-test `Runtime::new`
+        // eight times and spawn an epoch ticker for each.
+        let runtime = Runtime::new(Budgets::default()).expect("an engine");
+        // ABI §4.3: MVP conformance is enforced here and nowhere else — `eio_manifest`
+        // accepts every one of these. Each is the smallest module that needs its proposal,
+        // paired with the words its rejection has to contain.
+        //
+        // Matching the message is the point rather than an incidental strictness: ABI §4.3
+        // requires the rejection to *name* the proposal, because a deployer holding a valid
+        // manifest and a refused block has nothing else to act on. Each expectation is the
+        // distinctive noun and nothing around it, so wasmtime is free to rephrase the
+        // sentence without failing this — but not free to stop saying what was wrong.
+        for (proposal, needle, wat) in [
+            (
+                "simd",
+                "simd",
+                r#"(module (func (export "f") (result i32)
+                     (i32x4.extract_lane 0 (v128.const i32x4 1 2 3 4))))"#,
+            ),
+            (
+                "bulk memory",
+                "bulk memory",
+                r#"(module (memory 1) (func (export "f")
+                     (memory.copy (i32.const 0) (i32.const 8) (i32.const 8))))"#,
+            ),
+            (
+                "multi-value",
+                "multi-value",
+                r#"(module (func (export "f") (result i32 i32)
+                     (i32.const 1) (i32.const 2)))"#,
+            ),
+            (
+                "tail call",
+                "tail call",
+                r#"(module (func $g (result i32) (i32.const 1))
+                     (func (export "f") (result i32) (return_call $g)))"#,
+            ),
+            (
+                "sign extension",
+                "sign extension",
+                r#"(module (func (export "f") (result i32)
+                     (i32.extend8_s (i32.const 1))))"#,
+            ),
+            (
+                "saturating float-to-int",
+                "saturating float",
+                r#"(module (func (export "f") (result i32)
+                     (i32.trunc_sat_f32_s (f32.const 1))))"#,
+            ),
+            (
+                "reference types",
+                "reference types",
+                r#"(module (table 1 externref) (func (export "f") (result i32)
+                     (table.size 0)))"#,
+            ),
+            // A second linear memory needs no instruction to be past MVP: declaring it is
+            // already the proposal.
+            (
+                "multi-memory",
+                "memories",
+                r#"(module (memory 1) (memory 1))"#,
+            ),
+        ] {
+            let error = compile(&runtime, wat)
+                .expect_err(&format!("{proposal} is past MVP and this host is MVP only"));
+            // `{:?}`, because the sentence naming the proposal is a *cause* — the top line
+            // says only which function failed to compile. This is the same rendering the
+            // deployer gets, since the daemon returns the error out of `main` (ABI §4.3).
+            let message = format!("{error:?}").to_lowercase();
+            assert!(
+                message.contains(needle),
+                "refusing {proposal} has to say so, and said: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasmparsers_mvp_set_is_not_one_this_build_can_ask_for() {
+        // Why [`MVP`] subtracts `GC_TYPES` rather than being wasmparser's set as-is: with
+        // the `gc` cargo feature compiled out, asking for that flag does not merely admit
+        // more WebAssembly, it fails `Engine::new` outright and the daemon does not start.
+        //
+        // Asserting on the unsubtracted set rather than on `MVP`'s own bits, because the
+        // latter would only re-run wasmtime's `difference`. This fails if a wasmtime upgrade
+        // drops `GC_TYPES` from `MVP`, or if the cargo feature comes back — either of which
+        // should be a decision someone makes, not a startup failure someone debugs.
+        let mut config = Config::new();
+        config.wasm_features(WasmFeatures::MVP, true);
+        assert!(
+            wasmtime::Engine::new(&config).is_err(),
+            "wasmparser's MVP set includes GC_TYPES, which this build refuses"
+        );
     }
 
     #[test]

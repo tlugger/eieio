@@ -85,6 +85,10 @@ Import *signatures* are checked when the host links the module, by the engine. T
 
 **MVP conformance (§1) is enforced by the engine, not by manifest validation.** A host configures its engine to accept core WASM MVP and nothing more — wasm3 admits nothing else in the first place, and wasmtime is configured with every post-MVP proposal disabled. A module using a post-MVP feature is therefore refused at instantiation. This is deliberate placement: WASM feature gating is a moving target that engines already track, and duplicating it in the loader would create a second, slower-moving definition of what "MVP" means.
 
+The rejection MUST name the offending proposal. A host that refuses a module without saying which feature it objected to leaves a deployer with a working block, a passing manifest, and nothing to act on.
+
+**Producers MUST target MVP explicitly.** A current Rust toolchain does not emit MVP by default for `wasm32-unknown-unknown` — it uses the bulk-memory proposal for `memory.copy` — so a block built without `-C target-feature=-bulk-memory` is refused by a conformant host. Supplying that flag is the block toolchain's responsibility (SDK §5), not the block author's.
+
 ### 4.4 Custom section
 
 A module SHOULD embed its manifest as a custom section named `eio:manifest` (UTF-8 JSON, identical to the registry manifest). A `.wasm` file is then self-describing without registry metadata. If both are present the registry manifest and embedded manifest MUST be identical; hosts MAY reject on mismatch.

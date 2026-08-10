@@ -82,6 +82,8 @@ One safe wrapper per `eio:*` namespace, present on `Ctx` only when declared (mac
 ```
 cargo eio new <name>         template block repo (CI included)
 cargo eio build              wasm32-unknown-unknown, panic=abort, opt for size,
+                             -C target-feature=-bulk-memory (ABI §4.3: a host
+                             accepts MVP only, and rustc emits memory.copy),
                              embed eio:manifest section, emit manifest.json
 cargo eio test               native tests + harness run (§6)
 cargo eio aot --target esp32s3   WAMR AOT artifact for leaf targets

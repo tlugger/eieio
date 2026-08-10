@@ -439,6 +439,23 @@ fn a_capability_this_host_does_not_implement_is_refused_by_name() {
 }
 
 #[test]
+fn a_post_mvp_module_is_refused_and_the_message_names_the_proposal() {
+    // ABI §1.1 and §4.3: MVP conformance is the engine's, and `post_mvp.wat` is otherwise a
+    // valid block — `eio_manifest` accepts it, as the assertion below insists. Deploying it
+    // would produce a block that runs here and is refused by wasm3 at flash time.
+    eio_manifest::validate(&wasm("post_mvp.wat"), None)
+        .expect("the loader has no opinion about WASM features — only the engine does");
+
+    let error = run_block(&args("post_mvp.wat")).expect_err("SIMD is past MVP");
+    // `{:?}` rather than `{}`, because that is what a deployer sees: the daemon returns this
+    // out of `main`, and anyhow's `Termination` prints the cause chain. The top line says
+    // only which function failed to compile; the actionable sentence is two causes down.
+    let message = format!("{error:?}");
+    assert!(message.contains("SIMD"), "{message}");
+    assert!(message.contains("not enabled"), "{message}");
+}
+
+#[test]
 fn a_module_exporting_an_abi_this_host_does_not_implement_is_refused() {
     // ABI §12 makes the module authoritative, and only running it reveals what it claims —
     // `future_abi.wat`'s manifest says 1.0 while its `eio_abi_version` returns 2.0, so
