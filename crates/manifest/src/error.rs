@@ -1,6 +1,7 @@
 //! Why a manifest was refused (ABI-SPEC §11.1).
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
 use crate::abi::Signature;
@@ -10,6 +11,27 @@ use crate::name::{
 };
 use crate::schema::PropertyType;
 use crate::schema::{Abi, Capability};
+
+/// One property whose `default` is not a valid expression (ABI §11.1, EXPR §10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidDefault {
+    /// The property whose default was rejected.
+    pub property: String,
+    /// The expression error, whose span is a byte offset into the default.
+    pub source: eio_expr::Error,
+}
+
+impl fmt::Display for InvalidDefault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "default for {:?} is invalid: {}",
+            self.property, self.source
+        )
+    }
+}
+
+impl core::error::Error for InvalidDefault {}
 
 /// The reason a manifest was rejected.
 ///
@@ -85,14 +107,12 @@ pub enum Error {
     /// `targets` did not contain `wasm32-unknown-unknown` (ABI §11.1, targets).
     MissingPortableTarget,
 
-    /// A property `default` failed to parse or failed static analysis
-    /// (ABI §11.1, default expressions; EXPR §10).
-    InvalidDefault {
-        /// The property whose default was rejected.
-        property: String,
-        /// The expression error, whose span is a byte offset into the default.
-        source: eio_expr::Error,
-    },
+    /// Every property `default` that failed to parse or failed static analysis, in
+    /// declaration order (ABI §11.1, default expressions; EXPR §10).
+    ///
+    /// All of them rather than the first, because EXPR §10 asks for exactly that: "a deploy
+    /// that surfaces one typo per attempt wastes the operator's time". Never empty.
+    InvalidDefaults(Vec<InvalidDefault>),
 
     /// A signal-independent property `default` folded to a value its declared `type`
     /// does not admit (ABI §11.1, default type-checking).
@@ -195,11 +215,20 @@ impl fmt::Display for Error {
                 f,
                 "targets: must contain \"wasm32-unknown-unknown\" — every block ships the portable module",
             ),
-            Error::InvalidDefault { property, source } => {
-                write!(
-                    f,
-                    "properties: default for {property:?} is invalid: {source}"
-                )
+            Error::InvalidDefaults(defaults) => {
+                // One reads exactly as it did before this variant held a list, so the
+                // ordinary case did not get noisier for the sake of the rare one.
+                if let [only] = &defaults[..] {
+                    return write!(f, "properties: {only}");
+                }
+                write!(f, "properties: {} defaults are invalid: ", defaults.len())?;
+                for (n, invalid) in defaults.iter().enumerate() {
+                    if n > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{invalid}")?;
+                }
+                Ok(())
             }
             Error::DefaultTypeMismatch {
                 property,
@@ -221,7 +250,10 @@ impl core::error::Error for Error {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Error::Json(error) => Some(error),
-            Error::InvalidDefault { source, .. } => Some(source),
+            // The first, which is what a caller with room for one cause reports.
+            Error::InvalidDefaults(defaults) => defaults
+                .first()
+                .map(|invalid| &invalid.source as &(dyn core::error::Error + 'static)),
             _ => None,
         }
     }

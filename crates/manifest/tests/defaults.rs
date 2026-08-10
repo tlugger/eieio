@@ -319,10 +319,99 @@ fn parse_and_analysis_failures_still_come_first() {
     for default in [r#""(+ 1""#, r#""(frobnicate 1)""#, r#""(true)""#, r#""$""#] {
         let json = with_default("int", default);
         match parse(&json) {
-            Err(Error::InvalidDefault { property, .. }) => assert_eq!(property, "p"),
+            Err(Error::InvalidDefaults(defaults)) => {
+                assert_eq!(defaults[0].property, "p")
+            }
             // `$` alone is signal-dependent and parses and analyses fine.
             Ok(_) if default == r#""$""# => {}
             other => panic!("{default}: unexpected outcome {other:?}"),
         }
+    }
+}
+
+#[test]
+fn every_invalid_default_is_reported_in_one_read() {
+    // EXPR §10: "Diagnostics SHOULD be collected rather than reported one at a time...
+    // a deploy that surfaces one typo per attempt wastes the operator's time." The same
+    // rule host-core applies across a service's properties, in the other place expressions
+    // are statically analysed.
+    let json = String::from(
+        r#"{
+            "name": "block",
+            "version": "1.0.0",
+            "abi": { "major": 1, "minor": 0 },
+            "properties": [
+                { "name": "fine", "type": "int", "default": "20" },
+                { "name": "unparsable", "type": "bool", "default": "(> $temp" },
+                { "name": "typo", "type": "int", "default": "(frobnicate 1)" },
+                { "name": "signal-dependent", "type": "int", "default": "$n" },
+                { "name": "malformed", "type": "int", "default": "(let (x) x)" }
+            ]
+        }"#,
+    );
+
+    let Err(Error::InvalidDefaults(defaults)) = parse(&json) else {
+        panic!("three of the five defaults do not analyse");
+    };
+
+    let reported: Vec<(&str, eio_expr::ErrorCode)> = defaults
+        .iter()
+        .map(|invalid| (invalid.property.as_str(), invalid.source.code))
+        .collect();
+    assert_eq!(
+        reported,
+        [
+            ("unparsable", eio_expr::ErrorCode::Parse),
+            ("typo", eio_expr::ErrorCode::Unbound),
+            ("malformed", eio_expr::ErrorCode::Type),
+        ],
+        "every invalid default, in declaration order, with its EXPR §8 code"
+    );
+
+    let rendered = Error::InvalidDefaults(defaults).to_string();
+    assert!(
+        rendered.starts_with("properties: 3 defaults are invalid: "),
+        "{rendered}"
+    );
+    for name in ["unparsable", "typo", "malformed"] {
+        assert!(rendered.contains(name), "{name} missing from {rendered}");
+    }
+}
+
+#[test]
+fn one_invalid_default_reads_as_one_line() {
+    // The ordinary case did not get noisier for the sake of the rare one: a manifest with a
+    // single bad default renders exactly as it did before this error held a list.
+    let json = with_default("int", r#""(frobnicate 1)""#);
+    let error = parse(&json).expect_err("frobnicate is not a builtin");
+    assert_eq!(
+        error.to_string(),
+        "properties: default for \"p\" is invalid: UNBOUND at 1..11: unbound symbol"
+    );
+}
+
+#[test]
+fn a_type_mismatch_waits_for_every_default_to_analyse() {
+    // Precedence, kept across the change: a default that will not analyse is broken in a way
+    // that makes folding meaningless, so all of those are reported before any type check
+    // runs. Here the *later* property is the one that folds wrong, and it does not preempt
+    // the earlier parse failure.
+    let json = String::from(
+        r#"{
+            "name": "block",
+            "version": "1.0.0",
+            "abi": { "major": 1, "minor": 0 },
+            "properties": [
+                { "name": "unparsable", "type": "int", "default": "(+ 1" },
+                { "name": "mismatched", "type": "int", "default": "true" }
+            ]
+        }"#,
+    );
+    match parse(&json) {
+        Err(Error::InvalidDefaults(defaults)) => {
+            assert_eq!(defaults.len(), 1);
+            assert_eq!(defaults[0].property, "unparsable");
+        }
+        other => panic!("analysis failures come first, got {other:?}"),
     }
 }

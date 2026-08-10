@@ -384,7 +384,7 @@ fn targets_without_the_portable_target() {
 fn unparsable_default() {
     rejects!(
         manifest(r#", "properties": [ { "name": "p", "type": "bool", "default": "(> $temp" } ]"#),
-        Error::InvalidDefault { .. }
+        Error::InvalidDefaults(_)
     );
 }
 
@@ -401,7 +401,7 @@ fn default_failing_static_analysis() {
             manifest(&format!(
                 r#", "properties": [ {{ "name": "p", "type": "any", "default": "{expression}" }} ]"#
             )),
-            Error::InvalidDefault { .. },
+            Error::InvalidDefaults(_),
             "static analysis (EXPR §10) is part of manifest validation"
         );
     }
@@ -417,7 +417,10 @@ fn invalid_default_names_its_property() {
         ]"#,
     );
     match parse(&json) {
-        Err(Error::InvalidDefault { property, .. }) => assert_eq!(property, "bad"),
+        Err(Error::InvalidDefaults(defaults)) => {
+            assert_eq!(defaults.len(), 1, "only one of the two is invalid");
+            assert_eq!(defaults[0].property, "bad");
+        }
         other => panic!("expected the bad default to be named, got {other:?}"),
     }
 }
