@@ -9,16 +9,17 @@
 mod mock;
 
 use eio_host_core::{
-    Configured, Configuring, ErrorCode, Outcome, Starting, Status, TrapKind, exports,
+    Configured, Configuring, Delivering, ErrorCode, Outcome, Refusal, Starting, Status, TrapKind,
+    exports,
 };
-use mock::{Allocator, Answer, MockGuest, descriptor};
+use mock::{Allocator, Answer, MockGuest, batch, descriptor, properties};
 
 // ── the legal path ──────────────────────────────────────────────────────────
 
 #[test]
 fn configure_start_stop() {
     let Configuring::Configured(configured) =
-        Configured::configure(MockGuest::healthy(), &descriptor())
+        Configured::configure(MockGuest::healthy(), &descriptor(), properties())
     else {
         panic!("a healthy guest accepts its configuration");
     };
@@ -46,9 +47,12 @@ fn configure_start_stop() {
 #[test]
 fn a_batch_is_delivered_by_the_section_6_1_convention() {
     let running = started(MockGuest::healthy());
-    let batch = b"\x81\xa1\x64temp\x18\x15".to_vec(); // [{"temp": 21}]
+    // [{"temp": 21}] in canonical CBOR (ABI §6.3.1) — 21 is one byte, not `\x18\x15`,
+    // and the driver encodes the batch itself so a caller cannot hand the guest anything
+    // else.
+    let encoded = b"\x81\xa1\x64temp\x15".to_vec();
 
-    let Outcome::Live(running, status) = running.process_signals(0, &batch) else {
+    let Delivering::Delivered(running, status) = running.process_signals(0, batch(&[21])) else {
         panic!("a healthy guest processes a batch");
     };
     assert_eq!(status, Status::Ok);
@@ -60,13 +64,13 @@ fn a_batch_is_delivered_by_the_section_6_1_convention() {
         .expect("process_signals was called");
     assert_eq!(args.len(), 3, "port, ptr, len");
     assert_eq!(args[0], 0, "the input port index leads");
-    assert_eq!(args[2], batch.len() as i32, "the length is the payload's");
+    assert_eq!(args[2], encoded.len() as i32, "the length is the payload's");
 
     let (ptr, len) = (args[1] as u32, args[2] as u32);
     assert_eq!(
         guest.bytes_at(ptr, len),
-        batch,
-        "the batch reached the guest"
+        encoded,
+        "the guest is handed the batch's canonical encoding (ABI §6.3.1)"
     );
     assert_eq!(
         guest.call_count(exports::required::ALLOC),
@@ -121,14 +125,14 @@ fn a_non_zero_callback_return_keeps_the_instance_and_is_counted() {
     );
     let running = started(guest);
 
-    let Outcome::Live(running, status) = running.process_signals(0, b"\x80") else {
+    let Delivering::Delivered(running, status) = running.process_signals(0, batch(&[])) else {
         panic!("a block-level error is not fatal (ABI §8)");
     };
     assert_eq!(status, Status::Failed(ErrorCode::Expr));
     assert_eq!(running.errors(), 1, "counted");
 
     // Still usable — which is the whole claim.
-    let Outcome::Live(running, _) = running.process_signals(0, b"\x80") else {
+    let Delivering::Delivered(running, _) = running.process_signals(0, batch(&[])) else {
         panic!("the instance is still alive after a block-level error");
     };
     assert_eq!(running.errors(), 2, "counted again");
@@ -163,7 +167,9 @@ fn a_non_zero_start_leaves_the_instance_configured() {
         exports::required::START,
         Answer::Returns(ErrorCode::Throttled.as_i32()),
     );
-    let Configuring::Configured(configured) = Configured::configure(guest, &descriptor()) else {
+    let Configuring::Configured(configured) =
+        Configured::configure(guest, &descriptor(), properties())
+    else {
         panic!("configured");
     };
 
@@ -182,7 +188,7 @@ fn a_non_zero_configure_rejects_the_instance() {
         exports::required::CONFIGURE,
         Answer::Returns(ErrorCode::InvalidArg.as_i32()),
     );
-    match Configured::configure(guest, &descriptor()) {
+    match Configured::configure(guest, &descriptor(), properties()) {
         // No instance comes back: ABI §5.1 discards it and surfaces the error to the
         // deployer, so there is nothing here to keep driving.
         Configuring::Rejected(code) => assert_eq!(code, ErrorCode::InvalidArg),
@@ -202,7 +208,7 @@ fn every_call_can_die_and_death_returns_no_instance() {
     ] {
         let guest = MockGuest::healthy().answering(export, Answer::Traps(kind));
 
-        let configuring = Configured::configure(guest, &descriptor());
+        let configuring = Configured::configure(guest, &descriptor(), properties());
         let configured = match configuring {
             Configuring::Configured(configured) => configured,
             Configuring::Dead(trap) => {
@@ -223,13 +229,14 @@ fn every_call_can_die_and_death_returns_no_instance() {
             Starting::Refused(_, code) => panic!("unexpected refusal: {code}"),
         };
 
-        let running = match running.process_signals(0, b"\x80") {
-            Outcome::Live(running, _) => running,
-            Outcome::Dead(trap) => {
+        let running = match running.process_signals(0, batch(&[])) {
+            Delivering::Delivered(running, _) => running,
+            Delivering::Dead(trap) => {
                 assert_eq!(export, exports::required::PROCESS_SIGNALS);
                 assert_eq!(trap.kind, kind);
                 continue;
             }
+            Delivering::Refused(_, refusal) => panic!("unexpected refusal: {refusal}"),
         };
 
         match running.stop() {
@@ -252,10 +259,11 @@ fn a_trap_on_the_second_batch_kills_a_running_instance() {
             then: Box::new(Answer::Traps(TrapKind::Fuel)),
         },
     );
-    let Outcome::Live(running, Status::Ok) = started(guest).process_signals(0, b"\x80") else {
+    let Delivering::Delivered(running, Status::Ok) = started(guest).process_signals(0, batch(&[]))
+    else {
         panic!("the first batch is fine");
     };
-    let Outcome::Dead(trap) = running.process_signals(0, b"\x80") else {
+    let Delivering::Dead(trap) = running.process_signals(0, batch(&[])) else {
         panic!("the second exhausts the budget and the instance is gone");
     };
     assert_eq!(trap.kind, TrapKind::Fuel);
@@ -289,7 +297,8 @@ fn an_allocator_that_lies_kills_the_instance() {
         (Allocator::OutOfBounds, "outside linear memory"),
     ] {
         let guest = MockGuest::healthy().allocating(allocator);
-        let Configuring::Dead(trap) = Configured::configure(guest, &descriptor()) else {
+        let Configuring::Dead(trap) = Configured::configure(guest, &descriptor(), properties())
+        else {
             panic!("{allocator:?} must not be trusted");
         };
         assert_eq!(trap.kind, TrapKind::Engine);
@@ -307,7 +316,7 @@ fn an_allocator_that_refuses_does_not_kill_the_instance() {
     // the truth about itself. A transient memory spike must not be fatal, so the delivery
     // fails with ERR_LIMIT and the instance lives.
     let guest = MockGuest::healthy().allocating(Allocator::Fails);
-    match Configured::configure(guest, &descriptor()) {
+    match Configured::configure(guest, &descriptor(), properties()) {
         // Nothing was configured, so there is no instance to hand back — but the reason is a
         // refusal rather than a trap, and the code says which.
         Configuring::Rejected(code) => assert_eq!(code, ErrorCode::Limit),
@@ -325,7 +334,7 @@ fn a_refused_batch_leaves_a_running_instance_alive() {
     let running = started(guest);
 
     allocator.set(Allocator::Fails);
-    let Outcome::Live(running, status) = running.process_signals(0, b"\x80") else {
+    let Delivering::Delivered(running, status) = running.process_signals(0, batch(&[])) else {
         panic!("a refused allocation is not fatal (ABI §9.5)");
     };
     assert_eq!(status, Status::Failed(ErrorCode::Limit));
@@ -333,11 +342,94 @@ fn a_refused_batch_leaves_a_running_instance_alive() {
 
     // And the next batch, once the pressure is off, is delivered normally.
     allocator.set(Allocator::Honest);
-    let Outcome::Live(running, status) = running.process_signals(0, b"\x80") else {
+    let Delivering::Delivered(running, status) = running.process_signals(0, batch(&[])) else {
         panic!("the instance recovered");
     };
     assert_eq!(status, Status::Ok);
     assert_eq!(running.errors(), 1, "the recovery is not another error");
+}
+
+// ── the host's own refusals (ABI §9.7) ──────────────────────────────────────
+
+#[test]
+fn a_batch_beyond_the_published_limits_never_reaches_the_guest() {
+    // ABI §9.7: the host "never delivers batches beyond" what its descriptor published. A
+    // block that read those numbers and sized its buffers accordingly is entitled to that,
+    // so the refusal happens here rather than in the guest's allocator — and, because the
+    // guest was never called, it is not one of the block's errors (§8).
+    //
+    // `descriptor()` declares one input port and a max_batch of 256; the payload case needs
+    // a smaller `max_payload` than any batch encodes to.
+    let mut tight = descriptor();
+    tight.limits = eio_host_core::Limits::new(4, 2);
+
+    for (descriptor, port, signals, expected) in [
+        (
+            descriptor(),
+            9,
+            batch(&[21]),
+            Refusal::UnknownPort { port: 9, inputs: 1 },
+        ),
+        (
+            tight.clone(),
+            0,
+            batch(&[1, 2, 3]),
+            Refusal::Batch {
+                signals: 3,
+                max_batch: 2,
+            },
+        ),
+        (
+            tight,
+            0,
+            batch(&[21]),
+            Refusal::Payload {
+                bytes: 8,
+                max_payload: 4,
+            },
+        ),
+    ] {
+        let running = started_with(MockGuest::healthy(), &descriptor);
+        let Delivering::Refused(running, refusal) = running.process_signals(port, signals) else {
+            panic!("{expected} must be refused");
+        };
+        assert_eq!(refusal, expected);
+        assert_eq!(running.errors(), 0, "the block did nothing wrong");
+
+        let guest = stop(running);
+        assert_eq!(
+            guest.call_count(exports::required::PROCESS_SIGNALS),
+            0,
+            "a refused batch never reaches the guest"
+        );
+    }
+}
+
+#[test]
+fn a_refusal_says_which_limit_it_was() {
+    // The daemon logs these to an operator and the management API surfaces them (DAEMON
+    // §11), so the limit's *name* is part of what a refusal is — not decoration.
+    assert!(
+        Refusal::Batch {
+            signals: 3,
+            max_batch: 2
+        }
+        .to_string()
+        .contains("max_batch")
+    );
+    assert!(
+        Refusal::Payload {
+            bytes: 11,
+            max_payload: 4
+        }
+        .to_string()
+        .contains("max_payload")
+    );
+    assert!(
+        Refusal::UnknownPort { port: 9, inputs: 1 }
+            .to_string()
+            .contains("input port 9")
+    );
 }
 
 #[test]
@@ -367,7 +459,18 @@ fn the_abi_version_is_read_from_the_guest() {
 /// Configures and starts, requiring both.
 #[track_caller]
 fn started(guest: MockGuest) -> eio_host_core::Running<MockGuest> {
-    let Configuring::Configured(configured) = Configured::configure(guest, &descriptor()) else {
+    started_with(guest, &descriptor())
+}
+
+/// The same, against a descriptor the test varies — the limits, mostly.
+#[track_caller]
+fn started_with(
+    guest: MockGuest,
+    descriptor: &eio_host_core::Descriptor,
+) -> eio_host_core::Running<MockGuest> {
+    let Configuring::Configured(configured) =
+        Configured::configure(guest, descriptor, properties())
+    else {
         panic!("expected the guest to accept its configuration");
     };
     let Starting::Running(running) = configured.start() else {

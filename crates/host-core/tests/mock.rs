@@ -13,12 +13,17 @@
 
 #![allow(dead_code)] // Each test file uses a different part of the mock.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::vec::Vec;
 
-use eio_host_core::{Arg, Engine, EngineError, HostCall, HostFn, Ret, Trap, TrapKind, exports};
+use eio_host_core::{
+    Arg, Engine, EngineError, HostCall, HostFn, PropContext, PropertySource, Ret, Size, Trap,
+    TrapKind, exports,
+};
+use eio_manifest::PropertyType;
+use eio_signal::{Batch, Signal, Value};
 
 /// How the fake guest answers one export.
 #[derive(Debug, Clone)]
@@ -34,7 +39,35 @@ pub enum Answer {
         /// What every call after the first does.
         then: Box<Answer>,
     },
+    /// Read a property through the registered `prop` import, then return `0`.
+    ///
+    /// A guest doing the one thing ABI §7.1 exists for, from *inside* its callback — which
+    /// is the only vantage point from which "the host opened a property scope for this call"
+    /// is observable at all. The answer lands in [`MockGuest::prop_reads`].
+    ReadsProp {
+        /// Which property (ABI §7.1).
+        prop_id: u32,
+        /// Which signal of the current batch, or `SIGNAL_NONE`.
+        signal_idx: u32,
+    },
 }
+
+/// What one [`Answer::ReadsProp`] call got back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropRead {
+    /// The callback the guest was inside when it asked.
+    pub export: String,
+    /// The raw `i32` the import returned — ABI §8's size convention, undecoded.
+    pub raw: i32,
+    /// The bytes written into the out-buffer, when the call wrote any.
+    pub bytes: Vec<u8>,
+}
+
+/// Where a [`Answer::ReadsProp`] call points `prop`'s out-buffer, and how big it says it is.
+///
+/// Well past the bump allocator's start, so a property read never lands on a payload the
+/// driver allocated.
+const PROP_BUF: (u32, u32) = (32 * 1024, 256);
 
 /// What the fake allocator does with a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +102,12 @@ pub struct MockGuest {
     next: u32,
     /// Ranges `eio_free` was called on.
     pub freed: Vec<(u32, u32)>,
+    /// What every [`Answer::ReadsProp`] call got back, in order.
+    ///
+    /// Behind a shared cell because the interesting reads happen inside `eio_configure`,
+    /// and a configuration the guest rejects takes the guest with it (ABI §5.1) — so the
+    /// record has to outlive the engine.
+    pub prop_reads: Rc<RefCell<Vec<PropRead>>>,
 }
 
 impl MockGuest {
@@ -88,7 +127,26 @@ impl MockGuest {
             // ABI §9.5 reserves for failure.
             next: 8,
             freed: Vec::new(),
+            prop_reads: Rc::new(RefCell::new(Vec::new())),
         }
+    }
+
+    /// The same, plus every optional callback, with every callback reading `prop_id`.
+    ///
+    /// `signal_idx` is per export, because a signal-dependent property is only answerable
+    /// inside `eio_process_signals` (ABI §7.1) and a constant one is answerable everywhere.
+    pub fn reading_props(reads: &[(&str, u32, u32)]) -> MockGuest {
+        let mut guest = MockGuest::with_callbacks();
+        for (export, prop_id, signal_idx) in reads {
+            guest.answers.insert(
+                String::from(*export),
+                Answer::ReadsProp {
+                    prop_id: *prop_id,
+                    signal_idx: *signal_idx,
+                },
+            );
+        }
+        guest
     }
 
     /// The same, plus every optional callback of ABI §4.2.
@@ -123,6 +181,42 @@ impl MockGuest {
     /// A handle to the allocator, so a test can change its behaviour mid-life.
     pub fn allocator_handle(&self) -> Rc<Cell<Allocator>> {
         Rc::clone(&self.allocator)
+    }
+
+    /// A handle to the property reads, so a test can read them after the guest is gone.
+    pub fn prop_reads_handle(&self) -> Rc<RefCell<Vec<PropRead>>> {
+        Rc::clone(&self.prop_reads)
+    }
+
+    /// Reads property `prop_id` through the registered `prop` import, as a guest would.
+    fn read_prop(&mut self, export: &str, prop_id: u32, signal_idx: u32) {
+        let (buf, cap) = PROP_BUF;
+        let answer = self.call_import(
+            exports::namespace::CORE,
+            exports::core_fn::PROP,
+            &[
+                Arg::I32(prop_id as i32),
+                Arg::I32(signal_idx as i32),
+                Arg::I32(buf as i32),
+                Arg::I32(cap as i32),
+            ],
+        );
+        let raw = match answer {
+            Some(Ret::I32(raw)) => raw,
+            // No `prop` registered is a test setting the guest up wrong, not a host
+            // behaviour worth recording — say so rather than recording a zero.
+            other => panic!("prop is not registered on this guest: {other:?}"),
+        };
+        let bytes = match Size::decode(raw, cap as usize) {
+            Size::Written(written) => self.bytes_at(buf, written as u32).to_vec(),
+            // A required size or an error code: nothing was written (ABI §8).
+            Size::Required(_) | Size::Failed(_) => Vec::new(),
+        };
+        self.prop_reads.borrow_mut().push(PropRead {
+            export: String::from(export),
+            raw,
+            bytes,
+        });
     }
 
     /// The arguments of the one call to `export`, or `None` if it was never called.
@@ -216,25 +310,29 @@ impl Engine for MockGuest {
         }
 
         let previous = self.calls.iter().filter(|(name, _)| name == export).count() - 1;
-        match self.answers.get(export) {
-            None => Err(Trap::with_detail(
-                TrapKind::Engine,
-                format!("the mock guest does not export {export}"),
-            )),
-            Some(Answer::Returns(value)) => Ok(*value),
-            Some(Answer::Traps(kind)) => Err(Trap::with_detail(*kind, "the mock guest trapped")),
-            Some(Answer::Once { then }) => {
-                if previous == 0 {
-                    Ok(0)
-                } else {
-                    match then.as_ref() {
-                        Answer::Returns(value) => Ok(*value),
-                        Answer::Traps(kind) => {
-                            Err(Trap::with_detail(*kind, "the mock guest trapped"))
-                        }
-                        Answer::Once { .. } => Ok(0),
-                    }
-                }
+        // Resolved to one answer first, so `Once`'s second-and-later behaviour is whatever
+        // it wraps rather than a second, shorter list of the variants it may wrap.
+        let answer = match self.answers.get(export) {
+            None => {
+                return Err(Trap::with_detail(
+                    TrapKind::Engine,
+                    format!("the mock guest does not export {export}"),
+                ));
+            }
+            Some(Answer::Once { then }) if previous > 0 => (**then).clone(),
+            Some(Answer::Once { .. }) => Answer::Returns(0),
+            Some(other) => other.clone(),
+        };
+        match answer {
+            Answer::Returns(value) => Ok(value),
+            Answer::Traps(kind) => Err(Trap::with_detail(kind, "the mock guest trapped")),
+            Answer::Once { .. } => Ok(0),
+            Answer::ReadsProp {
+                prop_id,
+                signal_idx,
+            } => {
+                self.read_prop(export, prop_id, signal_idx);
+                Ok(0)
             }
         }
     }
@@ -325,7 +423,32 @@ pub fn descriptor() -> eio_host_core::Descriptor {
         block: String::from("filter"),
         inputs: vec![String::from("in")],
         outputs: vec![String::from("true"), String::from("false")],
-        props: vec![String::from("predicate")],
+        props: vec![String::from("threshold"), String::from("reading")],
         limits: eio_host_core::Limits::new(64 * 1024, 256),
     }
+}
+
+/// The property context [`descriptor`] describes, one property of each kind (EXPR §10.2).
+///
+/// `prop_id` 0 is signal-*in*dependent, so it is answerable from any callback under
+/// `SIGNAL_NONE`; `prop_id` 1 needs a signal, so it is answerable only inside
+/// `eio_process_signals` (ABI §7.1). Between them they distinguish "a scope is open" from
+/// "a scope is open and carries this call's batch".
+pub fn properties() -> PropContext {
+    PropContext::compile(&[
+        PropertySource::new("threshold", PropertyType::Int, "20"),
+        PropertySource::new("reading", PropertyType::Int, "$temp"),
+    ])
+    .expect("both expressions compile")
+}
+
+/// A batch of `temp` readings, one signal per value.
+pub fn batch(temps: &[i64]) -> Rc<Batch> {
+    let mut batch = Batch::new();
+    for temp in temps {
+        let mut signal = Signal::new();
+        signal.set("temp", Value::Int(*temp));
+        batch.push(signal);
+    }
+    Rc::new(batch)
 }
