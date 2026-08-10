@@ -243,6 +243,34 @@ fn invalid_port_name() {
     );
 }
 
+/// ABI §6.4 gives every block an error port called `err` that it does not declare, so a
+/// block declaring one of its own makes the name mean two things in a service file.
+///
+/// Reserved in both directions, not just outputs. A host resolves a connection's
+/// destination by name before consulting the block's inputs, so an input called `err` is
+/// one no service file could ever address — the same defect, pointing the other way.
+#[test]
+fn a_port_named_err_is_reserved_in_both_directions() {
+    rejects!(
+        manifest(r#", "outputs": [ { "name": "err" } ]"#),
+        Error::ReservedName {
+            site: NameSite::Output
+        }
+    );
+    rejects!(
+        manifest(r#", "inputs": [ { "name": "err" } ]"#),
+        Error::ReservedName {
+            site: NameSite::Input
+        }
+    );
+    // A *property* called `err` collides with nothing: properties are addressed by name in
+    // their own namespace (ABI §11.1, uniqueness), and there is no reserved property.
+    parse(&manifest(
+        r#", "properties": [ { "name": "err", "type": "int" } ]"#,
+    ))
+    .expect("only ports are reserved");
+}
+
 #[test]
 fn invalid_property_name() {
     rejects!(

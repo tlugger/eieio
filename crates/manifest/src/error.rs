@@ -5,7 +5,9 @@ use core::fmt;
 
 use crate::abi::Signature;
 use crate::module::{ExportKind, FuncType};
-use crate::name::{MAX_NAME_BYTES, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN};
+use crate::name::{
+    MAX_NAME_BYTES, PORT_ERR_NAME, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN,
+};
 use crate::schema::PropertyType;
 use crate::schema::{Abi, Capability};
 
@@ -44,6 +46,17 @@ pub enum Error {
     /// or `type` entry outside its closed set. The inner error carries a line and
     /// column, and its message names the valid alternatives for a closed set.
     Json(serde_json::Error),
+
+    /// A port is named [`PORT_ERR_NAME`](crate::PORT_ERR_NAME) (ABI §6.4, §11.1).
+    ///
+    /// Distinct from [`Error::InvalidName`] because the name is well-formed: it is
+    /// refused for colliding with the error port every block has without declaring
+    /// one, which is a different thing to tell an author than "that is not a name".
+    /// The name is not carried — there is only one it can be.
+    ReservedName {
+        /// Which list it appeared in.
+        site: NameSite,
+    },
 
     /// A name violated its pattern or the 64-byte bound (ABI §11.1, names).
     InvalidName {
@@ -159,6 +172,12 @@ impl fmt::Display for Error {
                 write!(f, "manifest is {len} bytes, over the {max}-byte maximum")
             }
             Error::Json(error) => write!(f, "invalid manifest: {error}"),
+            Error::ReservedName { site } => write!(
+                f,
+                "{}: {PORT_ERR_NAME:?} is reserved — every block has an error port by that \
+                 name without declaring one (ABI §6.4)",
+                site.field(),
+            ),
             Error::InvalidName { site, name } => write!(
                 f,
                 "{}: {name:?} is not a valid name — must match {} and be at most {MAX_NAME_BYTES} bytes",

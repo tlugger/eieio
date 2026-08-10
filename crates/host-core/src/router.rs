@@ -31,12 +31,13 @@ use eio_signal::Batch;
 use crate::PORT_ERR;
 use crate::descriptor::Descriptor;
 
-/// The name a service writes for the reserved error output port (ABI §6.4).
+/// The reserved port name, re-exported so this crate and the manifest agree by
+/// construction (ABI §6.4, §11.1).
 ///
-/// [`PORT_ERR`] is on every block without being declared, so it has no name in the
-/// descriptor's `outputs` and needs one here: a service file routes it like any other port,
-/// and an operator reads it in a log line.
-pub const PORT_ERR_NAME: &str = "err";
+/// Defined in `eio_manifest` because refusing a block that declares it is manifest
+/// validation's job. A second definition here would be a second definition of the
+/// contract, which is exactly the drift the shared crates exist to prevent.
+pub use eio_manifest::PORT_ERR_NAME;
 
 /// One end of a connection: a port on an instance (ABI §5.2).
 ///
@@ -186,9 +187,11 @@ impl Routes {
     /// - an instance id or port name nothing declares — a typo that would otherwise become a
     ///   connection that silently never carries anything;
     /// - [`PORT_ERR_NAME`] as a *destination*, because ABI §6.4 makes it an output port;
-    /// - two identical connections, which would deliver the same batch twice;
-    /// - a block that declares an output actually named [`PORT_ERR_NAME`], because then the
-    ///   name in a service file means two things and neither reading is safe to guess.
+    /// - two identical connections, which would deliver the same batch twice.
+    ///
+    /// What it no longer refuses is a block that *declares* a port named
+    /// [`PORT_ERR_NAME`]: `eio_manifest` rejects that document, so such a block never
+    /// loads and no descriptor can reach here carrying one (ABI §11.1).
     pub fn resolve(
         descriptors: &[Descriptor],
         connections: &[Connection],
@@ -368,11 +371,6 @@ pub enum RouteError {
         /// The named port, as the service wrote it.
         port: Port,
     },
-    /// The block declares an output named [`PORT_ERR_NAME`], which ABI §6.4 reserves.
-    ReservedOutputName {
-        /// The instance whose block declares it.
-        instance: String,
-    },
     /// The same connection was declared twice; it would deliver the same batch twice.
     Duplicate {
         /// The emitting end.
@@ -403,10 +401,6 @@ impl fmt::Display for RouteError {
             RouteError::ErrorPortInbound { port } => write!(
                 f,
                 "{port}: {PORT_ERR_NAME} is an output port (ABI §6.4) and cannot receive"
-            ),
-            RouteError::ReservedOutputName { instance } => write!(
-                f,
-                "{instance} declares an output named {PORT_ERR_NAME}, which ABI §6.4 reserves"
             ),
             RouteError::Duplicate { from, to } => {
                 write!(f, "{from} → {to} is declared twice")
@@ -441,11 +435,6 @@ fn instance<'a>(
 /// Resolves the emitting end, where [`PORT_ERR_NAME`] is legal (ABI §6.4).
 fn resolve_output(descriptors: &[Descriptor], port: &Port) -> Result<Endpoint, RouteError> {
     let (index, descriptor) = instance(descriptors, port)?;
-    if descriptor.outputs.iter().any(|name| name == PORT_ERR_NAME) {
-        return Err(RouteError::ReservedOutputName {
-            instance: port.instance.clone(),
-        });
-    }
     if port.port == PORT_ERR_NAME {
         return Ok(Endpoint::new(index, PORT_ERR));
     }

@@ -154,7 +154,9 @@ Owns the service graph: the connection table, fan-out (duplicate batch per recei
 
 **The table is ★-shared; the delivery is not.** Which `(instance, output port)` reaches which `(instance, input port)`, the resolution of a service's *names* into the port indices ABI §5.2 fixes, and the duplication of a batch per receiver have no engine and no queue in them, so they live in `host-core` (§1) and the leaf runtime routes with the same code. What is host-specific is what a queue is and what a full one means.
 
-Endpoints are indices, resolved once at build time, because ABI §5.2 makes the descriptor's name lists *be* the numbering and a table carrying names would re-derive it on every emission. Resolution refuses, rather than warns about: a name nothing declares; the error port as a *destination*, since ABI §6.4 makes it an output; the same connection declared twice, which would deliver one batch twice; and a block that declares an output actually named `err`, which would make that name in a service file mean two things. Fan-out order is declaration order.
+Endpoints are indices, resolved once at build time, because ABI §5.2 makes the descriptor's name lists *be* the numbering and a table carrying names would re-derive it on every emission. Resolution refuses, rather than warns about: a name nothing declares; the error port as a *destination*, since ABI §6.4 makes it an output; and the same connection declared twice, which would deliver one batch twice. Fan-out order is declaration order.
+
+What resolution does *not* check is whether a block declares a port named `err`. ABI §11.1 reserves that name in both directions, so such a manifest is rejected at load and no descriptor carrying one can reach the router. Checking it here as well would be a second statement of a manifest rule, in the crate whose whole purpose is that there is only one.
 
 **`PORT_ERR` is routable and unrouted by default** (ABI §6.4). A service may wire it like any other output; one that does not gets §6.4's "logged and counted" for every error emission, and nothing else — an *ordinary* output nobody wired is an ordinary shape and says nothing.
 

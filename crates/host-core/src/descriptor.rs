@@ -20,6 +20,15 @@ use eio_signal::{Map, Value};
 /// from the manifest in manifest order, because that order *is* the numbering
 /// (`eio_manifest`'s `input_index`, `output_index` and `prop_id` are the other half of this
 /// contract).
+///
+/// **The manifest MUST have passed `eio_manifest::Manifest::validate` first.** The fields
+/// are public and there is no validating constructor, so this is a caller's obligation
+/// rather than a type's guarantee — and the router relies on it. In particular §11.1
+/// reserves `err` as a port name, and [`Routes::resolve`](crate::Routes::resolve) no longer
+/// re-checks it: a hand-built descriptor declaring a port called `err` would have that port
+/// silently shadowed by [`PORT_ERR`](crate::PORT_ERR) rather than refused. Every other name
+/// rule the router trusts — the patterns, the per-direction uniqueness that makes a name
+/// resolve to one index — arrives the same way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Descriptor {
     /// Unique within the service.

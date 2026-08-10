@@ -97,10 +97,11 @@
       "additionalProperties": false,
       "properties": {
         "name": {
-          "description": "The port's name, unique among the block's ports in the same direction. Lowercase; letters, digits, and _ or - between them. No dots: a service file addresses a connection as \"instance.port\", so a dot here would be ambiguous.",
+          "description": "The port's name, unique among the block's ports in the same direction. Lowercase; letters, digits, and _ or - between them. No dots: a service file addresses a connection as \"instance.port\", so a dot here would be ambiguous. \"err\" is reserved in both directions: every block already has an error port by that name without declaring one.",
           "type": "string",
           "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
-          "maxLength": 64
+          "maxLength": 64,
+          "not": { "const": "err" }
         }
       }
     },

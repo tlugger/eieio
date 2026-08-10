@@ -22,7 +22,7 @@ use alloc::string::ToString;
 use eio_signal::Value;
 
 use crate::error::{Error, NameSite};
-use crate::name::{is_port_name, is_ref_name, is_version};
+use crate::name::{PORT_ERR_NAME, is_port_name, is_ref_name, is_version};
 use crate::schema::{Manifest, PORTABLE_TARGET, PropertyType};
 
 impl Manifest {
@@ -63,6 +63,13 @@ impl Manifest {
                         site,
                         name: port.name.clone(),
                     });
+                }
+                // Shape first, then the one reserved string: `err` is a well-formed port
+                // name and is refused for what it collides with, not for how it looks
+                // (ABI §6.4, §11.1). A separate variant because a host reporting it is
+                // saying something different from "that is not a name".
+                if port.name == PORT_ERR_NAME {
+                    return Err(Error::ReservedName { site });
                 }
             }
             unique(site, ports.iter().map(|port| port.name.as_str()))?;

@@ -104,8 +104,8 @@ pub use check::{validate, validate_against};
 pub use error::{Error, ModuleError, NameSite};
 pub use module::{Export, ExportKind, FuncType, Import, MANIFEST_SECTION, Module};
 pub use name::{
-    MAX_NAME_BYTES, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN, is_port_name,
-    is_ref_name, is_version,
+    MAX_NAME_BYTES, PORT_ERR_NAME, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN,
+    is_port_name, is_ref_name, is_version,
 };
 pub use parse::{MAX_MANIFEST_BYTES, MIN_MANIFEST_BYTES, parse, parse_with_max_bytes};
 pub use schema::{Abi, Capability, Manifest, PORTABLE_TARGET, Port, Property, PropertyType};

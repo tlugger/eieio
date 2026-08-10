@@ -199,6 +199,8 @@ Rules 4 and 7 are the only two deviations from RFC 8949 §4.2.1's core determini
 
 `PORT_ERR` is a reserved output port on every block, absent from the manifest's `outputs` list. A guest MAY `emit(PORT_ERR, ...)` signals it cannot process. Routing of the error port is a service-level concern (host/Designer); unrouted error emissions are logged and counted. This gives failure a data path without inventing new mechanisms.
 
+A service file addresses it as `err`, and §11.1 reserves that name in both `inputs` and `outputs` so that no block can declare a port competing with it.
+
 ---
 
 ## 7. Host interface
@@ -403,6 +405,12 @@ Duplicate JSON object keys MUST be rejected rather than resolved last-wins. A pr
 Port and property names exclude `.` deliberately: service files address connections as `from.port -> to.port` and carry property names as TOML bare keys (DAEMON §2), and a dot is ambiguous in both. The block `name` admits `.` because it is a registry reference component (SCOPE §3.6).
 
 These are stated as regexes so that one rule reaches every surface: `manifest.schema.json` publishes them as `pattern`, and the SDK, `cargo eio`, and the Designer validate against the same expression rather than each inventing an approximation.
+
+**`err` is RESERVED as a port name**, in `inputs` and in `outputs` alike, and a manifest declaring one MUST be rejected. §6.4 gives every block an error port it does not declare, and a service file addresses that port by this name; a block declaring its own would make the name mean two things there, and neither reading is safe to guess.
+
+Reserved in both directions even though §6.4's port is an output, because the collision is symmetric. A host resolves a connection's destination by name *before* consulting the block's declared inputs — it has to, since `err` is never among them — so an input called `err` is one no service file could ever wire to. Refusing the block says so at build time instead of shipping it with a port that silently does nothing.
+
+The reservation is a forbidden string rather than an exclusion folded into the pattern above, deliberately: the patterns stay statements about a name's *shape*, which is what keeps them publishable verbatim as a schema `pattern`. Property names are unaffected — properties are their own namespace and reserve nothing.
 
 `version` MUST be a valid Semantic Versioning 2.0.0 string: `MAJOR.MINOR.PATCH`, each numeric component without leading zeros, with an optional `-<pre-release>` and `+<build>`.
 

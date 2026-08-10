@@ -102,20 +102,12 @@ fn the_error_port_is_not_routable_as_a_destination() {
     assert!(error.to_string().contains("6.4"), "{error}");
 }
 
-#[test]
-fn a_block_declaring_an_output_named_err_is_refused_by_name() {
-    // ABI §6.4 reserves the name by making PORT_ERR absent from the manifest's outputs. A
-    // block that declares one anyway makes `err` in a service file mean two things, and
-    // guessing which is worse than refusing.
-    let descriptors = vec![
-        descriptor("source", &["in"], &["err"]),
-        descriptor("sink-a", &["in"], &[]),
-    ];
-    let error = Routes::resolve(&descriptors, &[wire("source", "err", "sink-a", "in")])
-        .expect_err("the name is reserved");
-    assert!(matches!(error, RouteError::ReservedOutputName { .. }));
-    assert!(error.to_string().contains("source"), "{error}");
-}
+// A block declaring a port named `err` is no longer refused here. `eio_manifest` rejects
+// that manifest, so no such block loads and no descriptor can reach `Routes::resolve`
+// carrying one (ABI §11.1, eieio-16g); the test that used to live here moved to
+// `crates/manifest/tests/validate.rs` with the check itself. `ErrorPortInbound` above is a
+// different rule and stays: it is about what a *service file* may write, not what a block
+// may declare.
 
 #[test]
 fn an_unknown_instance_or_port_names_the_offender() {

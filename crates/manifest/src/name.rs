@@ -31,6 +31,24 @@ pub const REF_NAME_PATTERN: &str = "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$";
 /// keys (DAEMON §2) — a dot is ambiguous in both.
 pub const PORT_NAME_PATTERN: &str = "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$";
 
+/// The one port name no block may declare, in either direction (ABI §6.4, §11.1).
+///
+/// ABI §6.4 gives every block an error port it does not declare, and a service file
+/// addresses it by this name. A block declaring a port called `err` would therefore
+/// make the name mean two things in a service file, and neither reading is safe to
+/// guess.
+///
+/// Reserved on *both* sides even though §6.4's port is an output, because the
+/// collision is symmetric: a host resolves a connection's destination by name
+/// before it consults the block's inputs, so an input called `err` is one no
+/// service file could ever wire to. Reserving it refuses the block instead of
+/// shipping it with a port that silently does nothing.
+///
+/// A reservation rather than a pattern exclusion: it is one forbidden string, and
+/// [`PORT_NAME_PATTERN`] stays a statement about a name's *shape* — which is what
+/// keeps it publishable as a schema `pattern`.
+pub const PORT_ERR_NAME: &str = "err";
+
 /// Pattern for `version`: Semantic Versioning 2.0.0, as published by semver.org.
 ///
 /// Reproduced here so `manifest.schema.json` can carry it verbatim. [`is_version`]
