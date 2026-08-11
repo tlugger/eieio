@@ -18,13 +18,15 @@ struct Sink {
 impl Block for Sink {}
 
 #[test]
-fn an_empty_port_enum_is_uninhabited_and_the_block_still_builds() {
-    // `Out` has no variants, which is the honest type: there is no output port to name, so
-    // `ctx.emit(Out::..)` has nothing to complete to. `#[repr(u32)]` is deliberately absent
-    // — Rust rejects it on a zero-variant enum, and there is no discriminant to describe.
+fn a_block_with_no_declared_outputs_still_has_the_error_port() {
+    // `In` is uninhabited when a direction is empty — the honest type, since there is no
+    // port to name. `Out` never is: ABI §6.4 gives every block an error port it does not
+    // declare, so `Out::Err` exists on a block that declares no outputs at all, and a sink
+    // can still report a signal it could not handle.
     assert_eq!(In::Only.index(), 0);
     assert_eq!(In::Only.name(), "only");
-    assert_eq!(core::mem::size_of::<Out>(), 0);
+    assert_eq!(Out::Err.index(), eio_sdk::abi::PORT_ERR);
+    assert_eq!(Out::Err.name(), "err");
 
     let sink = Sink {
         anything: Prop::new(PropId::new(0)),

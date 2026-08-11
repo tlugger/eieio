@@ -21,7 +21,7 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use eio_manifest::{Abi, Manifest, Port, Property, PropertyType};
+use eio_manifest::{Abi, Manifest, PORT_ERR_NAME, Port, Property, PropertyType};
 
 use crate::parse::Block;
 
@@ -186,6 +186,11 @@ fn declared_types(block: &Block) -> TokenStream {
 /// mapping rather than something kept in step with it. `Out::index()` is what `Ctx::emit`
 /// receives, which is what makes emitting to an undeclared port a compile error: there is
 /// no variant to name.
+///
+/// `Out` carries one variant the block did not declare: `Err`, ABI §6.4's reserved port,
+/// whose discriminant is `PORT_ERR` rather than a position. Every block has that port
+/// whether or not it uses it, and §11.1 rejects `err` as a *declared* name, so there is
+/// nothing for it to collide with — see [`port_enum`]'s caller and SDK §1.1.
 fn port_enum(name: &syn::Ident, ports: &[crate::parse::Port], label: &str) -> TokenStream {
     // One pass. The three renderings — the variant, its index, its name — are the same
     // fact three times, and building them together is what keeps them from drifting.
@@ -202,21 +207,49 @@ fn port_enum(name: &syn::Ident, ports: &[crate::parse::Port], label: &str) -> To
         arms.push(quote! { #name::#variant => #text });
     }
 
-    let doc = format!(
-        "The block's {label} ports (ABI §5.2). The discriminant is the port index, so a \
-         port this block does not declare cannot be named."
-    );
+    // ABI §6.4's error port, on `Out` alone: it is an output, and it is not a position in
+    // the manifest — hence `PORT_ERR` by path rather than a number written here, which
+    // would be the sentinel declared twice. A block reaches it as `Out::Err`, because the
+    // generated enum shadows `eio_sdk::Out` in the block's own scope and making an author
+    // write the qualified path for the one port they did not declare is the friction ABI
+    // §14 calls a spec bug.
+    let is_out = name == "Out";
+    if is_out {
+        let doc = format!(
+            "`{PORT_ERR_NAME}` — the reserved error port (ABI §6.4). Every block has it \
+             without declaring it, and its discriminant is `PORT_ERR`, not an index."
+        );
+        variants.push(quote! { #[doc = #doc] Err = ::eio_sdk::abi::PORT_ERR });
+        indices.push(quote! { #name::Err => ::eio_sdk::abi::PORT_ERR });
+        arms.push(quote! { #name::Err => #PORT_ERR_NAME });
+    }
+
+    // Said differently per direction, because it is not the same statement: an input this
+    // block did not declare cannot be named at all, while `Out` carries the one port §6.4
+    // gives every block without declaring it.
+    let doc = if is_out {
+        format!(
+            "The block's {label} ports (ABI §5.2). The discriminant is the port index, so a \
+             port this block does not declare cannot be named — except `Err`, the reserved \
+             error port every block has whether or not it uses it (§6.4)."
+        )
+    } else {
+        format!(
+            "The block's {label} ports (ABI §5.2). The discriminant is the port index, so a \
+             port this block does not declare cannot be named."
+        )
+    };
 
     // An empty enum is uninhabited, which is the honest type for a block with no ports of
     // that direction: there is no value to construct and no call to make. `#[repr(u32)]` is
     // rejected on a zero-variant enum, so it goes on only when there is a discriminant for
-    // it to describe.
-    let repr = (!ports.is_empty()).then(|| quote! { #[repr(u32)] });
+    // it to describe — which `Out` always has, since `Err` is not declared.
+    let repr = (!variants.is_empty()).then(|| quote! { #[repr(u32)] });
 
     // Only outputs are emitted on, so only `Out` converts. Giving `In` the same conversion
     // would let `ctx.emit(In::Default, ..)` compile, which is the mistake the typed enums
     // exist to make unwriteable.
-    let into_sdk = (name == "Out").then(|| {
+    let into_sdk = is_out.then(|| {
         quote! {
             impl ::core::convert::From<#name> for ::eio_sdk::Out {
                 fn from(port: #name) -> ::eio_sdk::Out {

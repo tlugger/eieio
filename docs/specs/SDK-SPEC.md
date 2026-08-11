@@ -53,7 +53,7 @@ compile is a defect in this document.
 What the macro generates:
 
 - All ABI exports (`eio_configure`, `eio_start`, `eio_stop`, `eio_process_signals`, optional `eio_on_*`, `eio_abi_version`) wrapping the trait impl, over the `eio_alloc`/`eio_free` the SDK already exports. **Every trait method has a default**: ABI §4.1 makes all the exports REQUIRED so the module carries them regardless, and what varies is whether there is anything behind one — a pure transform has no `start`, and a timer-driven emitter has no `process_signals` at all (§6.2 admits blocks that emit with no inbound batch).
-- Port enums (`In`, `Out`) from the macro attributes — emitting to an undeclared port is a _compile_ error, not a runtime one. The enum's discriminant **is** ABI §5.2's port index rather than something kept in step with it.
+- Port enums (`In`, `Out`) from the macro attributes — emitting to an undeclared port is a _compile_ error, not a runtime one. The enum's discriminant **is** ABI §5.2's port index rather than something kept in step with it. `Out` carries one variant the block did not declare: **`Out::Err`**, ABI §6.4's reserved error port, whose discriminant is `PORT_ERR` rather than a position. Every block has that port whether or not it uses it, and §1.1 rejects `err` as a declared name, so there is nothing for it to collide with. It is generated rather than left to `eio_sdk::Out::ERR` because the generated enum *shadows* `eio_sdk::Out` in the block's own scope: making an author write a qualified path for the one port they did not have to declare is friction, and ABI §14 makes friction the wrapper's bug. `Out` is therefore never uninhabited, including on a block that declares no outputs at all — a sink can still report a signal it could not handle.
 - `prop_id` mapping from field order, and typed `Prop<T>` handles whose `get(ctx, signal_idx)` wraps the ABI `prop` call: grow-and-retry buffer loop (ABI §7.1), CBOR decode, declared-type check. `get_static(ctx)` = `SIGNAL_NONE` evaluation for use in `configure`/`start`/timers.
 - **The manifest** (ABI §11): properties, ports, capabilities, ABI version are all derived from these same attributes and emitted as the `eio:manifest` custom section (ABI §4.4) at compile time — a `#[used]` `static` in a named `link_section`, so no build tooling is involved and a plain `cargo build` produces a self-describing module. `manifest.json` is `cargo eio build`'s (§5): writing a file is a build step, not a macro's. Single source of truth in code; manifest/import mismatches become unrepresentable rather than merely validated.
 
@@ -74,7 +74,7 @@ Each argument MAY appear at most once; a repeat is an error rather than last-win
 |`version`|`version = "..."`|SemVer (ABI §11.1). Absent = the crate's `CARGO_PKG_VERSION`, which cargo already requires to be SemVer|
 |`description`|`description = "..."`|Absent = no description|
 |`inputs`|`inputs(a, b)`|Bare identifiers; **position is the port index** (ABI §5.2). Absent = none|
-|`outputs`|`outputs(a, b)`|As `inputs`. `err` is REJECTED in both (ABI §6.4, §11.1)|
+|`outputs`|`outputs(a, b)`|As `inputs`. `err` is REJECTED in both (ABI §6.4, §11.1) — the block gets `Out::Err` regardless, per §1|
 |`capabilities`|`capabilities(state, timer)`|ABI §11.1's closed set: `state`, `timer`, `gpio`, `i2c`, `http`. Absent = none. Declaring one generates its §4.2 callback export|
 
 |`<prop-arg>`|Form|Meaning|
@@ -109,7 +109,7 @@ There is deliberately no `i64` field satisfying a `float` property. ABI §11.1's
 
 - `Value` — the CBOR value enum (shared `signal` crate, no_std).
 - `Signal` — map wrapper: `get/get_or/set/has`, serde-compatible via minicbor derive for typed extraction.
-- `Batch` — owned Vec<Signal> with builder; `ctx.batch()` for capacity-hinted construction.
+- `Batch` — owned Vec<Signal> with builder; `Batch::with_capacity(n)` for capacity-hinted construction. (Draft 1 wrote `ctx.batch()`. There is nothing on `Ctx` a batch's allocation needs — the guest has one allocator and `Ctx` holds no hint for it — so routing construction through the host handle would have been ceremony that suggested otherwise. Corrected here rather than implemented.)
 - `Ctx` — the only channel to the host: `emit`, `log` (also backing `log`-crate macros), `error` detail, `time_unix_ms`/`time_mono_ms`/`rand` wrappers, capability handles (§3).
 - `BlockError` / `BlockResult` — errors map to non-zero callback returns + structured `error()` detail (ABI §8); `?` works throughout. `HostError` (from host-fn status codes) converts into `BlockError` with code preservation, so `ERR_THROTTLED` etc. remain matchable.
 

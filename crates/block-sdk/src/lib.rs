@@ -90,5 +90,12 @@ pub mod prelude {
         Batch, Block, BlockError, BlockResult, Ctx, Descriptor, ErrorCode, HostError, Level,
         Limits, Out, Prop, PropId, Signal, SignalIdx, Value, block,
     };
+    // The capability vocabulary, and not the handles: a block names `Mode`, `Edge`,
+    // `PinLevel`, `TimerId`, `WatchId` and `HttpRequest` to *call* the wrappers at all, so
+    // leaving them out made the prelude's promise ("everything a block needs") false for
+    // every block that declares a capability. The handle types — `Gpio`, `Timer`, `State`,
+    // `I2c`, `Http` — stay out: they are what `ctx.gpio()` returns, never what a block
+    // writes down (SDK §3).
+    pub use crate::{Edge, HttpRequest, HttpResponse, Mode, PinLevel, ReqId, TimerId, WatchId};
     pub use log::{debug, error, info, trace, warn};
 }

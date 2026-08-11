@@ -39,6 +39,18 @@ impl Batch {
         Self { signals }
     }
 
+    /// One signal, as the batch that carries it.
+    ///
+    /// A batch is the unit of delivery and emission (ABI §2), so a block with one signal to
+    /// send still sends a batch — and every block that emits from a timer, a GPIO edge or an
+    /// HTTP completion has exactly one. Spelling that `Batch::from_vec(vec![signal])` made
+    /// the common case name a `Vec` it did not otherwise need.
+    pub fn single(signal: Signal) -> Self {
+        Self {
+            signals: alloc::vec![signal],
+        }
+    }
+
     /// Unwraps into the underlying sequence.
     pub fn into_vec(self) -> Vec<Signal> {
         self.signals
