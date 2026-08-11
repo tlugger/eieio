@@ -4,9 +4,8 @@
 //! what it emitted.
 //!
 //! ```
-//! use eio_manifest::PropertyType;
 //! use eio_sdk::{Block, Bound, Value};
-//! use eio_test_host::{TestHost, batch, signal};
+//! use eio_test_host::{PropertyType, TestHost, batch, signal};
 //!
 //! # struct MyBlock;
 //! # impl Block for MyBlock {}
@@ -50,13 +49,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use eio_host_core::{Arg, EngineError, HostCall, Memory, PropContext, PropFailure, PropertySource};
-use eio_manifest::PropertyType;
 use eio_sdk::{Batch, Block, BlockError, Bound, Ctx, Descriptor, Limits, Value};
 use eio_signal::Signal;
 
 mod capabilities;
 
 pub use capabilities::{Scripted, Throttle};
+
+/// ABI §11.1's property types, re-exported.
+///
+/// Every `.property(..)` call names one, so a block's test crate would otherwise carry a
+/// dependency on `eio-manifest` for a single enum — friction in the wrapper, which ABI §14
+/// calls the wrapper's bug rather than the author's.
+pub use eio_manifest::PropertyType;
 
 /// What a block emitted on one port during one callback.
 #[derive(Debug, Clone, PartialEq)]

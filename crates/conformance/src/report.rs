@@ -135,23 +135,39 @@ impl Summary {
             .filter(|report| matches!(report.outcome, Outcome::Skipped(_)))
     }
 
+    /// The suite's verdict: `Ok` with a one-line count, `Err` with every failure spelled out.
+    ///
+    /// Separate from [`assert_ok`](Summary::assert_ok) because a panic is only the right
+    /// answer inside a `#[test]`; `cargo eio test` reports the same verdict as an ordinary
+    /// error (SDK §5.3). Both go through this, so what counts as a pass — and how a failure
+    /// reads — cannot come to depend on who asked.
+    ///
+    /// Skipped scenarios are neither: they are the caller's to report, and every caller MUST
+    /// (§13.1). Counting one as a pass would claim coverage the platform does not have.
+    pub fn verdict(&self) -> Result<String, String> {
+        let failed = self.failed().count();
+        if failed == 0 {
+            let ran = self.reports.len() - self.skipped().count();
+            return Ok(format!("{ran} scenario(s) passed"));
+        }
+        let mut message = format!("{failed} conformance scenario(s) failed:\n");
+        for report in self.failed() {
+            message.push_str(&format!("{report}"));
+        }
+        Err(message)
+    }
+
     /// Panics unless every scenario passed or was skipped, printing all of them.
     ///
     /// Skipped ones are printed too, always: a host silently covering less of the ABI than
     /// the suite describes is the failure this whole crate exists to make visible.
     #[track_caller]
     pub fn assert_ok(&self) {
-        let failed = self.failed().count();
-        if failed == 0 {
-            for report in self.skipped() {
-                println!("{report}");
-            }
-            return;
+        for report in self.skipped() {
+            println!("{report}");
         }
-        let mut message = format!("{failed} conformance scenario(s) failed:\n");
-        for report in self.failed() {
-            message.push_str(&format!("{report}"));
+        if let Err(message) = self.verdict() {
+            panic!("{message}");
         }
-        panic!("{message}");
     }
 }
