@@ -288,7 +288,7 @@ impl Ctx {
     /// Whether `max_batch` bounds emissions at all is a genuine gap in the spec, filed as
     /// eieio-7d8.13; the limit is on [`Ctx::limits`] so a block that wants to respect it
     /// can.
-    pub fn emit(&mut self, port: Out, batch: &Batch) -> Result<(), BlockError> {
+    pub fn emit(&mut self, port: impl Into<Out>, batch: &Batch) -> Result<(), BlockError> {
         // `encoded_len` is exact — `to_cbor` uses it to presize its own buffer — so an
         // oversized batch is refused without paying for the encode that would be thrown
         // away. `emit_cbor` checks again, because it is reachable on its own.
@@ -304,11 +304,11 @@ impl Ctx {
     /// bytes already, and re-encoding them would spend a decode and an encode to reproduce
     /// what it holds (ABI §6.3.1 guarantees the round trip is byte-for-byte, so it really
     /// would be the same bytes).
-    pub fn emit_cbor(&mut self, port: Out, batch: &[u8]) -> Result<(), BlockError> {
+    pub fn emit_cbor(&mut self, port: impl Into<Out>, batch: &[u8]) -> Result<(), BlockError> {
         if batch.len() as u64 > self.limits.max_payload {
             return Err(HostError::new("emit", ErrorCode::Limit).into());
         }
-        let status = raw::emit(port.index() as i32, batch);
+        let status = raw::emit(port.into().index() as i32, batch);
         match Status::decode(status) {
             Status::Ok => Ok(()),
             Status::Failed(code) => Err(HostError::new("emit", code).into()),

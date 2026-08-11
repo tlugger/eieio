@@ -8,7 +8,7 @@
 
 ## 1. Programming model
 
-**PROPOSED** shape — a struct, a derive-style attribute macro, and a trait:
+A struct, an attribute macro, and a trait:
 
 ```rust
 use eio_sdk::prelude::*;
@@ -28,29 +28,82 @@ struct ThresholdFilter {
 }
 
 impl Block for ThresholdFilter {
-    fn process_signals(&mut self, ctx: &mut Ctx, input: InPort, batch: Batch) -> BlockResult {
-        let mut above = ctx.batch();
-        let mut below = ctx.batch();
-        for (i, signal) in batch.iter().enumerated() {
-            if self.reading.get(ctx, i)? > self.threshold.get(ctx, i)? {
+    fn process_signals(&mut self, ctx: &mut Ctx, _input: u32, batch: Batch) -> BlockResult {
+        let mut above = Batch::new();
+        let mut below = Batch::new();
+        for (index, signal) in batch.iter().enumerate() {
+            let index = index as u32;
+            if self.reading.get(ctx, index)? > self.threshold.get(ctx, index)? {
                 above.push(signal.clone());
             } else {
                 below.push(signal.clone());
             }
         }
-        ctx.emit(Out::Above, above)?;
-        ctx.emit(Out::Below, below)?;
+        ctx.emit(Out::Above, &above)?;
+        ctx.emit(Out::Below, &below)?;
         Ok(())
     }
 }
 ```
 
+This example compiles and runs; `crates/block-sdk/tests/macro.rs` is it, verbatim, and that
+is deliberate — ABI §14 makes SDK friction a spec bug, so a printed example that does not
+compile is a defect in this document.
+
 What the macro generates:
 
-- All ABI exports (`eio_configure`, `eio_start`, `eio_stop`, `eio_process_signals`, optional `eio_on_*`, `eio_abi_version`, `eio_alloc`/`eio_free`) wrapping the trait impl. Lifecycle methods (`configure`, `start`, `stop`) have default no-op impls; only `process_signals` is required for transform blocks; timer/gpio/http callbacks are optional trait methods gated by declared capabilities.
-- Port enums (`In`, `Out`) from the macro attributes — emitting to an undeclared port is a _compile_ error, not a runtime one.
+- All ABI exports (`eio_configure`, `eio_start`, `eio_stop`, `eio_process_signals`, optional `eio_on_*`, `eio_abi_version`) wrapping the trait impl, over the `eio_alloc`/`eio_free` the SDK already exports. **Every trait method has a default**: ABI §4.1 makes all the exports REQUIRED so the module carries them regardless, and what varies is whether there is anything behind one — a pure transform has no `start`, and a timer-driven emitter has no `process_signals` at all (§6.2 admits blocks that emit with no inbound batch).
+- Port enums (`In`, `Out`) from the macro attributes — emitting to an undeclared port is a _compile_ error, not a runtime one. The enum's discriminant **is** ABI §5.2's port index rather than something kept in step with it.
 - `prop_id` mapping from field order, and typed `Prop<T>` handles whose `get(ctx, signal_idx)` wraps the ABI `prop` call: grow-and-retry buffer loop (ABI §7.1), CBOR decode, declared-type check. `get_static(ctx)` = `SIGNAL_NONE` evaluation for use in `configure`/`start`/timers.
-- **The manifest** (ABI §11): properties, ports, capabilities, ABI version are all derived from these same attributes and emitted as both `manifest.json` and the `eio:manifest` custom section at build time. Single source of truth in code; manifest/import mismatches become unrepresentable rather than merely validated.
+- **The manifest** (ABI §11): properties, ports, capabilities, ABI version are all derived from these same attributes and emitted as the `eio:manifest` custom section (ABI §4.4) at compile time — a `#[used]` `static` in a named `link_section`, so no build tooling is involved and a plain `cargo build` produces a self-describing module. `manifest.json` is `cargo eio build`'s (§5): writing a file is a build step, not a macro's. Single source of truth in code; manifest/import mismatches become unrepresentable rather than merely validated.
+
+**One block per module.** The generated exports are `#[unsafe(no_mangle)]` and the manifest static has a fixed name, so a second `#[block]` in the same crate is a link error. That is the enforcement rather than a limitation: ABI §4.4 requires a module carrying more than one `eio:manifest` section to be rejected, because it describes itself twice.
+
+### 1.1 Attribute grammar (normative)
+
+```
+#[block( <block-arg> ,* )]          on a struct with named fields
+#[prop( <prop-arg> ,* )]            on a field of type Prop<T>
+```
+
+Each argument MAY appear at most once; a repeat is an error rather than last-wins, for the reason ABI §11.1 gives for duplicate JSON keys. Unknown arguments are rejected — a typo'd `capabilites` that silently granted nothing is the failure this prevents.
+
+|`<block-arg>`|Form|Meaning|
+|---|---|---|
+|`name`|`name = "..."`|REQUIRED. The block's registry name; ABI §11.1's `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`, ≤64 bytes|
+|`version`|`version = "..."`|SemVer (ABI §11.1). Absent = the crate's `CARGO_PKG_VERSION`, which cargo already requires to be SemVer|
+|`description`|`description = "..."`|Absent = no description|
+|`inputs`|`inputs(a, b)`|Bare identifiers; **position is the port index** (ABI §5.2). Absent = none|
+|`outputs`|`outputs(a, b)`|As `inputs`. `err` is REJECTED in both (ABI §6.4, §11.1)|
+|`capabilities`|`capabilities(state, timer)`|ABI §11.1's closed set: `state`, `timer`, `gpio`, `i2c`, `http`. Absent = none. Declaring one generates its §4.2 callback export|
+
+|`<prop-arg>`|Form|Meaning|
+|---|---|---|
+|`ty`|`ty = "float"`|REQUIRED. ABI §11.1's closed set: `bool`, `int`, `float`, `string`, `bytes`, `any`|
+|`desc`|`desc = "..."`|Absent = no description|
+|`default`|`default = "..."`|An expression string (ABI §11.1), checked by the manifest crate at parse time|
+|`required`|`required`|A bare flag. Absent = `false`|
+
+A field **without** `#[prop]` is the block's own state: it takes no `prop_id`, never reaches the manifest, and is initialized with `Default`.
+
+ABI §11.1's rules are enforced at *expansion* time — reserved port name, duplicate port or property, name pattern, closed sets. Every one is something a host refuses at load, and §11.1 states them as regexes precisely so one rule reaches every surface; a block author should meet them at `cargo build`.
+
+### 1.2 `Prop<T>` and the type mapping (normative)
+
+|`ty`|Rust type|
+|---|---|
+|`bool`|`bool`|
+|`int`|`i64`|
+|`float`|`f64`|
+|`string`|`String`|
+|`bytes`|`Vec<u8>`|
+|`any`|`Value`|
+
+One-to-one, closed, and checked **at compile time**: a `Prop<f64>` field declared `ty = "int"` does not compile. The manifest's declared type and the field's Rust type are two statements about one property, and this is what stops them disagreeing — the run-time half (a host that sent something else) is a `BlockError` naming both.
+
+There is deliberately no `i64` field satisfying a `float` property. ABI §11.1's int-to-float promotion is the *host's*, applied to an evaluated value and encoded as a float precisely so a guest never has to handle both — so an int arriving at a `float` field means the manifest declared `int`, and converting would hide that rather than report it.
+
+`Prop<T>` holds only its `prop_id`. There is no guest-side cache: ABI §7.1 makes a property a pull, evaluated host-side per signal on demand, and the host already caches within a callback. A guest-side cache would answer a question about a signal the host has moved past.
 
 ## 2. Core types
 
@@ -97,6 +150,7 @@ One safe wrapper per `eio:*` namespace, present on `Ctx` only when declared (mac
 
 - `#![no_std]` + `alloc`. The allocator is `dlmalloc` (Rust's own `wasm32` default, so a block gets the allocator it would have had from `std` without the `std`) behind `eio_alloc`/`eio_free`, with ABI §9.6's 8-byte alignment guarantee.
 - The entire `unsafe` surface, enumerated for audit: allocator export glue, `(ptr,len) ↔ &[u8]` conversions at each export entry and host-fn call site, and the panic handler. Nothing else. Every `unsafe` block carries a `// SAFETY:` comment citing the ABI section that justifies it.
+- **The enumeration covers generated code.** The `#[block]` macro emits `unsafe` — the instance statics ABI §1.2's single-threaded actor model permits, and the inbound-payload conversion at each export entry — and that code is compiled into every block. Which crate the text happens to sit in does not change whose `unsafe` it is, so the macro's templates are audited under this section like the rest.
 - **Panics abort → trap → instance death** (ABI §6 invariant 6). The SDK's job is making panics rare in safe code (`get_or`, checked ops in examples) — not catching them. `panic = "abort"` enforced via the build tooling.
 
 ### 4.1 The allocator, and where it may be depended on
@@ -151,4 +205,6 @@ The ABI permits any language; the SDK does not chase this in v1. The conformance
 
 ## 8. Expansion list (for the in-depth pass)
 
-Macro attribute grammar (normative), `Prop<T>` supported types and their CBOR/manifest-type mapping, HttpRequest/Response types, TestHost API, template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy, `request_tagged` correlation sugar decision.
+HttpRequest/Response types, TestHost API, template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy, `request_tagged` correlation sugar decision.
+
+Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; §2 and §4 are expanded.

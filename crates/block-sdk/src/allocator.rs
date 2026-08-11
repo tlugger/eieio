@@ -25,10 +25,8 @@
 //! does — but this one uses it, and a host that passed a different size than it allocated
 //! would corrupt the heap. That is the host's obligation, not something a guest can check.
 
-#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), test))]
 use core::alloc::Layout;
 
-#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), test))]
 use eio_abi::ALLOC_ALIGN;
 
 /// The global allocator, on the only target that has a heap to give.
@@ -47,7 +45,6 @@ static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
 /// `None` covers every case the ABI answers with `0`: a non-positive size (the boundary
 /// carries `i32`, and a negative one is a host bug, not a request), and a size that
 /// overflows when rounded up to [`ALLOC_ALIGN`].
-#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), test))]
 fn layout(size: i32) -> Option<Layout> {
     if size <= 0 {
         // Zero is not an allocation: §9.6 calls a "zero-but-nonzero-length" pointer one of
@@ -60,6 +57,9 @@ fn layout(size: i32) -> Option<Layout> {
 }
 
 /// Allocates `size` bytes, 8-byte aligned, returning null on refusal (ABI §9.5, §9.6).
+///
+/// Only the guest's `eio_alloc` allocates; a host or bare-metal build of this crate frees
+/// (through [`release`], which `runtime::take` needs everywhere) but never allocates.
 ///
 /// The allocation itself, in native pointer width. [`eio_alloc`] is the `i32` shim over it.
 ///
@@ -91,7 +91,6 @@ pub(crate) fn allocate(size: i32) -> *mut u8 {
 /// not already been released. ABI §9.1 makes `eio_alloc`/`eio_free` the only allocation
 /// channel across the boundary, which is what makes that a checkable obligation rather
 /// than a hope.
-#[cfg(any(all(target_arch = "wasm32", target_os = "unknown"), test))]
 pub(crate) unsafe fn release(ptr: *mut u8, size: i32) {
     let Some(layout) = layout(size) else {
         return;

@@ -1,0 +1,8 @@
+error[E0599]: no variant, associated function, or constant named `Below` found for enum `Out` in the current scope
+ --> tests/ui/undeclared_output_port.rs:9:23
+  |
+4 | #[block(name = "filter", inputs(default), outputs(above))]
+  | ---------------------------------------------------------- variant, associated function, or constant `Below` not found for this enum
+...
+9 |         ctx.emit(Out::Below, &Batch::new())?;
+  |                       ^^^^^ variant, associated function, or constant not found in `Out`

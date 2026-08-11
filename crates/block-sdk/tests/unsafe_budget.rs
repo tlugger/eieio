@@ -17,25 +17,38 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// The files SDK §4's enumeration permits `unsafe` in.
+/// The files SDK §4's enumeration permits `unsafe` in, mapped to the three entries.
 ///
-/// Shorter than the spec's list of three, and that is a finding rather than an oversight:
-///
-/// - **Allocator export glue** — `allocator.rs`. Four blocks.
-/// - **`(ptr, len)` ↔ `&[u8]` conversions** — `raw.rs`, and only the `unsafe extern` block
-///   that declares the imports. The conversions themselves turned out to need no `unsafe`
-///   at all: taking a slice's address is safe, and every import is declared `safe fn`
-///   because ABI §7.0 and §8 specify the host side as total over its arguments.
+/// - **Allocator export glue** — `allocator.rs`.
+/// - **`(ptr, len)` ↔ `&[u8]` conversions at each export entry and host-fn call site** —
+///   `runtime.rs`, which takes ownership of every inbound payload at an export entry, and
+///   `raw.rs`, where only the `unsafe extern` declaration remains. The *outbound*
+///   conversions turned out to need no `unsafe` at all: taking a slice's address is safe,
+///   and every import is declared `safe fn` because ABI §7.0 and §8 specify the host side
+///   as total over its arguments.
 /// - **The panic handler** — `panic.rs`, which contains no `unsafe`:
 ///   `core::arch::wasm32::unreachable()` is a safe function.
 ///
-/// A file added here is a decision to widen the budget, which SDK §4 says is a spec
-/// question. Adding one without amending the spec is the thing this list exists to make
-/// visible in review.
-const PERMITTED: &[&str] = &["allocator.rs", "raw.rs"];
+/// `generate.rs` is the fourth, and it is the one worth explaining. It holds no `unsafe`
+/// that *runs* in this crate — the tokens live inside `quote!` templates — but that code is
+/// compiled into every block the macro expands, which puts it squarely inside SDK §4's
+/// "the entire `unsafe` surface" whatever crate the text sits in. Scanning it is how the
+/// budget stays a statement about the block ecosystem rather than about one crate.
+///
+/// A file added here is a decision to widen the budget, which SDK §4 makes a spec
+/// question. Adding one without amending the spec is what this list exists to make visible
+/// in review.
+const PERMITTED: &[&str] = &["allocator.rs", "raw.rs", "runtime.rs", "generate.rs"];
 
-fn src_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+/// The directories scanned: the SDK, and the macro whose output ships inside every block.
+fn scanned() -> Vec<PathBuf> {
+    let sdk = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let macros = sdk
+        .parent()
+        .expect("crates/")
+        .join("block-sdk-macros")
+        .join("src");
+    vec![sdk.join("src"), macros]
 }
 
 fn rust_files(dir: &Path) -> Vec<PathBuf> {
@@ -118,7 +131,7 @@ impl core::fmt::Display for Site {
 /// — scanning the tree twice would be the same code with one substring changed.
 fn sites() -> Vec<Site> {
     let mut sites = Vec::new();
-    for path in rust_files(&src_dir()) {
+    for path in scanned().iter().flat_map(|dir| rust_files(dir)) {
         let source = std::fs::read_to_string(&path).expect("a readable source file");
         let lines: Vec<&str> = source.lines().collect();
         for (index, line) in lines.iter().enumerate() {
@@ -194,7 +207,7 @@ fn unsafe_appears_only_in_the_files_sdk_4_enumerates() {
     let permitted: BTreeSet<&str> = PERMITTED.iter().copied().collect();
     let mut found = BTreeSet::new();
 
-    for path in rust_files(&src_dir()) {
+    for path in scanned().iter().flat_map(|dir| rust_files(dir)) {
         let source = std::fs::read_to_string(&path).expect("a readable source file");
         if source.lines().any(is_unsafe_site) {
             found.insert(
@@ -225,9 +238,11 @@ fn the_permitted_list_has_no_stale_entries() {
     // read lately, and it silently pre-authorises the next one to land there.
     let mut stale = Vec::new();
     for name in PERMITTED {
-        let path = src_dir().join(name);
-        let source = std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| panic!("{name} is listed in PERMITTED but does not exist"));
+        let source = scanned()
+            .iter()
+            .map(|dir| dir.join(name))
+            .find_map(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_else(|| panic!("{name} is listed in PERMITTED but does not exist"));
         if !source.lines().any(is_unsafe_site) {
             stale.push(*name);
         }

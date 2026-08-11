@@ -6,7 +6,7 @@ Guidance for agents working in this repository.
 
 eieio is a distributed stream-processing platform: WASM **blocks** wired into **services** running on **nodes** that form a **System**, targeting everything from servers down to MCUs. `README.md` is the human orientation; this file is how to build here.
 
-**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. Item 5 has started: `block-sdk` exists as the guest runtime — allocator, panic handler, `Ctx`, error types — but the `#[block]` macro that generates the ABI exports does not (eieio-7d8.2), so every test block is still hand-written `.wat` under `crates/daemon/tests/blocks/`.
+**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. Item 5 is under way: `block-sdk` is the guest runtime (allocator, panic handler, `Ctx`, error types) and `block-sdk-macros` is the `#[block]` macro that generates the ABI exports, the port enums, `Prop<T>` and the `eio:manifest` section. Still missing: the capability wrappers (eieio-7d8.3), `TestHost` (7d8.4) and `cargo-eio` (7d8.5), so the daemon's test blocks are still hand-written `.wat` under `crates/daemon/tests/blocks/`.
 
 ## The prime directive: specs are normative
 
@@ -58,7 +58,7 @@ Vocabulary is settled and used precisely: **System** (group of nodes), **Node** 
 Cargo.toml            workspace root
 crates/
   abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
-  daemon/  block-sdk/  cargo-eio/  conformance/
+  daemon/  block-sdk/  block-sdk-macros/  cargo-eio/  conformance/
 designer/             SvelteKit app, own package.json
 examples/
   services/           sample service TOMLs

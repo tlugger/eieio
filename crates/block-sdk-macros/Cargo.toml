@@ -1,0 +1,33 @@
+[package]
+name = "eio-sdk-macros"
+description = "The #[block] attribute macro for eio-sdk: ABI exports, port enums, Prop<T>, manifest emission (SDK-SPEC §1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A proc macro must live in its own crate — the compiler loads it as a plugin, and
+# a `proc-macro = true` crate can export nothing but macros. So this is a split the
+# language forces, not a design choice. `eio-sdk` re-exports `block`, and a block
+# author never names this crate.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn.workspace = true
+quote.workspace = true
+proc-macro2.workspace = true
+
+# ABI §11.1 has exactly one implementation (DAEMON §1), and this is it. Depending
+# on it here costs BUILD time and nothing else — a proc-macro crate is compiled
+# for the host and run by the compiler, so none of it reaches a guest. That is
+# what makes the reuse free where the same dependency inside `eio-sdk` would not
+# be: the name patterns, the closed sets and the manifest's own serialization all
+# come from the crate a host will read the result with.
+eio-manifest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

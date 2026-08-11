@@ -7,6 +7,7 @@ resolver = "3"
 members = [
     "crates/abi",
     "crates/block-sdk",
+    "crates/block-sdk-macros",
     "crates/daemon",
     "crates/expr",
     "crates/host-core",
@@ -149,9 +150,24 @@ dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
 # `eio:core` `log` (SDK §2). Facade only: `eio-sdk` installs the backend.
 log = { version = "0.4", default-features = false }
 
+# ── the `#[block]` macro's dependencies (build-time only) ────────────────────
+#
+# A proc-macro crate is compiled for the HOST and run by the compiler, so `std`
+# here is not a `no_std` violation — `eio-sdk-macros` is not a ★ crate and never
+# reaches a guest. What reaches a guest is the code it emits.
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+
+# Dev-dependency only. A macro that must reject bad input needs its *rejections*
+# tested, and the rejection is a compile error — so the test is a compile that
+# fails with the right message. Nothing else can check that.
+trybuild = "1.0"
+
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.
 eio-abi = { path = "crates/abi", version = "0.1.0" }
+eio-sdk-macros = { path = "crates/block-sdk-macros", version = "0.1.0" }
 eio-expr = { path = "crates/expr", version = "0.1.0" }
 eio-host-core = { path = "crates/host-core", version = "0.1.0" }
 eio-manifest = { path = "crates/manifest", version = "0.1.0" }

@@ -26,6 +26,9 @@ crates/
   daemon/          Binary: tokio runtime, wasmtime engine, OCI client,
                    management API, state store, pub/sub bridge
   block-sdk/       Guest-side (SDK-SPEC); published as `eio-sdk`
+  block-sdk-macros/  The `#[block]` attribute macro (SDK-SPEC §1). A separate
+                   crate because the language requires it: a proc-macro crate
+                   can export nothing but macros. Host-compiled, so not ★
   cargo-eio/       Block build/publish tooling (SDK-SPEC §5)
   conformance/     Reference harness + golden blocks (ABI §13)
 ```
@@ -55,8 +58,11 @@ For the same reason the **property scope is the driver's**, not its caller's. AB
 |`manifest/`|`eio-manifest`|`eio_manifest`|
 |`daemon/`|`eio-daemon`|—|
 |`block-sdk/`|`eio-sdk`|`eio_sdk`|
+|`block-sdk-macros/`|`eio-sdk-macros`|`eio_sdk_macros`|
 |`cargo-eio/`|`cargo-eio`|—|
 |`conformance/`|`eio-conformance`|`eio_conformance`|
+
+`block-sdk-macros/` follows `block-sdk/`'s existing exception rather than the directory rule, so the pair reads as one thing: a block author sees `eio-sdk` and never names the macro crate, which `eio-sdk` re-exports.
 
 `cargo-eio` is the sole exception: cargo discovers subcommands by binary name, so it cannot be prefixed differently. No crate overrides its `[lib] name` — package name and import path differ only by the `-`→`_` substitution cargo already performs.
 

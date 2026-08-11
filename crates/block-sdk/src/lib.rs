@@ -49,6 +49,7 @@
 extern crate alloc;
 
 pub mod allocator;
+mod block;
 mod ctx;
 mod error;
 // Gated out on `target_os = "none"`: `log::set_logger` needs atomic compare-and-swap and
@@ -58,7 +59,9 @@ mod error;
 pub mod logger;
 mod panic;
 pub mod raw;
+pub mod runtime;
 
+pub use block::{Block, Declared, FromValue, Prop, PropDeclared, ty};
 pub use ctx::{Ctx, Descriptor, Limits, Out, PropId, SignalIdx};
 pub use error::{BlockError, BlockResult, HostError};
 
@@ -67,6 +70,7 @@ pub use error::{BlockError, BlockResult, HostError};
 // `eio-sdk` publishes to crates.io (DAEMON §1), where a block naming `eio-signal` itself
 // could resolve a version this SDK does not agree with.
 pub use eio_abi::{self as abi, ErrorCode, Level};
+pub use eio_sdk_macros::block;
 pub use eio_signal::{self as signal, Batch, Signal, Value};
 pub use log;
 
@@ -77,8 +81,8 @@ pub use log;
 /// ```
 pub mod prelude {
     pub use crate::{
-        Batch, BlockError, BlockResult, Ctx, Descriptor, ErrorCode, HostError, Level, Limits, Out,
-        PropId, Signal, SignalIdx, Value,
+        Batch, Block, BlockError, BlockResult, Ctx, Descriptor, ErrorCode, HostError, Level,
+        Limits, Out, Prop, PropId, Signal, SignalIdx, Value, block,
     };
     pub use log::{debug, error, info, trace, warn};
 }

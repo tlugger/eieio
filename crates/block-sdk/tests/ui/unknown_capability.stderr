@@ -1,0 +1,5 @@
+error: `telepathy` is not a capability (ABI §11.1); expected one of state, timer, gpio, i2c, http
+ --> tests/ui/unknown_capability.rs:4:70
+  |
+4 | #[block(name = "filter", inputs(default), outputs(out), capabilities(telepathy))]
+  |                                                                      ^^^^^^^^^

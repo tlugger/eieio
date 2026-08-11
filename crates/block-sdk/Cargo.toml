@@ -21,6 +21,11 @@ eio-signal.workspace = true
 # The facade a block author writes against; `logger` installs the backend.
 log.workspace = true
 
+# The `#[block]` macro, re-exported as `eio_sdk::block` so a block author never
+# names it. Separate because the language requires it: a `proc-macro = true`
+# crate can export nothing but macros.
+eio-sdk-macros.workspace = true
+
 # The guest allocator, on the only target with a heap to give. Target-gated
 # rather than `cfg`-gated at the use site: `dlmalloc/global` has backends for
 # wasm and unix only, so on the two bare-metal targets `just check-nostd` walks
@@ -31,3 +36,14 @@ dlmalloc.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The one implementation of ABI §11.1 (DAEMON §1). The macro emits manifest JSON by hand —
+# pulling this into a proc-macro crate would compile the parser and the expression analyser
+# into every block's *build* — so the test parses that output with the real thing and holds
+# the emitter to the real rules rather than to its author's memory of them.
+eio-manifest.workspace = true
+
+# A macro that must reject bad input needs its rejections tested, and a rejection here is a
+# compile error. Nothing but a failing compile can check that.
+trybuild.workspace = true

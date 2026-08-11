@@ -1,0 +1,5 @@
+error: `err` is a reserved port name (ABI §6.4, §11.1): every block has an error port by that name without declaring it, and a service file addresses it that way
+ --> tests/ui/reserved_port_name.rs:4:51
+  |
+4 | #[block(name = "filter", inputs(default), outputs(err))]
+  |                                                   ^^^
