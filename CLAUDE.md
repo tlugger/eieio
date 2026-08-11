@@ -57,7 +57,7 @@ Vocabulary is settled and used precisely: **System** (group of nodes), **Node** 
 ```
 Cargo.toml            workspace root
 crates/
-  host-core/  expr/  signal/  manifest/     ★ shared with the leaf runtime
+  abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
   daemon/  block-sdk/  cargo-eio/  conformance/
 designer/             SvelteKit app, own package.json
 examples/
@@ -67,7 +67,9 @@ docs/
   SCOPE.md  specs/
 ```
 
-★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries. `block-sdk` is `no_std` by necessity: it compiles into guests.
+★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `abi`, `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries. `block-sdk` is `no_std` by necessity: it compiles into guests.
+
+`abi` holds only what both sides of the boundary must agree on — ABI §8's status codes, §3's sentinels, §9.6's alignment — and **has no dependencies**. Keep it that way: anything added there is added to every block that ships. `host-core` re-exports all of it, so host code imports it from there (DAEMON §1).
 
 ## Implementation order
 

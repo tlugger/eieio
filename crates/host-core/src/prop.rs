@@ -61,7 +61,7 @@ use eio_signal::Batch;
 use crate::SIGNAL_NONE;
 use crate::engine::{Arg, HostCall, HostFn, Ret};
 use crate::memory::OutBuffer;
-use crate::status::ErrorCode;
+use eio_abi::ErrorCode;
 
 /// One property, as the host resolved it for this instance.
 ///

@@ -25,8 +25,8 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use eio_host_core::{
-    Arg, Engine, EngineError, ErrorCode, ExprBudgets, HostCall, Limits, Outbound, PropContext, Ret,
-    Status,
+    Arg, Engine, EngineError, ErrorCode, ExprBudgets, HostCall, Level, Limits, Outbound,
+    PropContext, Ret, Status,
     exports::{core_fn, namespace},
 };
 use eio_signal::Batch;
@@ -179,12 +179,16 @@ impl Core {
         // A non-UTF-8 message is a guest bug, and dropping the line would hide it at the
         // moment it is most wanted. §7.0 says UTF-8; lossy conversion says so visibly.
         let message = String::from_utf8_lossy(&bytes);
-        match level {
-            0 => tracing::trace!(target: "eio::guest", "{message}"),
-            1 => tracing::debug!(target: "eio::guest", "{message}"),
-            2 => tracing::info!(target: "eio::guest", "{message}"),
-            3 => tracing::warn!(target: "eio::guest", "{message}"),
-            _ => tracing::error!(target: "eio::guest", "{message}"),
+        // ABI §7.0's table is `eio_abi::Level`, not a `match` on literals here: the guest
+        // SDK chooses the number from that same type, and two hand-written tables could
+        // disagree silently — turning a block's errors into this host's warnings with
+        // nothing failing to say so.
+        match Level::from_i32(level) {
+            Level::Trace => tracing::trace!(target: "eio::guest", "{message}"),
+            Level::Debug => tracing::debug!(target: "eio::guest", "{message}"),
+            Level::Info => tracing::info!(target: "eio::guest", "{message}"),
+            Level::Warn => tracing::warn!(target: "eio::guest", "{message}"),
+            Level::Error => tracing::error!(target: "eio::guest", "{message}"),
         }
         Ret::None
     }

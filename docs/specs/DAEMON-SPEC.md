@@ -12,6 +12,9 @@ Monorepo workspace. The load-bearing split is **host-core vs daemon**: everythin
 
 ```
 crates/
+  abi/           ★ The ABI's shared vocabulary: §8 status codes, §3 sentinels,
+                   §9.6 alignment. No dependencies. Read by both host-core and
+                   the guest SDK
   host-core/     ★ ABI implementation: lifecycle driver, memory conventions,
                    status/size protocol, capability validation, router core,
                    property resolution (ABI §11.1's required/default rule)
@@ -35,6 +38,8 @@ Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (le
 
 **Where a rule lives follows from what it is about, not from who happens to call it.** ABI §11.1's `required`/`default` precedence is the worked example, because all three plausible homes were arguable. Not `manifest`: a manifest describes what a *block* says about itself, and a deployment's supplied values are not that. Not `daemon`: the rule is pure ABI semantics with no engine and no configuration *format* in it, and leaving it there would mean the leaf runtime — whose configuration source is shaped differently — reimplementing the precedence from scratch, which is the silent divergence this split exists to prevent. So `host-core`, which is also the only crate that *can* hold it: the rule consumes `manifest`'s `Manifest` and produces `host-core`'s `PropertySource`, and the dependency runs host-core → manifest. The daemon reaches it from `--prop` flags today and from service files later; the leaf reaches it from whatever it reads. One implementation, two hosts.
 
+The same reasoning is why **`abi` is a crate and not a module of `host-core`**, which is where ABI §8's codes started. `host-core` is the *host* half of the boundary: it drives a guest through its lifecycle and resolves properties, and depends on `expr` and `manifest` to do it. But §8's codes, §3's sentinels and §9.6's alignment are not host rules — a guest compares against every one of them, and `eio-sdk` needs them too. Left in `host-core`, a block reaching for `ERR_THROTTLED` would compile the expression interpreter and the manifest parser into its `.wasm`; re-declared in the SDK, the platform would hold two hand-maintained copies of a table the two sides MUST agree on byte for byte. So they sit below both, in a crate with no dependencies at all — which is the property worth protecting, since anything added there is added to every block that ships. ABI §12's version is deliberately *not* among them: `eio_manifest::Abi` already holds the packed form together with the compatibility rule that gives it meaning, and a bare constant in `abi` would be a second spelling of the number sitting next to the one implementation that knows what to do with it. `host-core` re-exports the lot, so a host still has one import for the ABI and the move is invisible at its call sites.
+
 The same reasoning puts **both halves of ABI §9.7 in `host-core`**, and it is worth stating because they arrived at different times and the split looked survivable. §9.7 is one rule read in two directions: the host "rejects `emit` beyond `max_payload` with `ERR_LIMIT`" and "never delivers batches beyond" the limits its descriptor published. Neither half has an engine or a queue in it — the numbers come from the instance descriptor (ABI §5.2) and the answer is a refusal, not a delivery — so both belong beside each other, and a leaf runtime that reimplemented the inbound half would be free to disagree with the daemon about which batches a block is entitled to never see. Concretely: the driver takes the batch *decoded* and encodes it itself, because the guest is handed canonical CBOR (§6.1) while `prop`'s `signal_idx` indexes the same call's signals (§7.1), and a host supplying those by two paths could supply two different batches. Refusing is therefore its own outcome rather than a status: the guest was never called, so nothing is counted against it (§8), and the daemon's part is only saying what the refusal means to an operator (§11).
 
 For the same reason the **property scope is the driver's**, not its caller's. ABI §7.1 answers `prop` "for the duration of the current callback", so `host-core` holds the instance's property context and opens a scope around every guest call it makes. A host cannot forget to open one, cannot leave one open across callbacks, and cannot pair a callback with the wrong batch — which is the ABI rule most likely to be implemented twice and slightly differently.
@@ -43,6 +48,7 @@ For the same reason the **property scope is the driver's**, not its caller's. AB
 
 |Directory|Package|Import path|
 |---|---|---|
+|`abi/`|`eio-abi`|`eio_abi`|
 |`host-core/`|`eio-host-core`|`eio_host_core`|
 |`expr/`|`eio-expr`|`eio_expr`|
 |`signal/`|`eio-signal`|`eio_signal`|

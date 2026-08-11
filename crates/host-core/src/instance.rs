@@ -116,7 +116,7 @@ use crate::engine::{Engine, Trap, TrapKind};
 use crate::exports::{optional, required};
 use crate::memory::{DeliveryFailure, Inbound};
 use crate::prop::PropContext;
-use crate::status::{ErrorCode, Status};
+use eio_abi::{ErrorCode, Status};
 
 /// What a guest call did, for a call that leaves the instance in state `T`.
 ///

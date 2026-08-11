@@ -1,0 +1,15 @@
+[package]
+name = "eio-abi"
+description = "The eieio block ABI's shared vocabulary: status codes, sentinels, alignment, version (ABI-SPEC §3, §8, §9.6, §12)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies, and that is the crate's whole value. It sits below both halves of the
+# ABI — `host-core` on one side, `eio-sdk` compiled into a guest on the other — so anything
+# added here is added to every block that ships. Numbers the spec fixes need nothing.
+
+[lints]
+workspace = true

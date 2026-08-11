@@ -40,10 +40,7 @@ use crate::budget::ExprBudgets;
 use crate::descriptor::Limits;
 use crate::engine::{Engine, Trap, TrapKind};
 use crate::exports::required;
-use crate::status::{ErrorCode, Status};
-
-/// The alignment `eio_alloc` MUST return (ABI §9.6).
-pub const ALLOC_ALIGN: u32 = 8;
+use eio_abi::{ALLOC_ALIGN, ErrorCode, Status};
 
 /// An inbound payload: allocated in the guest, written, and handed over.
 ///

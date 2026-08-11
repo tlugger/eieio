@@ -8,6 +8,12 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The ABI's shared vocabulary: status codes, sentinels, alignment, version (ABI
+# §3, §8, §9.6, §12). Below this crate rather than in it, because the guest SDK
+# reads the same numbers and must not compile an expression interpreter to do it.
+# Everything from it is re-exported, so a host still has one import for the ABI.
+eio-abi.workspace = true
+
 # Batches and the instance descriptor are CBOR (ABI §5.2, §6.3), and this crate
 # builds one and delivers the other.
 eio-signal.workspace = true

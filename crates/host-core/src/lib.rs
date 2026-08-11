@@ -128,7 +128,6 @@ mod instance;
 mod memory;
 mod prop;
 mod router;
-mod status;
 
 pub mod exports;
 
@@ -141,7 +140,7 @@ pub use instance::{
     Configured, Configuring, Delivering, Outcome, Refusal, Running, Starting, Stopped, abi_version,
     check_required_exports,
 };
-pub use memory::{ALLOC_ALIGN, DeliveryFailure, Inbound, OutBuffer, Outbound};
+pub use memory::{DeliveryFailure, Inbound, OutBuffer, Outbound};
 pub use prop::{
     CompileError, PropContext, PropFailure, PropertyError, PropertySource, ResolveError, resolve,
 };
@@ -149,17 +148,11 @@ pub use router::{
     Connection, Deliveries, End, Endpoint, Overflow, PORT_ERR_NAME, Port, RouteError, Routes,
     Target,
 };
-pub use status::{ErrorCode, Id, Size, Status};
-
-/// No signal context: property evaluation outside `process_signals` (ABI §3, §7.1).
-///
-/// Carried as an `i32` across the boundary, where it is `-1`; a host compares the *unsigned*
-/// interpretation, which is what this constant is.
-pub const SIGNAL_NONE: u32 = 0xFFFF_FFFF;
-
-/// The reserved error output port (ABI §3, §6.4).
-///
-/// Every block has it without declaring it, which is why it is a sentinel rather than an
-/// index into the descriptor's `outputs` — and why it needs a name of its own,
-/// [`PORT_ERR_NAME`], for a service file to route it by.
-pub const PORT_ERR: u32 = 0xFFFF_FFFE;
+// The ABI's shared vocabulary lives in `eio-abi`, below both halves of the boundary, so
+// that a guest can read ABI §8's codes without compiling this crate's expression
+// interpreter and manifest parser (see that crate's module docs). Re-exported rather than
+// merely available: a host has one import for the ABI, and moving these out was not meant
+// to be visible at the call sites.
+//
+// [`PORT_ERR`] is the sentinel; [`PORT_ERR_NAME`] is the name a service file routes it by.
+pub use eio_abi::{ALLOC_ALIGN, ErrorCode, Id, Level, PORT_ERR, SIGNAL_NONE, Size, Status};
