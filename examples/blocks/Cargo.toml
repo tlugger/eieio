@@ -1,0 +1,25 @@
+# The golden blocks of ABI-SPEC §13.2, as one cargo workspace.
+#
+# Deliberately NOT members of the repository's workspace: they build for
+# `wasm32-unknown-unknown` as cdylibs, which is a different target and crate type than
+# anything in `crates/`, and `just build` should not build them on every invocation. The
+# justfile's `check-lint-optin` recipe walks `cargo metadata` of the root workspace for
+# exactly this reason, so nothing here carries the `[lints]` opt-in.
+#
+# A workspace of five rather than five loose crates, for one measured reason: they share a
+# target directory, so `eio-sdk` and its dependencies are compiled once for all five instead
+# of once each. A generated block repo (`cargo eio new`, SDK §5.1) is a standalone crate with
+# an empty `[workspace]` table; these are not generated, they are fixtures this repository
+# builds on every test run, and the build cost is the whole difference.
+[workspace]
+resolver = "3"
+members = ["counter", "emitter", "filter", "gpio-echo", "transform"]
+
+# Stated once here rather than per block. SDK §5.2's defaults are what `cargo eio build`
+# enforces anyway; restating them means a plain `cargo build --release` produces the same
+# modules, which is what the conformance suite reads off disk.
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+strip = true

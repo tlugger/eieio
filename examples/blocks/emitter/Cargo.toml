@@ -1,0 +1,14 @@
+[package]
+name = "emitter"
+version = "1.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+eio-sdk = { path = "../../../crates/block-sdk" }
+
+[dev-dependencies]
+eio-test-host = { path = "../../../crates/test-host" }

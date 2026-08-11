@@ -1,10 +1,11 @@
 
 # Rust build artifacts (Cargo.lock IS committed — the workspace ships binaries)
 /target/
-# The conformance suite'''s Rust block fixture is its own cargo project, built on demand by
-# tests/wasm3.rs, so its artifacts are not under the workspace target dir (ABI §13.1).
-crates/conformance/scenarios/blocks/rust-transform/target/
-crates/conformance/scenarios/blocks/rust-transform/Cargo.lock
+# The golden blocks (ABI §13.2) are their own cargo workspace, built on demand by
+# `eio_conformance::golden`, so their artifacts are not under the workspace target dir.
+# Their Cargo.lock IS committed: they are conformance fixtures, and a fixture that builds
+# differently on two days is a fixture nobody can vouch for.
+examples/blocks/target/
 **/*.rs.bk
 
 # Release tarballs, from `just release-daemon` (SCOPE §7.2)

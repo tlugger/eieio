@@ -49,6 +49,7 @@ nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk"
 # The guest target (ABI §1). Blocks are core WASM modules and nothing else.
 guest_target := "wasm32-unknown-unknown"
 
+
 # List the available recipes.
 default:
     @just --list --unsorted
@@ -107,6 +108,16 @@ build:
 test:
     cargo test --workspace
 
+# The golden blocks (ABI §13.2) are their own cargo workspace under `examples/blocks/`, so
+# `cargo test --workspace` above never sees them. Their harness half is checked by the
+# conformance suite, which builds and drives them, and `cargo eio build` is run over all five
+# by `cargo-eio`'s own tests — but their `tests/native.rs` files are SDK §6.1's other layer,
+# and this is the only thing that runs them.
+
+# Run the golden blocks' native tests (SDK §6.1).
+test-golden:
+    cargo test --manifest-path examples/blocks/Cargo.toml
+
 # See the comment block at the top of this file for the target rationale.
 
 # Prove the ★ crates still build without std.
@@ -137,7 +148,7 @@ check-guest:
 # ── the gate ─────────────────────────────────────────────────────────────────
 
 # The one command CI runs. Dependencies run in order; the first failure aborts.
-ci: fmt-check lint build test check-nostd check-guest
+ci: fmt-check lint build test test-golden check-nostd check-guest
     @echo "ci: all gates passed"
 
 # ── run recipes ──────────────────────────────────────────────────────────────
