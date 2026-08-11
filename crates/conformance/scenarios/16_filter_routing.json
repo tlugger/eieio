@@ -1,0 +1,32 @@
+{
+  "name": "a-filter-routes-by-port-and-sends-what-it-cannot-route-to-err",
+  "spec": "§5.2, §6.2, §6.4, §7.1, §13.2",
+  "note": "Multi-port routing, and the reserved error port used the way §6.4 describes it: failure with a data path. Three signals — one above the threshold, one below, one whose reading cannot be evaluated at all. The third does not fail the callback: this block handles the failure itself and emits that signal on `err`, which is a port it never declared. The property failure is still recorded by the host, which is how an operator tells a deliberate routing decision from a broken expression. Five prop calls, three evaluations: `reading` is asked for every signal and `threshold` only for the two that got that far, while the evaluation count is `reading`'s three — `threshold` is signal-independent, so EXPR §10's constant folding costs it none however often it is asked for. A host that folded nothing would report five.",
+  "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/filter.wasm",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": {
+        "deliver": {
+          "port": "in",
+          "batch": "83a16576616c7565fb4051800000000000a16576616c7565fb4034000000000000a16577726f6e6701"
+        }
+      },
+      "expect": {
+        "status": 0,
+        "calls": [ "prop", "prop", "prop", "prop", "prop", "emit", "emit", "emit" ],
+        "evaluations": 3,
+        "property_failures": [ { "property": "reading", "signal": 2 } ],
+        "emissions": [
+          { "port": "above", "batch": "81a16576616c7565fb4051800000000000" },
+          { "port": "below", "batch": "81a16576616c7565fb4034000000000000" },
+          { "port": "err", "batch": "81a16577726f6e6701" }
+        ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

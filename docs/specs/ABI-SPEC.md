@@ -547,19 +547,25 @@ Every run records every `eio_alloc` the host made for an inbound payload (§6.1)
 - **The host MUST NOT call `eio_free`.** Rule §9.2 makes the guest the owner from the moment the callback begins, and a host-side free would be the second owner that rule exists to prevent.
 - **The host MUST NOT write into guest memory it did not allocate** (§9.1). The other writing path — a `(buf, cap)` the guest supplied in the current call — is bounded by `cap` under the size convention, so it needs no ledger to check.
 
-What no harness can see is the *guest's* frees. `eio_free` is an export (§4.1), so a guest releasing an inbound payload calls it as an ordinary intra-module call, which no engine surfaces to its embedder. A harness claiming to check §6.1's "the guest MUST `eio_free` it" from the outside would be claiming knowledge no host has. That obligation is therefore tested from the *inside*, by a golden block that counts its own allocations and frees and refuses to stop unbalanced (§13.2); the harness's part is to run enough deliveries for a leak to show and to report the guest's linear-memory growth across the run.
+What no harness can see is the *guest's* frees. `eio_free` is an export (§4.1), so a guest releasing an inbound payload calls it as an ordinary intra-module call, which no engine surfaces to its embedder. A harness claiming to check §6.1's "the guest MUST `eio_free` it" from the outside would be claiming knowledge no host has. That obligation is therefore tested from the *inside*, by a fixture that counts its own allocations and frees and refuses to stop unbalanced — a hand-written one, for the reason §13.2 gives: a block written through the SDK never sees either call, so it has nothing to count. The harness's part is to run enough deliveries for a leak to show and to report the guest's linear-memory growth across the run.
 
 ### 13.2 Golden blocks
 
-Small blocks, each exercising one contract area, and each self-checking where the ABI gives it something to check:
+Small blocks, each exercising one contract area:
 
 |Block|Exercises|
 |---|---|
 |Pure transform|§6.1, §6.2, §7.1 — a batch in, a batch out, one property per signal|
-|Filter|§5.2, §6.2 — multi-port routing by an expression-valued predicate|
-|Timer emitter|§4.2, §7.3 — emission with no inbound batch at all|
-|Stateful counter|§7.2 — durable state, and the allocation self-count of §13.1|
+|Filter|§5.2, §6.2, §6.4 — multi-port routing by an expression-valued predicate, and what it cannot route to the error port|
+|Timer emitter|§4.2, §7.3 — emission with no inbound batch at all, and §3's `SIGNAL_NONE` property read|
+|Stateful counter|§7.2, §5.1 — durable state, across an instance that did not survive|
 |GPIO echo|§4.2, §7.4 — a watch, an edge, an output|
+
+They live in `examples/blocks/`, and they are **written with the SDK** — ordinary blocks a block author could have written, built by the ordinary toolchain with no flags. That is deliberate and it is what makes them worth running: a fixture hand-written to the raw ABI proves a host can drive *that fixture*, while these prove a host can drive what the platform actually produces. It also makes them the SDK's acceptance tests, and ABI §14's litmus applies in that direction too — friction found while writing one is a defect in the SDK or in this specification, not in the block.
+
+They are **not** the fixtures that test the harness itself. A scenario that injects a fault needs a guest that misbehaves on demand: a first buffer too small for the answer (§8's grow-and-retry), an emission past `max_payload` or to an undeclared port (§6.2's three refusals), an allocator that lies (§9.6). The SDK exists to make all three unwritable — `Ctx::emit` refuses an oversized batch before the host sees it, and an undeclared port is a compile error — so those scenarios keep hand-written `.wat` fixtures, and a golden block would make the suite test the harness with the harness's own output. `crates/conformance/scenarios/blocks/` holds them.
+
+The guest-side allocation ledger belongs there for the same reason. §13.1 requires §6.1's "the guest MUST `eio_free` it" to be checked from the inside, and a block written with the SDK cannot check it: every allocation and free is the SDK's audited glue (SDK §4), which is the point of the SDK. The fixture that counts its own allocations and refuses to stop unbalanced is therefore a hand-written one; what the golden blocks contribute to the same question is the leak signal, linear-memory growth across a run.
 
 And the hostile blocks, which are conformant modules behaving badly on purpose — a host MUST survive every one of them with the outcome named:
 

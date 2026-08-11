@@ -2,7 +2,7 @@
   "name": "prop-grow-and-retry",
   "spec": "§7.1, §8, §13.1",
   "note": "ABI §13.1's undersized-buffer fault on the property path. The block offers four bytes; the value needs nine, so the host answers with the size and the block retries. Three prop calls, one evaluation: the retry MUST be served from the cache.",
-  "module": "blocks/transform.wat",
+  "module": "blocks/harness.wat",
   "limits": { "max_payload": 1024, "max_batch": 16 },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },

@@ -2,7 +2,7 @@
   "name": "a-batch-beyond-max-payload-is-never-delivered",
   "spec": "§9.7",
   "note": "The other half of the same rule, on the encoded length rather than the signal count. Four bytes is below the five this batch encodes to, so it never reaches the guest.",
-  "module": "blocks/transform.wat",
+  "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/transform.wasm",
   "limits": { "max_payload": 4, "max_batch": 16 },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },

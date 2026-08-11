@@ -14,7 +14,7 @@ use eio_conformance::{Reference, suite};
 #[test]
 fn the_reference_host_passes_the_suite() {
     let mut host = Reference::new().expect("a wasmtime engine");
-    let summary = suite::run_dir(&suite::scenarios_dir(), &mut host).expect("the suite loads");
+    let summary = suite::run_own(&mut host).expect("the suite loads");
 
     // The reference host implements every ABI §7 namespace, so nothing here may be skipped —
     // a skip would mean the suite is describing a host this one is not.
@@ -45,6 +45,10 @@ fn the_harness_does_not_depend_on_the_sdk() {
     // `manifest`, `signal`, `expr` — can acquire one either, because `eio-sdk` compiles into
     // guests and depends on *them* (DAEMON §1). A transitive edge would be a dependency cycle
     // cargo refuses outright.
+    //
+    // `golden` shelling out to cargo to build `examples/blocks/` is not one of these, and the
+    // difference is the whole point: the harness never *links* the SDK, so everything it does
+    // it can do to a module produced by any toolchain. What it builds is fixtures.
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("this crate has a manifest");
     for line in manifest.lines() {
@@ -63,7 +67,7 @@ fn the_host_never_frees_and_never_writes_where_it_did_not_allocate() {
     // that stopped being populated, or stopped being reported — is a failing test rather than
     // a suite that quietly checks less.
     let mut host = Reference::new().expect("a wasmtime engine");
-    let summary = suite::run_dir(&suite::scenarios_dir(), &mut host).expect("the suite loads");
+    let summary = suite::run_own(&mut host).expect("the suite loads");
     for report in &summary.reports {
         assert!(
             report.host_faults.is_empty(),

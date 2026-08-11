@@ -71,8 +71,7 @@ impl Host for Daemon {
 #[test]
 fn the_daemon_passes_the_conformance_suite() {
     let mut host = Daemon { engine: None };
-    let summary =
-        suite::run_dir(&suite::scenarios_dir(), &mut host).expect("the conformance suite loads");
+    let summary = suite::run_own(&mut host).expect("the conformance suite loads");
 
     // Printed, always: which scenarios this host cannot reach is the part of the report that
     // changes as the daemon grows capabilities, and a skip nobody sees is a gap nobody closes.

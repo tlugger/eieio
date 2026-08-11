@@ -1,9 +1,23 @@
-;; The harness's own workhorse: a property per signal, one emission, and a ledger.
+;; The fixture for the assertions a *golden block* cannot make.
 ;;
-;; Hand-written `.wat` and not an SDK block, deliberately — the golden blocks of ABI §13.2
-;; depend on this harness, so the fixtures that test the harness cannot be them. It is also
-;; the honest shape for the job: nothing here comes from `eio-sdk`, which is the coupling
-;; §13.1 rules out.
+;; Most scenarios drive ABI §13.2's golden blocks — real `eio-sdk` crates under
+;; `examples/blocks/` — because driving what the platform actually produces is the point.
+;; Two cannot, and this module is why they still exist:
+;;
+;;   `02_grow_and_retry`  asks for property 0 three times from a four-byte buffer, which is
+;;                        how §7.1's "three calls, one evaluation" — the assertion that
+;;                        catches a host that re-evaluates — is reachable at all. The SDK
+;;                        retains its buffer and asks once.
+;;   `06_emit_refusals`   checks §6.2's three fixed refusals from the guest's side. The SDK
+;;                        refuses an oversized batch before the host sees it, and an
+;;                        undeclared port is a compile error: making both unwritable is what
+;;                        the SDK is for.
+;;
+;; It carries §13.1's guest-side allocation ledger for the same reason: a block written
+;; through the SDK never sees `eio_alloc` or `eio_free`, so it has nothing of its own to
+;; count. And it imports `eio:core` and nothing else, deliberately — a scenario is skipped
+;; when its *module* declares a capability the host lacks, so a capability here would make
+;; the daemon skip both of the above.
 ;;
 ;; # What each port is for
 ;;

@@ -1,20 +1,19 @@
-;; `eio:state`, read with a real buffer and written back (ABI §7.2).
+;; `eio:state` with a four-byte first buffer, for the one state fault a golden block cannot
+;; produce (ABI §7.2, §13.1).
 ;;
-;; The fixture the three state faults of ABI §13.1 are injected into:
+;; ABI §13.2's golden counter drives the rest of the state path — the round trip, a throttled
+;; write, a denied capability — because it is a real `eio-sdk` block and those are answers any
+;; block gets. **An undersized buffer is not.** The SDK starts a capability read from 64
+;; bytes, and a counter that stores an integer never needs a second call, so `state_get`'s
+;; grow-and-retry (ABI §8) is unreachable through it. This fixture offers four bytes, so a
+;; scenario scripting a longer answer drives the retry and the second call appears in the
+;; report — `10_state_grow_and_retry` is the only scenario left here.
 ;;
-;; - **An undersized buffer.** The first `state_get` offers four bytes. A scenario that
-;;   scripts a longer answer drives ABI §8's grow-and-retry, and the second call appears in
-;;   the report; a scenario that seeds a short value does not, and it does not. Which of the
-;;   two happened is therefore visible rather than inferred.
-;; - **`ERR_THROTTLED`.** A leaf host refuses `state_put` on a flash wear budget (ABI §7.2),
-;;   which is a property of the hardware — so a block's back-off branch is unreachable without
-;;   a scripted refusal. This one reports the code as its status.
-;; - **Denial.** With the capability denied, the first `state_get` answers `ERR_CAPABILITY`
-;;   and the block never reaches its own logic, which is the whole of what a denied block can
-;;   do.
+;; The contrast is the point rather than the coverage: the retry has to be visible when it
+;; happens and absent when it does not, and `09_state_round_trip` is where it does not.
 ;;
-;; Every refusal comes back as the callback's status, so the scenario reads one number and
-;; knows which branch ran.
+;; Refusals come back as the callback's status, so a scenario reads one number and knows
+;; which branch ran.
 ;;
 ;;   0    "count"                 the key
 ;;   256  81 a1 61 6e 07          `[{"n": 7}]`, emitted on success

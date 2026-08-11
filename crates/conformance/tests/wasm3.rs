@@ -24,12 +24,20 @@
 //! - **No execution budget.** wasm3 has no fuel counter, and a watchdog is the leaf runtime's
 //!   to add rather than the interpreter's to provide. [`Host::enforces_budgets`] answers
 //!   `false`, so scenarios expecting a budget death are skipped by name rather than hanging.
+//!
+//! # Where the toolchain question went
+//!
+//! This file used to carry a fixture crate of its own and one bespoke test, to answer the
+//! question ABI §1.1's accepted feature set turns on: *is what rustc emits for
+//! `wasm32-unknown-unknown` something a conformant host loads?* It no longer needs to. The
+//! golden blocks of §13.2 are ordinary `eio-sdk` crates built with no flags at all
+//! (`eio_conformance::golden`), and the suite below drives them through §5.1's whole
+//! lifecycle on this engine — so the question is now answered by every run rather than by one
+//! test beside the run, and by five blocks rather than by one.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use eio_conformance::{Budget, Host, HostError, Loaded, Reference, Scenario, run, suite};
+use eio_conformance::{Budget, Host, HostError, suite};
 use eio_host_core::{
     Arg, Engine, EngineError, HostCall, HostFn, Memory as GuestMemory, Ret, Trap, TrapKind,
     memory_range,
@@ -343,7 +351,7 @@ fn link(linker: &mut Linker<State>) -> wasm3x::Result<()> {
 #[test]
 fn wasm3_passes_the_conformance_suite() {
     let mut host = Wasm3;
-    let summary = suite::run_dir(&suite::scenarios_dir(), &mut host).expect("the suite loads");
+    let summary = suite::run_own(&mut host).expect("the suite loads");
 
     // Printed always: which scenarios a second engine cannot reach is the whole reason this
     // file exists, and a skip nobody sees is a divergence nobody investigates.
@@ -451,7 +459,7 @@ fn the_ledger_works_over_a_second_engine() {
     // checked on wasm3 without a line of wasm3-specific code. Asserted here because "it works
     // over any engine" is a claim with exactly one prior data point.
     let mut host = Wasm3;
-    let summary = suite::run_dir(&suite::scenarios_dir(), &mut host).expect("the suite loads");
+    let summary = suite::run_own(&mut host).expect("the suite loads");
     for report in &summary.reports {
         assert!(
             report.host_faults.is_empty(),
@@ -460,92 +468,4 @@ fn the_ledger_works_over_a_second_engine() {
             report.host_faults
         );
     }
-}
-
-// ── a block built by the ordinary Rust toolchain ─────────────────────────────
-//
-// Every other fixture here is hand-written `.wat`, which is right for pinning *host*
-// behaviour — a reviewer can read what the guest does — but cannot answer the question ABI
-// §1.1's accepted feature set turns on: **is what rustc emits for `wasm32-unknown-unknown`
-// something a conformant host loads?**
-//
-// That question was previously answered from reading, and wrongly. ABI §4.3 asserted a block
-// needed `-C target-feature=-bulk-memory` and that this was "the only flag needed"; measured
-// on rustc 1.97.1 the flag changes nothing, because the instructions come from precompiled
-// `rust-std`, which no `RUSTFLAGS` rebuilds. So it is a measurement now, on both engines.
-
-/// The fixture crate, built for the guest target with **no flags whatsoever**.
-///
-/// `--release` and nothing else. `panic = "abort"` sits in the fixture's own profile (SDK §4),
-/// which is where a block author would put it — the point being that nothing beyond an
-/// ordinary `cargo build` stands between a block author and a loadable module.
-fn build_rust_block() -> Vec<u8> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios/blocks/rust-transform");
-    let status = Command::new(env!("CARGO"))
-        .current_dir(&dir)
-        .args(["build", "--release", "--target", "wasm32-unknown-unknown"])
-        // Cleared, not inherited: this asserts what an *unadorned* build produces, and a
-        // developer with flags in their environment would otherwise be testing their shell.
-        .env_remove("RUSTFLAGS")
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .status()
-        .expect("cargo runs");
-    assert!(status.success(), "the fixture block did not build");
-
-    let wasm: PathBuf = dir.join("target/wasm32-unknown-unknown/release/rust_transform.wasm");
-    std::fs::read(&wasm).unwrap_or_else(|e| panic!("{}: {e}", wasm.display()))
-}
-
-/// The same expectations `01_lifecycle.json` makes of `transform.wat`.
-///
-/// Identical on purpose: a block written in Rust and one written by hand describe the same
-/// behaviour, so a host cannot be conformant for one and not the other. Same canonical bytes
-/// in and out (ABI §6.3.1).
-const RUST_SCENARIO: &str = r#"{
-  "name": "a-rust-toolchain-block-completes-its-lifecycle",
-  "spec": "ABI 1.1, 4, 5.1, 6.2, 7.1",
-  "module": "supplied as bytes, not read from disk",
-  "limits": { "max_payload": 65536, "max_batch": 16 },
-  "steps": [
-    { "action": "configure", "expect": { "status": 0 } },
-    { "action": "start", "expect": { "status": 0 } },
-    {
-      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
-      "expect": {
-        "status": 0,
-        "evaluations": 1,
-        "emissions": [ { "port": "out", "batch": "81a16376616c182a" } ]
-      }
-    },
-    { "action": "stop", "expect": { "status": 0 } }
-  ],
-  "expect": { "errors": 0 }
-}"#;
-
-fn rust_block() -> Loaded {
-    Loaded {
-        scenario: serde_json::from_str::<Scenario>(RUST_SCENARIO).expect("the scenario parses"),
-        wasm: build_rust_block(),
-        registry: None,
-    }
-}
-
-#[test]
-fn a_rust_toolchain_block_runs_on_both_engines() {
-    let loaded = rust_block();
-
-    // wasmtime first, because a failure there is a bug in the block or the SDK rather than a
-    // statement about any engine's feature set.
-    let reference = run(&loaded, &mut Reference::new().expect("a wasmtime engine"));
-    assert!(reference.ok(), "{reference}");
-
-    // And then the engine the whole restriction was imposed for. A stock `cargo build`,
-    // through ABI §5.1's full lifecycle, on the leaf-class interpreter.
-    let wasm3 = run(&loaded, &mut Wasm3);
-    assert!(wasm3.ok(), "{wasm3}");
-
-    // ABI §4.4: the `#[block]` macro emitted the manifest section, so the module described
-    // itself and no registry manifest was supplied — `run` refuses a module it cannot get a
-    // manifest for, so a passing report is the proof.
-    assert!(reference.host_faults.is_empty() && wasm3.host_faults.is_empty());
 }

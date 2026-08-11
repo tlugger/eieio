@@ -2,7 +2,7 @@
   "name": "a-watched-pin-echoes-its-level",
   "spec": "§4.2, §7.4, §8",
   "note": "The id-and-callback capability shape, next to counter.wat's size-convention one. The second edge scripts a level ABI §7.4 does not define — a host answering 7 to gpio_read is non-conformant, and the only way to find out whether a block believes it is to hand it one.",
-  "module": "blocks/gpio_echo.wat",
+  "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/gpio_echo.wasm",
   "limits": { "max_payload": 1024, "max_batch": 16 },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
@@ -23,11 +23,11 @@
     {
       "action": { "gpio": { "watch": 5, "value": 0 } },
       "script": [ { "function": "gpio_read", "raw": 7 } ],
-      "expect": { "status": -1, "calls": [ "gpio_read" ], "emissions": [] }
+      "expect": { "status": -1, "calls": [ "gpio_read", "error" ], "emissions": [] }
     },
     {
       "action": { "gpio": { "watch": 9, "value": 1 } },
-      "expect": { "status": -1, "calls": [], "emissions": [] }
+      "expect": { "status": -1, "calls": [ "error" ], "emissions": [] }
     },
     { "action": "stop", "expect": { "status": 0 } }
   ],

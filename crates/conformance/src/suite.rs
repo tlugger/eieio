@@ -21,6 +21,17 @@ pub fn scenarios_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("scenarios")
 }
 
+/// Runs **this repository's own** suite against `host`, golden blocks built first.
+///
+/// The one entry point every host binding here uses, because the alternative was five call
+/// sites each remembering to build the fixtures before naming them (ABI §13.2's golden
+/// blocks are `eio-sdk` crates under `examples/blocks/`, not bytes checked in). A host
+/// implemented elsewhere calls [`run_dir`] with its own directory and builds nothing.
+pub fn run_own<H: Host>(host: &mut H) -> Result<Summary, String> {
+    crate::golden::build();
+    run_dir(&scenarios_dir(), host)
+}
+
 /// Reads one scenario and the module it names.
 pub fn load(path: &Path) -> Result<Loaded, String> {
     let text =

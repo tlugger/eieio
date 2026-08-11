@@ -50,6 +50,7 @@ mod report;
 mod run;
 mod scenario;
 
+pub mod golden;
 pub mod suite;
 
 pub use capability::{Answer, Capabilities};

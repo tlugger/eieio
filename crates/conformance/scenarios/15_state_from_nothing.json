@@ -1,0 +1,21 @@
+{
+  "name": "a-fresh-instance-starts-from-nothing",
+  "spec": "§5.1, §7.2, §13.2",
+  "note": "The first half of ABI §5.1's re-instantiation pair. Nothing is seeded, so state_get answers ERR_NOT_FOUND and the block starts at zero — an absent key is an answer, not a failure (§7.2). What it leaves behind is what 09_state_round_trip is seeded with, and the block's own memory carries nothing between the two: a counter that kept its count in a field would pass this scenario and fail that one.",
+  "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/counter.wasm",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "82a1616e01a1616e02" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "state_get", "state_put", "emit" ],
+        "emissions": [ { "port": "out", "batch": "81a1616e02" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0, "state": { "count": "02" } }
+}
