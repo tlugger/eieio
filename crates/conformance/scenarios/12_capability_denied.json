@@ -1,0 +1,19 @@
+{
+  "name": "a-denied-capability-answers-err-capability",
+  "spec": "§8, §13.1",
+  "note": "Denial is at the function level and not the link level: the module still imports eio:state and still instantiates, or this would be a test of load-time validation instead of the block's response to a refusal.",
+  "module": "blocks/counter.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "deny": [ "state" ],
+  "state": { "count": "182a" },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": { "status": -4, "calls": [ "state_get" ], "emissions": [] }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 1 }
+}

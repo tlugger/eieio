@@ -486,11 +486,26 @@ name = "eio-abi"
 version = "0.1.0"
 
 [[package]]
+name = "eio-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eio-host-core",
+ "eio-manifest",
+ "eio-signal",
+ "serde",
+ "serde_json",
+ "wasmtime",
+ "wat",
+]
+
+[[package]]
 name = "eio-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "eio-conformance",
  "eio-expr",
  "eio-host-core",
  "eio-manifest",

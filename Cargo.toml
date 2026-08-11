@@ -8,6 +8,7 @@ members = [
     "crates/abi",
     "crates/block-sdk",
     "crates/block-sdk-macros",
+    "crates/conformance",
     "crates/test-host",
     "crates/daemon",
     "crates/expr",
@@ -69,9 +70,13 @@ regex = "1.11"
 # Rust parsers accept and reject, so the schema and the types cannot drift apart.
 boon = "0.6"
 
-# Dev-dependency only. Module fixtures are checked in as `.wat` so a reviewer can see
-# what each one is testing, and assembled at test time. Version-matched to wasmparser
-# because both come from the wasm-tools workspace.
+# Module fixtures are checked in as `.wat` so a reviewer can see what each one is testing,
+# and assembled at read time. Version-matched to wasmparser because both come from the
+# wasm-tools workspace.
+#
+# A dev-dependency everywhere but `eio-conformance`, where it is a real one: a conformance
+# scenario names its module as a file, and refusing to read a `.wat` there would mean the
+# suite could only be written against pre-assembled bytes nobody can review (ABI §13.1).
 wat = "1.255"
 
 # ── the daemon's own dependencies (std, never reachable from a ★ crate) ──────
@@ -168,6 +173,7 @@ trybuild = "1.0"
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.
 eio-abi = { path = "crates/abi", version = "0.1.0" }
+eio-conformance = { path = "crates/conformance", version = "0.1.0" }
 eio-sdk-macros = { path = "crates/block-sdk-macros", version = "0.1.0" }
 eio-expr = { path = "crates/expr", version = "0.1.0" }
 eio-host-core = { path = "crates/host-core", version = "0.1.0" }

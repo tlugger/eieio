@@ -1,0 +1,21 @@
+{
+  "name": "emits-three-fixed-refusals",
+  "spec": "§6.2, §6.4, §9.7",
+  "note": "The three answers ABI §6.2 says are NOT host-defined, checked from the guest's side: a length beyond max_payload is ERR_LIMIT, an undeclared output port is ERR_INVALID_ARG, and PORT_ERR is always accepted. The block returns -1, -2 or -3 to name whichever was wrong, so a status of 0 is the assertion.",
+  "module": "blocks/transform.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "probe", "batch": "81a1616e01" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "emit", "emit", "emit" ],
+        "emissions": [ { "port": "err", "batch": "81a1616e07" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

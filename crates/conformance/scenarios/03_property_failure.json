@@ -1,0 +1,23 @@
+{
+  "name": "a-property-fails-for-one-signal",
+  "spec": "§7.1, EXPR §6",
+  "note": "EXPR §6: missing data is an error, not null. The signal has no `n`, so the expression fails for that signal only — the instance is untouched and the block reports ERR_EXPR as its status.",
+  "module": "blocks/transform.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1617801" } },
+      "expect": {
+        "status": -3,
+        "calls": [ "prop" ],
+        "evaluations": 1,
+        "emissions": [],
+        "property_failures": [ { "property": "val", "signal": 0 } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 1 }
+}

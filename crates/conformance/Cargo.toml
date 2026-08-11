@@ -1,0 +1,49 @@
+[package]
+name = "eio-conformance"
+description = "The reference conformance harness for the eieio block ABI: scenario runner, fault injection, and a minimal wasmtime host (ABI-SPEC §13.1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The half of a host that is not about an engine. Driving a guest through
+# `eio_host_core` is the point of the harness rather than an implementation choice:
+# a harness with a lifecycle driver of its own would be a third host to keep in
+# agreement with the other two (ABI §13, DAEMON §1).
+eio-host-core.workspace = true
+
+# ABI §4's load-time validation, and the manifest a scenario derives its descriptor
+# from — port indices and `prop_id`s are the manifest's order (ABI §5.2, §11).
+eio-manifest.workspace = true
+
+# Batches, decoded from the canonical CBOR a scenario carries as hex (ABI §6.3.1).
+eio-signal.workspace = true
+
+# The reference engine. Same feature set as the daemon's, and for the same reason:
+# threads, the component model and GC are compiled out, so no `Config` call can
+# admit them (ABI §1.1, DAEMON §5.1).
+wasmtime.workspace = true
+
+# `wasmtime::Error` is `anyhow::Error`, so the reference host's own failures may as well be
+# too rather than converting at every boundary — the same reasoning as the daemon's.
+anyhow.workspace = true
+
+# Scenarios are data (ABI §13.1). Full `std` serde_json here — this crate is a host,
+# not a ★ crate.
+serde = { workspace = true, default-features = false, features = ["std"] }
+serde_json = { workspace = true, default-features = false, features = ["std"] }
+
+# A scenario names its module as a file, and fixtures are checked in as `.wat` so a
+# reviewer can read what each one exercises. Not a dev-dependency here: reading the
+# module is what the suite loader does, and its callers are tests in other crates.
+wat.workspace = true
+
+[dev-dependencies]
+# The reference host, run against the suite. Nothing else: the harness must consume
+# any conforming `.wasm`, so a dependency on `eio-sdk` here would be the coupling
+# ABI §13's language-agnosticism rules out (SDK §7).
+
+[lints]
+workspace = true

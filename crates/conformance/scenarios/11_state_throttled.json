@@ -1,0 +1,23 @@
+{
+  "name": "state-put-is-throttled",
+  "spec": "§7.2, §8, §13.1",
+  "note": "ABI §7.2's flash wear budget is a property of the hardware, so a block's back-off branch is unreachable without a scripted refusal. The instance lives: ERR_THROTTLED is a status, and statuses are life (§8).",
+  "module": "blocks/counter.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "state": { "count": "182a" },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "script": [ { "function": "state_put", "error": "throttled" } ],
+      "expect": {
+        "status": -6,
+        "calls": [ "state_get", "state_put" ],
+        "emissions": []
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 1, "state": { "count": "182a" } }
+}

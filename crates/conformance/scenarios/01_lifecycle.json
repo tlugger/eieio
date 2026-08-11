@@ -1,0 +1,29 @@
+{
+  "name": "lifecycle-and-the-property-cache",
+  "spec": "§5.1, §6.1, §6.2, §7.0, §7.1, §8",
+  "note": "The whole of ABI §5.1 once through, and the one assertion nothing else makes: three prop calls cost one evaluation, which is §7.1's per-callback cache. A host that re-evaluates passes every other check in this suite.",
+  "module": "blocks/transform.wat",
+  "instance_id": "conformance",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    {
+      "action": "configure",
+      "expect": {
+        "status": 0,
+        "logs": [ { "level": 2, "contains": "configured" } ]
+      }
+    },
+    { "action": "start", "expect": { "status": 0, "emissions": [] } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "prop", "prop", "emit" ],
+        "evaluations": 1,
+        "emissions": [ { "port": "out", "batch": "81a16376616c182a" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0, "max_memory_pages": 1 }
+}

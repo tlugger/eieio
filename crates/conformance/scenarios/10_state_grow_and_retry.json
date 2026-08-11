@@ -1,0 +1,25 @@
+{
+  "name": "state-grow-and-retry",
+  "spec": "§7.2, §8, §13.1",
+  "note": "ABI §13.1's undersized-buffer fault, injected the only way a host can inject it: with an answer that does not fit the buffer it was handed. Two state_get calls where 09 has one.",
+  "module": "blocks/counter.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "script": [
+        { "function": "state_get", "value": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff" },
+        { "function": "state_get", "value": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff" }
+      ],
+      "expect": {
+        "status": 0,
+        "calls": [ "state_get", "state_get", "state_put", "emit" ],
+        "emissions": [ { "port": "out", "batch": "81a1616e07" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

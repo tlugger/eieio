@@ -1,0 +1,21 @@
+{
+  "name": "a-batch-beyond-max-batch-is-never-delivered",
+  "spec": "§9.7, §13.1",
+  "note": "ABI §9.7's inbound half: the host never delivers a batch beyond the limits its descriptor published. The guest is not called, so there is no status and nothing counted against it (§8).",
+  "module": "blocks/transform.wat",
+  "limits": { "max_payload": 1024, "max_batch": 1 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "82a1616e01a1616e02" } },
+      "expect": { "refused": "batch", "calls": [], "emissions": [] }
+    },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": { "status": 0, "emissions": [ { "port": "out", "batch": "81a16376616c182a" } ] }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

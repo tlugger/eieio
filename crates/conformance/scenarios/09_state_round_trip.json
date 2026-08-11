@@ -1,0 +1,22 @@
+{
+  "name": "state-read-and-written-back",
+  "spec": "§7.2, §8",
+  "note": "The unscripted path: a seeded value short enough for the block's first buffer, so there is exactly one state_get and ABI §8's retry never runs. The contrast with 10_state_grow_and_retry is the whole point — the retry has to be visible when it happens and absent when it does not.",
+  "module": "blocks/counter.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "state": { "count": "182a" },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "state_get", "state_put", "emit" ],
+        "emissions": [ { "port": "out", "batch": "81a1616e07" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0, "state": { "count": "182a" } }
+}
