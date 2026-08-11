@@ -24,6 +24,8 @@ mod router;
 mod run;
 
 #[cfg(test)]
+mod conformance;
+#[cfg(test)]
 mod end_to_end;
 
 use std::collections::BTreeMap;

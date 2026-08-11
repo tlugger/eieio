@@ -51,6 +51,12 @@ anyhow.workspace = true
 serde_json = { workspace = true, default-features = false, features = ["std"] }
 
 [dev-dependencies]
+# ABI §13's "both the daemon and the leaf runtime MUST pass the harness". A dev-dependency
+# and not a lib target on this crate: DAEMON §1's table gives `eio-daemon` no import path,
+# so the harness reaches the daemon's wasmtime binding from inside its own test module
+# (`src/conformance.rs`) rather than the daemon publishing one.
+eio-conformance.workspace = true
+
 # Test blocks are checked in as `.wat` so a reviewer can read what each one exercises,
 # and assembled at test time. Same rationale, and same pin, as `manifest`'s fixtures.
 wat.workspace = true
