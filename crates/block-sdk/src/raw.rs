@@ -120,12 +120,170 @@ mod wasm {
         let (buf, len) = out_mut(buffer);
         rand(buf, len)
     }
+
+    // The capability namespaces (ABI §7.2–§7.6). Declared unconditionally, and that costs
+    // nothing: WASM emits an import only for a function something *references*, so a block
+    // that never calls a timer imports no `eio:timer` — which is exactly what ABI §4.3
+    // wants, since a module's imports must not exceed its declared capabilities. Measured,
+    // not assumed: `eio:core` declares seven and a real block imported the four it used.
+    //
+    // SAFETY: ABI §7.2 and §8, and the same reasoning as `eio:core` above — every one of
+    // these is specified total over its arguments, answering under §8's status, size or id
+    // convention, so a bad key or an undersized buffer is a code and never undefined
+    // behaviour. Each is `safe fn` for that reason, and every pointer reaching one is
+    // derived from a live slice by the wrappers in `capability`.
+    #[link(wasm_import_module = "eio:state")]
+    unsafe extern "C" {
+        safe fn state_get(key: i32, key_len: i32, buf: i32, cap: i32) -> i32;
+        safe fn state_put(key: i32, key_len: i32, val: i32, val_len: i32) -> i32;
+        safe fn state_del(key: i32, key_len: i32) -> i32;
+    }
+
+    // SAFETY: ABI §7.3 and §8, as for `eio:state` above — every function is
+    // specified total over its arguments and answers under §8's conventions, so
+    // a bad delay or timer id is a status code and never undefined behaviour. That is why each is
+    // `safe fn`, and every pointer reaching one is derived from a live slice by the
+    // wrappers below.
+    #[link(wasm_import_module = "eio:timer")]
+    unsafe extern "C" {
+        safe fn timer_set(delay_ms: i64, repeat: i32) -> i32;
+        safe fn timer_cancel(timer_id: i32) -> i32;
+    }
+
+    // SAFETY: ABI §7.4 and §8, as for `eio:state` above — every function is
+    // specified total over its arguments and answers under §8's conventions, so
+    // a bad pin, mode, edge or watch id is a status code and never undefined behaviour. That is why each is
+    // `safe fn`, and every pointer reaching one is derived from a live slice by the
+    // wrappers below.
+    #[link(wasm_import_module = "eio:gpio")]
+    unsafe extern "C" {
+        safe fn gpio_mode(pin: i32, mode: i32) -> i32;
+        safe fn gpio_read(pin: i32) -> i32;
+        safe fn gpio_write(pin: i32, value: i32) -> i32;
+        safe fn gpio_watch(pin: i32, edge: i32) -> i32;
+        safe fn gpio_unwatch(watch_id: i32) -> i32;
+    }
+
+    // SAFETY: ABI §7.5 and §8, as for `eio:state` above — every function is
+    // specified total over its arguments and answers under §8's conventions, so
+    // a bad bus, address or buffer is a status code and never undefined behaviour. That is why each is
+    // `safe fn`, and every pointer reaching one is derived from a live slice by the
+    // wrappers below.
+    #[link(wasm_import_module = "eio:i2c")]
+    unsafe extern "C" {
+        safe fn i2c_write(bus: i32, addr: i32, ptr: i32, len: i32) -> i32;
+        safe fn i2c_read(bus: i32, addr: i32, buf: i32, cap: i32) -> i32;
+        safe fn i2c_write_read(
+            bus: i32,
+            addr: i32,
+            wptr: i32,
+            wlen: i32,
+            buf: i32,
+            cap: i32,
+        ) -> i32;
+    }
+
+    // SAFETY: ABI §7.6 and §8, as for `eio:state` above — every function is
+    // specified total over its arguments and answers under §8's conventions, so
+    // a malformed request map is a status code and never undefined behaviour. That is why each is
+    // `safe fn`, and every pointer reaching one is derived from a live slice by the
+    // wrappers below.
+    #[link(wasm_import_module = "eio:http")]
+    unsafe extern "C" {
+        safe fn http_request(ptr: i32, len: i32) -> i32;
+    }
+
+    /// `state_get` (ABI §7.2). Size convention.
+    pub fn host_state_get(key: &str, buffer: &mut [u8]) -> i32 {
+        let (key_ptr, key_len) = out(key.as_bytes());
+        let (buf, cap) = out_mut(buffer);
+        state_get(key_ptr, key_len, buf, cap)
+    }
+
+    /// `state_put` (ABI §7.2).
+    pub fn host_state_put(key: &str, value: &[u8]) -> i32 {
+        let (key_ptr, key_len) = out(key.as_bytes());
+        let (val, val_len) = out(value);
+        state_put(key_ptr, key_len, val, val_len)
+    }
+
+    /// `state_del` (ABI §7.2).
+    pub fn host_state_del(key: &str) -> i32 {
+        let (key_ptr, key_len) = out(key.as_bytes());
+        state_del(key_ptr, key_len)
+    }
+
+    /// `timer_set` (ABI §7.3). Id convention.
+    pub fn host_timer_set(delay_ms: i64, repeat: bool) -> i32 {
+        timer_set(delay_ms, i32::from(repeat))
+    }
+
+    /// `timer_cancel` (ABI §7.3).
+    pub fn host_timer_cancel(timer_id: u32) -> i32 {
+        timer_cancel(timer_id as i32)
+    }
+
+    /// `gpio_mode` (ABI §7.4).
+    pub fn host_gpio_mode(pin: u32, mode: i32) -> i32 {
+        gpio_mode(pin as i32, mode)
+    }
+
+    /// `gpio_read` (ABI §7.4): `0`/`1`, or an error.
+    pub fn host_gpio_read(pin: u32) -> i32 {
+        gpio_read(pin as i32)
+    }
+
+    /// `gpio_write` (ABI §7.4).
+    pub fn host_gpio_write(pin: u32, value: i32) -> i32 {
+        gpio_write(pin as i32, value)
+    }
+
+    /// `gpio_watch` (ABI §7.4). Id convention.
+    pub fn host_gpio_watch(pin: u32, edge: i32) -> i32 {
+        gpio_watch(pin as i32, edge)
+    }
+
+    /// `gpio_unwatch` (ABI §7.4).
+    pub fn host_gpio_unwatch(watch_id: u32) -> i32 {
+        gpio_unwatch(watch_id as i32)
+    }
+
+    /// `i2c_write` (ABI §7.5).
+    pub fn host_i2c_write(bus: u32, addr: u32, bytes: &[u8]) -> i32 {
+        let (ptr, len) = out(bytes);
+        i2c_write(bus as i32, addr as i32, ptr, len)
+    }
+
+    /// `i2c_read` (ABI §7.5). Size convention.
+    pub fn host_i2c_read(bus: u32, addr: u32, buffer: &mut [u8]) -> i32 {
+        let (buf, cap) = out_mut(buffer);
+        i2c_read(bus as i32, addr as i32, buf, cap)
+    }
+
+    /// `i2c_write_read` (ABI §7.5). Size convention.
+    pub fn host_i2c_write_read(bus: u32, addr: u32, write: &[u8], buffer: &mut [u8]) -> i32 {
+        let (wptr, wlen) = out(write);
+        let (buf, cap) = out_mut(buffer);
+        i2c_write_read(bus as i32, addr as i32, wptr, wlen, buf, cap)
+    }
+
+    /// `http_request` (ABI §7.6). Id convention.
+    pub fn host_http_request(request: &[u8]) -> i32 {
+        let (ptr, len) = out(request);
+        http_request(ptr, len)
+    }
 }
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub use wasm::{
-    host_emit as emit, host_error as error, host_log as log, host_prop as prop, host_rand as rand,
-    host_time_mono_ms as time_mono_ms, host_time_unix_ms as time_unix_ms,
+    host_emit as emit, host_error as error, host_gpio_mode as gpio_mode,
+    host_gpio_read as gpio_read, host_gpio_unwatch as gpio_unwatch, host_gpio_watch as gpio_watch,
+    host_gpio_write as gpio_write, host_http_request as http_request, host_i2c_read as i2c_read,
+    host_i2c_write as i2c_write, host_i2c_write_read as i2c_write_read, host_log as log,
+    host_prop as prop, host_rand as rand, host_state_del as state_del, host_state_get as state_get,
+    host_state_put as state_put, host_time_mono_ms as time_mono_ms,
+    host_time_unix_ms as time_unix_ms, host_timer_cancel as timer_cancel,
+    host_timer_set as timer_set,
 };
 
 #[cfg(all(
@@ -133,11 +291,17 @@ pub use wasm::{
     not(target_os = "none")
 ))]
 pub use stub::{
-    Call, Recorder, emit, error, log, prop, rand, recorded, time_mono_ms, time_unix_ms,
+    Call, Recorder, emit, error, gpio_mode, gpio_read, gpio_unwatch, gpio_watch, gpio_write,
+    http_request, i2c_read, i2c_write, i2c_write_read, log, prop, rand, recorded, state_del,
+    state_get, state_put, time_mono_ms, time_unix_ms, timer_cancel, timer_set,
 };
 
 #[cfg(target_os = "none")]
-pub use inert::{emit, error, log, prop, rand, time_mono_ms, time_unix_ms};
+pub use inert::{
+    emit, error, gpio_mode, gpio_read, gpio_unwatch, gpio_watch, gpio_write, http_request,
+    i2c_read, i2c_write, i2c_write_read, log, prop, rand, state_del, state_get, state_put,
+    time_mono_ms, time_unix_ms, timer_cancel, timer_set,
+};
 
 #[cfg(all(
     not(all(target_arch = "wasm32", target_os = "unknown")),
@@ -175,6 +339,34 @@ mod stub {
         TimeMonoMs,
         /// `rand` — the number of bytes asked for.
         Rand(usize),
+        /// `state_get` — the key.
+        StateGet(String),
+        /// `state_put` — the key and the value.
+        StatePut(String, Vec<u8>),
+        /// `state_del` — the key.
+        StateDel(String),
+        /// `timer_set` — the delay and whether it repeats.
+        TimerSet(i64, bool),
+        /// `timer_cancel` — the timer id.
+        TimerCancel(u32),
+        /// `gpio_mode` — the pin and the ABI §7.4 mode number.
+        GpioMode(u32, i32),
+        /// `gpio_read` — the pin.
+        GpioRead(u32),
+        /// `gpio_write` — the pin and the level.
+        GpioWrite(u32, i32),
+        /// `gpio_watch` — the pin and the ABI §7.4 edge number.
+        GpioWatch(u32, i32),
+        /// `gpio_unwatch` — the watch id.
+        GpioUnwatch(u32),
+        /// `i2c_write` — bus, address, bytes.
+        I2cWrite(u32, u32, Vec<u8>),
+        /// `i2c_read` — bus and address.
+        I2cRead(u32, u32),
+        /// `i2c_write_read` — bus, address, the bytes written.
+        I2cWriteRead(u32, u32, Vec<u8>),
+        /// `http_request` — the encoded request map.
+        HttpRequest(Vec<u8>),
     }
 
     #[derive(Default)]
@@ -189,6 +381,17 @@ mod stub {
         /// The byte `rand` fills with, so a test can tell host bytes from untouched ones
         /// without needing an RNG in the stub.
         rand_fill: u8,
+        /// What the size-convention capability reads answer with, in order. Shared by
+        /// `state_get` and `i2c_read`: both follow ABI §8's size convention, and a test
+        /// exercising the grow-and-retry loop is exercising the same loop either way.
+        reads: VecDeque<Vec<u8>>,
+        /// Ids handed out by `timer_set`, `gpio_watch` and `http_request`, in order.
+        ids: VecDeque<i32>,
+        /// What `gpio_read` returns, in order.
+        levels: VecDeque<i32>,
+        /// A status every capability call returns instead of succeeding, if set — how a
+        /// test reaches `ERR_THROTTLED` (ABI §7.2) without a real flash budget.
+        refuse_with: Option<i32>,
     }
 
     thread_local! {
@@ -240,10 +443,72 @@ mod stub {
             self
         }
 
+        /// Queues bytes for the next size-convention read (`state_get`, `i2c_read`).
+        pub fn queue_read(&self, answer: &[u8]) -> &Self {
+            STATE.with(|state| state.borrow_mut().reads.push_back(answer.to_vec()));
+            self
+        }
+
+        /// Queues an id for the next `timer_set`, `gpio_watch` or `http_request`.
+        pub fn queue_id(&self, id: i32) -> &Self {
+            STATE.with(|state| state.borrow_mut().ids.push_back(id));
+            self
+        }
+
+        /// Queues a level for the next `gpio_read`.
+        pub fn queue_level(&self, level: i32) -> &Self {
+            STATE.with(|state| state.borrow_mut().levels.push_back(level));
+            self
+        }
+
+        /// Makes every capability call refuse with `code` (ABI §8).
+        pub fn refuse_with(&self, code: eio_abi::ErrorCode) -> &Self {
+            STATE.with(|state| state.borrow_mut().refuse_with = Some(code.as_i32()));
+            self
+        }
+
         /// Every call recorded on this thread, in order.
         pub fn calls(&self) -> Vec<Call> {
             recorded()
         }
+    }
+
+    /// The refusal a test asked for, if any.
+    fn refusal() -> Option<i32> {
+        STATE.with(|state| state.borrow().refuse_with)
+    }
+
+    /// ABI §8's size convention over the queued reads, shared by `state_get` and
+    /// `i2c_read` — the two capability calls that use it.
+    fn sized_read(buffer: &mut [u8]) -> i32 {
+        if let Some(code) = refusal() {
+            return code;
+        }
+        let answer = STATE.with(|state| state.borrow_mut().reads.pop_front());
+        let Some(answer) = answer else {
+            return eio_abi::ErrorCode::NotFound.as_i32();
+        };
+        if answer.len() > buffer.len() {
+            STATE.with(|state| state.borrow_mut().reads.push_front(answer.clone()));
+            return answer.len() as i32;
+        }
+        buffer[..answer.len()].copy_from_slice(&answer);
+        answer.len() as i32
+    }
+
+    /// An id-convention answer (ABI §8), or the refusal a test asked for.
+    fn next_id() -> i32 {
+        if let Some(code) = refusal() {
+            return code;
+        }
+        STATE
+            .with(|state| state.borrow_mut().ids.pop_front())
+            .unwrap_or(0)
+    }
+
+    /// A status-convention answer, or the refusal a test asked for.
+    fn ok_or_refusal() -> i32 {
+        refusal().unwrap_or(0)
     }
 
     /// Every call recorded on this thread, in order.
@@ -312,6 +577,95 @@ mod stub {
         buffer.fill(fill);
         0
     }
+
+    /// `state_get` (ABI §7.2), size convention.
+    pub fn state_get(key: &str, buffer: &mut [u8]) -> i32 {
+        record(Call::StateGet(key.to_string()));
+        sized_read(buffer)
+    }
+
+    /// `state_put` (ABI §7.2).
+    pub fn state_put(key: &str, value: &[u8]) -> i32 {
+        record(Call::StatePut(key.to_string(), value.to_vec()));
+        ok_or_refusal()
+    }
+
+    /// `state_del` (ABI §7.2).
+    pub fn state_del(key: &str) -> i32 {
+        record(Call::StateDel(key.to_string()));
+        ok_or_refusal()
+    }
+
+    /// `timer_set` (ABI §7.3), id convention.
+    pub fn timer_set(delay_ms: i64, repeat: bool) -> i32 {
+        record(Call::TimerSet(delay_ms, repeat));
+        next_id()
+    }
+
+    /// `timer_cancel` (ABI §7.3).
+    pub fn timer_cancel(timer_id: u32) -> i32 {
+        record(Call::TimerCancel(timer_id));
+        ok_or_refusal()
+    }
+
+    /// `gpio_mode` (ABI §7.4).
+    pub fn gpio_mode(pin: u32, mode: i32) -> i32 {
+        record(Call::GpioMode(pin, mode));
+        ok_or_refusal()
+    }
+
+    /// `gpio_read` (ABI §7.4): `0`/`1`, or an error.
+    pub fn gpio_read(pin: u32) -> i32 {
+        record(Call::GpioRead(pin));
+        if let Some(code) = refusal() {
+            return code;
+        }
+        STATE
+            .with(|state| state.borrow_mut().levels.pop_front())
+            .unwrap_or(0)
+    }
+
+    /// `gpio_write` (ABI §7.4).
+    pub fn gpio_write(pin: u32, value: i32) -> i32 {
+        record(Call::GpioWrite(pin, value));
+        ok_or_refusal()
+    }
+
+    /// `gpio_watch` (ABI §7.4), id convention.
+    pub fn gpio_watch(pin: u32, edge: i32) -> i32 {
+        record(Call::GpioWatch(pin, edge));
+        next_id()
+    }
+
+    /// `gpio_unwatch` (ABI §7.4).
+    pub fn gpio_unwatch(watch_id: u32) -> i32 {
+        record(Call::GpioUnwatch(watch_id));
+        ok_or_refusal()
+    }
+
+    /// `i2c_write` (ABI §7.5).
+    pub fn i2c_write(bus: u32, addr: u32, bytes: &[u8]) -> i32 {
+        record(Call::I2cWrite(bus, addr, bytes.to_vec()));
+        ok_or_refusal()
+    }
+
+    /// `i2c_read` (ABI §7.5), size convention.
+    pub fn i2c_read(bus: u32, addr: u32, buffer: &mut [u8]) -> i32 {
+        record(Call::I2cRead(bus, addr));
+        sized_read(buffer)
+    }
+
+    /// `i2c_write_read` (ABI §7.5), size convention.
+    pub fn i2c_write_read(bus: u32, addr: u32, write: &[u8], buffer: &mut [u8]) -> i32 {
+        record(Call::I2cWriteRead(bus, addr, write.to_vec()));
+        sized_read(buffer)
+    }
+
+    /// `http_request` (ABI §7.6), id convention.
+    pub fn http_request(request: &[u8]) -> i32 {
+        record(Call::HttpRequest(request.to_vec()));
+        next_id()
+    }
 }
 
 /// The `eio:core` surface on a target with no host behind it (`target_os = "none"`).
@@ -356,6 +710,76 @@ mod inert {
 
     /// `ERR_UNSUPPORTED`: there is no host entropy here.
     pub fn rand(_buffer: &mut [u8]) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no state store here.
+    pub fn state_get(_key: &str, _buffer: &mut [u8]) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no state store here.
+    pub fn state_put(_key: &str, _value: &[u8]) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no state store here.
+    pub fn state_del(_key: &str) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no timer wheel here.
+    pub fn timer_set(_delay_ms: i64, _repeat: bool) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no timer wheel here.
+    pub fn timer_cancel(_timer_id: u32) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there are no pins here.
+    pub fn gpio_mode(_pin: u32, _mode: i32) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there are no pins here.
+    pub fn gpio_read(_pin: u32) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there are no pins here.
+    pub fn gpio_write(_pin: u32, _value: i32) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there are no pins here.
+    pub fn gpio_watch(_pin: u32, _edge: i32) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there are no pins here.
+    pub fn gpio_unwatch(_watch_id: u32) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no bus here.
+    pub fn i2c_write(_bus: u32, _addr: u32, _bytes: &[u8]) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no bus here.
+    pub fn i2c_read(_bus: u32, _addr: u32, _buffer: &mut [u8]) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no bus here.
+    pub fn i2c_write_read(_bus: u32, _addr: u32, _write: &[u8], _buffer: &mut [u8]) -> i32 {
+        ErrorCode::Unsupported.as_i32()
+    }
+
+    /// `ERR_UNSUPPORTED`: there is no network here.
+    pub fn http_request(_request: &[u8]) -> i32 {
         ErrorCode::Unsupported.as_i32()
     }
 }

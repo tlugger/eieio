@@ -1,0 +1,5 @@
+error[E0599]: no method named `gpio` found for mutable reference `&mut eio_sdk::Ctx` in the current scope
+  --> tests/ui/undeclared_capability.rs:11:13
+   |
+11 |         ctx.gpio().write(1, eio_sdk::PinLevel::High)?;
+   |             ^^^^ method not found in `&mut eio_sdk::Ctx`

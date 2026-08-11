@@ -45,6 +45,7 @@ pub fn expand(block: &Block) -> TokenStream {
     let exports = exports(block);
     let state = state(block);
     let declared = declared_types(block);
+    let capabilities = capability_trait(block);
 
     quote! {
         #item
@@ -65,7 +66,69 @@ pub fn expand(block: &Block) -> TokenStream {
         };
 
         #declared
+        #capabilities
     }
+}
+
+/// The capability accessors, as an extension trait carrying only what the block declared
+/// (SDK §3).
+///
+/// `Ctx` is one type in `eio-sdk` and cannot conditionally have methods, so the gate is a
+/// trait generated per block: an undeclared `ctx.gpio()` is then a missing method, which is
+/// the compile error SDK §3 asks for rather than an `ERR_CAPABILITY` a deployer finds.
+///
+/// Emitted only when something was declared. A block with `capabilities()` gets no trait at
+/// all, which is the same thing said with less code — and keeps `cargo expand` output for
+/// the common case free of an empty trait nobody implements.
+fn capability_trait(block: &Block) -> Option<TokenStream> {
+    if block.capabilities.is_empty() {
+        return None;
+    }
+
+    let accessors: Vec<_> = block
+        .capabilities
+        .iter()
+        .map(|capability| {
+            let (method, ty, namespace) = match capability.value {
+                eio_manifest::Capability::State => ("state", quote!(State), "eio:state"),
+                eio_manifest::Capability::Timer => ("timers", quote!(Timer), "eio:timer"),
+                eio_manifest::Capability::Gpio => ("gpio", quote!(Gpio), "eio:gpio"),
+                eio_manifest::Capability::I2c => ("i2c", quote!(I2c), "eio:i2c"),
+                eio_manifest::Capability::Http => ("http", quote!(Http), "eio:http"),
+            };
+            let method = format_ident!("{method}");
+            let doc = format!("The `{namespace}` capability (SDK §3).");
+            (
+                quote! {
+                    #[doc = #doc]
+                    fn #method(&mut self) -> ::eio_sdk::#ty<'_>;
+                },
+                quote! {
+                    fn #method(&mut self) -> ::eio_sdk::#ty<'_> {
+                        ::eio_sdk::#ty { _ctx: ::core::marker::PhantomData }
+                    }
+                },
+            )
+        })
+        .collect();
+
+    let declarations = accessors.iter().map(|(declaration, _)| declaration);
+    let definitions = accessors.iter().map(|(_, definition)| definition);
+
+    Some(quote! {
+        /// The capabilities this block declared (SDK §3).
+        ///
+        /// In scope wherever the block is written, so `ctx.state()` resolves. A capability
+        /// the block did not declare has no method here and does not compile.
+        #[allow(dead_code)]
+        pub trait Capabilities {
+            #(#declarations)*
+        }
+
+        impl Capabilities for ::eio_sdk::Ctx {
+            #(#definitions)*
+        }
+    })
 }
 
 /// Checks each `#[prop]` field's Rust type against the `ty = ".."` it declares (SDK §1.2).

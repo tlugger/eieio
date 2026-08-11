@@ -50,6 +50,8 @@ extern crate alloc;
 
 pub mod allocator;
 mod block;
+pub mod capability;
+mod convention;
 mod ctx;
 mod error;
 // Gated out on `target_os = "none"`: `log::set_logger` needs atomic compare-and-swap and
@@ -62,6 +64,10 @@ pub mod raw;
 pub mod runtime;
 
 pub use block::{Block, Declared, FromValue, Prop, PropDeclared, ty};
+pub use capability::{
+    Edge, Gpio, Http, HttpRequest, HttpResponse, I2c, Mode, PinLevel, ReqId, State, Timer, TimerId,
+    WatchId,
+};
 pub use ctx::{Ctx, Descriptor, Limits, Out, PropId, SignalIdx};
 pub use error::{BlockError, BlockResult, HostError};
 

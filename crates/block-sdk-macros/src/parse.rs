@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use eio_manifest::{Capability as ManifestCapability, PORT_ERR_NAME, PropertyType};
 use proc_macro2::Span;
+use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, Fields, ItemStruct, Lit, Meta, Token, Type};
@@ -273,6 +274,17 @@ impl Block {
     }
 }
 
+/// A comma-separated list of bare identifiers, keywords included.
+///
+/// `parse_any`, not the plain parser: ABI §11.1 admits any lowercase name and §11's own
+/// example declares a port called `in`, which is a Rust keyword. A macro that could not
+/// express the manifest the spec prints would be the wrong macro.
+fn ident_list(list: &syn::MetaList) -> Result<Punctuated<syn::Ident, Token![,]>> {
+    list.parse_args_with(|input: syn::parse::ParseStream<'_>| {
+        Punctuated::<syn::Ident, Token![,]>::parse_terminated_with(input, syn::Ident::parse_any)
+    })
+}
+
 fn string_value(meta: &Meta, key: &str) -> Result<String> {
     let Meta::NameValue(pair) = meta else {
         return Err(syn::Error::new(
@@ -300,12 +312,13 @@ fn ports(meta: &Meta, key: &str) -> Result<Vec<Port>> {
             format!("`{key}` takes a list: `{key}(one, two)`"),
         ));
     };
-    let idents = list.parse_args_with(Punctuated::<syn::Ident, Token![,]>::parse_terminated)?;
+    let idents = ident_list(list)?;
     Ok(idents
         .into_iter()
         .map(|ident| Port {
-            name: ident.to_string(),
-            variant: pascal(&ident),
+            // `unraw`, so `r#in` and `in` both name the port `in` rather than `r#in`.
+            name: ident.unraw().to_string(),
+            variant: pascal(&ident.unraw()),
             span: ident.span(),
         })
         .collect())
@@ -318,7 +331,7 @@ fn caps(meta: &Meta) -> Result<Vec<Capability>> {
             "`capabilities` takes a list: `capabilities(state, timer)`, or `capabilities()`",
         ));
     };
-    let idents = list.parse_args_with(Punctuated::<syn::Ident, Token![,]>::parse_terminated)?;
+    let idents = ident_list(list)?;
     idents
         .into_iter()
         .map(|ident| {
@@ -364,6 +377,9 @@ fn parse_props(item: &ItemStruct) -> Result<Vec<Prop>> {
             continue;
         };
         let ident = field.ident.clone().expect("named fields have identifiers");
+        // `r#type: Prop<..>` declares the property `type`; the raw prefix is Rust's, not
+        // the manifest's.
+        let name = ident.unraw().to_string();
 
         let mut declared = None;
         let mut description = None;
@@ -406,7 +422,7 @@ fn parse_props(item: &ItemStruct) -> Result<Vec<Prop>> {
         })?;
 
         props.push(Prop {
-            name: ident.to_string(),
+            name,
             ident,
             ty: field.ty.clone(),
             declared,

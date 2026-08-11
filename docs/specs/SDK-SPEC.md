@@ -139,12 +139,74 @@ A block that hard-codes a size it believes is safe is a block that works on one 
 
 ## 3. Capability wrappers
 
-One safe wrapper per `eio:*` namespace, present on `Ctx` only when declared (macro gates them — using `ctx.gpio()` without `capabilities(gpio)` is a compile error):
+One safe wrapper per `eio:*` namespace, present on `Ctx` only when declared. The gate is a
+compile error, not a runtime `ERR_CAPABILITY`: `ctx.gpio()` in a block without
+`capabilities(gpio)` does not name a method.
 
-- `ctx.state()` — `get/put/del` over typed CBOR values; grow-and-retry hidden; `ERR_THROTTLED` surfaced as a matchable error, per ABI §7.2's "best-effort, not a queue" posture.
-- `ctx.timers()` — `set(Duration, Repeat) -> TimerId`, `cancel`. Fires `Block::on_timer(&mut self, ctx, TimerId)`.
-- `ctx.gpio()` — mode/read/write/watch with typed enums. Fires `on_gpio(watch_id, Level)`.
-- `ctx.http()` — `request(HttpRequest) -> ReqId`; completion fires `on_http(&mut self, ctx, ReqId, HttpResponse)`. **No async/await in guests** (PROPOSED, firmly): no runtime exists in the instance and the ABI is callback-shaped; correlating `ReqId -> purpose` is the block's job via its own fields. An SDK correlation-map sugar (`ctx.http().request_tagged(req, tag)`) is a candidate nicety for the in-depth pass, not core.
+- `ctx.state()` — `get`/`put`/`del` over raw bytes or typed CBOR values; grow-and-retry hidden; an absent key is `None` rather than an error, and `ERR_THROTTLED` is a matchable error, per ABI §7.2's "best-effort, not a queue" posture.
+- `ctx.timers()` — `once(delay_ms)` / `repeating(delay_ms)` returning a `TimerId`, and `cancel`. Fires `Block::on_timer`.
+- `ctx.gpio()` — `mode`/`read`/`write`/`watch`/`unwatch` with typed `Mode`, `Edge` and `PinLevel` enums. Fires `Block::on_gpio`.
+- `ctx.i2c()` — `write`/`read`/`write_read`, synchronous as ABI §7.5 requires.
+- `ctx.http()` — `request(&HttpRequest) -> ReqId`; completion fires `Block::on_http`. **No async/await in guests**, firmly: no runtime exists in the instance and the ABI is callback-shaped; correlating `ReqId -> purpose` is the block's job via its own fields.
+
+**`i2c` is a wrapper like the rest.** Draft 1 listed four and omitted it, which left ABI §11.1's fifth capability declarable and unusable — and a capability declared without being used produces a module every conformant host refuses, because ABI §4.2 requires the export/import pairing in both directions. A capability in the manifest's closed set with no wrapper is a trap, not an omission.
+
+### 3.1 How the gate works, and why it is generated
+
+The `#[block]` macro emits a `Capabilities` trait carrying only the declared accessors, and
+implements it for `Ctx`. `Ctx` is one type in `eio-sdk` and cannot conditionally have
+methods, so the alternative — the SDK owning the trait and the macro implementing a marker
+per capability — is not available: both the trait and `Ctx` would be foreign to the block's
+crate, which the orphan rule forbids. The error a block author sees is therefore `no method
+named `gpio` found for `&mut Ctx``, which names the method and the type but does not suggest
+the fix; that is the cost of the orphan rule rather than a choice.
+
+A handle borrows the `Ctx` for its lifetime, so it cannot outlive the callback that took it
+— ABI §1.2 gives an instance one caller at a time, and a handle held across callbacks would
+be a way to pretend otherwise. The handles are zero-sized: ABI §7's capability functions are
+free imports, not methods on state, so a handle exists to *scope* the calls and to be the
+thing the macro can withhold.
+
+**Declaring a namespace costs nothing until it is used.** WASM emits an import only for a
+function something references, so the SDK declares all five namespaces unconditionally and a
+block's import set is exactly what it calls — which is what ABI §4.3 requires, since imports
+must not exceed declared capabilities.
+
+### 3.2 No retries, anywhere
+
+ABI §7.2 lets a leaf host answer `state_put` with `ERR_THROTTLED` to protect a flash wear
+budget, and says blocks MUST treat persistence as best-effort and not as a message queue. The
+wrapper therefore returns that code and never retries: a wrapper that retried would be
+building the queue the spec refuses, and would hide from the block the one signal it can act
+on. The same holds for every other capability — the SDK reports what the host said.
+
+### 3.3 `HttpRequest` and `HttpResponse` (normative)
+
+ABI §7.6 fixes the CBOR shapes; these are the Rust renderings, and the field names are those
+keys exactly.
+
+|`HttpRequest`|CBOR key|Absent when|
+|---|---|---|
+|`method: String`|`method`|never — required|
+|`url: String`|`url`|never — required|
+|`headers: Vec<(String, String)>`|`headers`|empty|
+|`body: Vec<u8>`|`body`|empty|
+|`timeout_ms: Option<i64>`|`timeout_ms`|`None` — the host's default applies|
+
+Empty collections are **omitted** rather than encoded, which is ABI §11.1's posture
+throughout: absent and empty say the same thing, and one way to say it is better than two.
+
+`HttpResponse` carries the `status` the callback was given plus the decoded `{headers, body}`
+map. **`status` is not normalized.** Below zero is a transport error and at or above zero is
+the HTTP status (ABI §7.6); a 404 is an answer and a DNS failure is not, and a block retries
+differently for each. `reached_a_server()` and `is_success()` name the two questions rather
+than collapsing them.
+
+**`request_tagged` is deferred**, and this records the decision. ABI §7.6's request-id
+pattern makes correlation the block's job through its own fields, an SDK-side map would have
+to guess at a lifetime for entries a block may never claim, and nothing about the sugar
+changes the ABI — so it can be added whenever a block wants it, and nothing is foreclosed by
+waiting.
 
 ## 4. Guest internals (the unsafe budget)
 
@@ -205,6 +267,6 @@ The ABI permits any language; the SDK does not chase this in v1. The conformance
 
 ## 8. Expansion list (for the in-depth pass)
 
-HttpRequest/Response types, TestHost API, template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy, `request_tagged` correlation sugar decision.
+TestHost API, template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy.
 
-Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; §2 and §4 are expanded.
+Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; the `HttpRequest`/`HttpResponse` types are normative in §3.3, which also records the `request_tagged` decision; §2, §3 and §4 are expanded.

@@ -12,9 +12,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use eio_abi::{ErrorCode, Level, PORT_ERR, SIGNAL_NONE, Size, Status};
+use eio_abi::{ErrorCode, Level, PORT_ERR, SIGNAL_NONE};
 use eio_signal::{Batch, Value};
 
+use crate::convention;
 use crate::error::{BlockError, HostError};
 use crate::raw;
 
@@ -308,11 +309,7 @@ impl Ctx {
         if batch.len() as u64 > self.limits.max_payload {
             return Err(HostError::new("emit", ErrorCode::Limit).into());
         }
-        let status = raw::emit(port.into().index() as i32, batch);
-        match Status::decode(status) {
-            Status::Ok => Ok(()),
-            Status::Failed(code) => Err(HostError::new("emit", code).into()),
-        }
+        convention::status("emit", raw::emit(port.into().index() as i32, batch))
     }
 
     /// Evaluates a property against a signal, host-side (ABI §7.1).
@@ -337,21 +334,19 @@ impl Ctx {
         // Start from whatever the buffer already grew to. A block reading one property per
         // signal converges on the right size after the first signal and never grows again.
         if self.prop_buffer.is_empty() {
-            self.prop_buffer.resize(64, 0);
+            self.prop_buffer.resize(convention::STARTING_CAPACITY, 0);
         }
 
-        let written = loop {
-            let cap = self.prop_buffer.len();
-            let returned = raw::prop(id.index() as i32, signal.as_i32(), &mut self.prop_buffer);
-            match Size::decode(returned, cap) {
-                Size::Written(bytes) => break bytes,
-                // ABI §8: nothing was written and this many bytes are needed. Grow to
-                // exactly that and ask again; the host's answer is authoritative, so there
-                // is no second retry to bound.
-                Size::Required(bytes) => self.prop_buffer.resize(bytes, 0),
-                Size::Failed(code) => return Err(HostError::new("prop", code).into()),
-            }
-        };
+        // The retained buffer is the difference from a capability read: a block reads one
+        // property per *signal*, so converging on a size and keeping it is worth a `Vec`
+        // per instance. The retry itself is `convention`'s.
+        let written = convention::grow_and_retry("prop", &mut self.prop_buffer, |buffer| {
+            raw::prop(id.index() as i32, signal.as_i32(), buffer)
+        })?
+        // ABI §7.1 answers a property with no value at all as `ERR_NOT_FOUND`, and a block
+        // acts on that by falling back to a value of its own — so unlike a state read it is
+        // an error here rather than an absence, and it keeps the code that says which.
+        .ok_or_else(|| HostError::new("prop", ErrorCode::NotFound))?;
 
         // `truncate` keeps the capacity, which is what makes the buffer converge: the next
         // call starts from the size the last answer needed.
@@ -392,11 +387,7 @@ impl Ctx {
         if buffer.is_empty() {
             return Ok(());
         }
-        let status = raw::rand(buffer);
-        match Status::decode(status) {
-            Status::Ok => Ok(()),
-            Status::Failed(code) => Err(HostError::new("rand", code).into()),
-        }
+        convention::status("rand", raw::rand(buffer))
     }
 
     /// `n` bytes of host randomness (ABI §7.0).
