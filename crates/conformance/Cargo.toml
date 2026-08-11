@@ -41,9 +41,17 @@ serde_json = { workspace = true, default-features = false, features = ["std"] }
 wat.workspace = true
 
 [dev-dependencies]
-# The reference host, run against the suite. Nothing else: the harness must consume
-# any conforming `.wasm`, so a dependency on `eio-sdk` here would be the coupling
-# ABI §13's language-agnosticism rules out (SDK §7).
+# The third host (ABI §13): wasm3, the leaf-class interpreter SCOPE §3.2 names. A
+# *dev*-dependency and not a library one, deliberately — it builds a C interpreter through
+# cmake, and the daemon dev-depends on this crate, so a library dependency would put that
+# build in the daemon's test path for nothing. The `Host` impl therefore lives in
+# `tests/wasm3.rs`, which is also where a second engine belongs: this crate ships the
+# *reference* host, and wasm3 is the independent engine the reference is checked against.
+wasm3x = "0.1.0"
+
+# The harness must consume any conforming `.wasm`, so there is deliberately no `eio-sdk`
+# here — that would be the coupling ABI §13's language-agnosticism rules out (SDK §7).
+# `tests/reference.rs` asserts its absence.
 
 [lints]
 workspace = true

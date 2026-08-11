@@ -97,6 +97,20 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
         }
     };
 
+    // ABI §10 is a requirement on a *host*, but a binding may have no budget mechanism at
+    // all — and a scenario that expects a budget death would then not fail, it would never
+    // return. Skipped by name, like an unimplemented capability.
+    if !host.enforces_budgets()
+        && let Some(kind) = scenario.steps.iter().find_map(|step| step.expect.dead)
+        && matches!(kind, DeathKind::Fuel | DeathKind::Deadline)
+    {
+        return Report::skipped(
+            &scenario.name,
+            host.name(),
+            format!("this host enforces no execution budget, and the scenario expects {kind:?}"),
+        );
+    }
+
     // Before instantiation, not after: a module importing a namespace this host has no
     // functions in fails to *link*, and a link failure reads as a broken module rather than a
     // host that cannot answer the question (SCOPE §3.3 puts that question at deploy time).
