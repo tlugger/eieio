@@ -6,7 +6,7 @@ Guidance for agents working in this repository.
 
 eieio is a distributed stream-processing platform: WASM **blocks** wired into **services** running on **nodes** that form a **System**, targeting everything from servers down to MCUs. `README.md` is the human orientation; this file is how to build here.
 
-**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. `block-sdk` does not exist yet, so every test block is hand-written `.wat` under `crates/daemon/tests/blocks/`.
+**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. Item 5 has started: `block-sdk` exists as the guest runtime — allocator, panic handler, `Ctx`, error types — but the `#[block]` macro that generates the ABI exports does not (eieio-7d8.2), so every test block is still hand-written `.wat` under `crates/daemon/tests/blocks/`.
 
 ## The prime directive: specs are normative
 
@@ -67,7 +67,7 @@ docs/
   SCOPE.md  specs/
 ```
 
-★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `abi`, `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries. `block-sdk` is `no_std` by necessity: it compiles into guests.
+★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `abi`, `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries. `block-sdk` is `no_std` by necessity: it compiles into guests, and `just check-guest` is its gate.
 
 `abi` holds only what both sides of the boundary must agree on — ABI §8's status codes, §3's sentinels, §9.6's alignment — and **has no dependencies**. Keep it that way: anything added there is added to every block that ships. `host-core` re-exports all of it, so host code imports it from there (DAEMON §1).
 

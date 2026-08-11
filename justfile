@@ -34,8 +34,20 @@ nostd_targets := target_cortex_m4f + " " + target_esp32c3
 
 # The ★ crates, by package name (DAEMON-SPEC §1 maps directory → package).
 # Listed explicitly rather than globbed so a partially populated workspace still
-# passes. Each epic appends its own crate as it lands: eio-sdk (eieio-7d8).
-nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core"
+# passes. Each epic appends its own crate as it lands.
+#
+# `eio-sdk` is here for a different reason than the rest, and not to prove
+# `no_std`: `check-guest` already does that, because the crate defines a
+# `#[panic_handler]` and anything pulling `std` in makes it a duplicate lang
+# item (verified by breaking it). What these two targets add is the only build
+# with NO atomics anywhere — rv32imc has no `A` extension. That leg has already
+# earned its place: it is what found that `log::set_logger` is unavailable
+# without compare-and-swap, which is a real constraint on what the SDK may
+# depend on and was invisible from the guest target.
+nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk"
+
+# The guest target (ABI §1). Blocks are core WASM modules and nothing else.
+guest_target := "wasm32-unknown-unknown"
 
 # List the available recipes.
 default:
@@ -108,10 +120,24 @@ check-nostd:
         done
     done
 
+# `check-nostd` proves the SDK has no `std`; this proves it is a usable guest.
+# They are not the same claim and neither implies the other: the bare-metal
+# targets never compile the allocator or the panic handler (both are gated to
+# wasm32, because `dlmalloc` has no backend for them), so this is the only gate
+# that builds the glue a block actually ships with.
+#
+# `panic=abort` because SDK §4 requires it — panics become traps, and a guest
+# has no unwinder. Passed here as a flag rather than set in a profile so that it
+# is checked the same way `cargo eio build` will set it (SDK §5, eieio-7d8.5).
+
+# Prove the SDK builds as a guest: wasm32, panic=abort.
+check-guest:
+    RUSTFLAGS="-C panic=abort" cargo build --quiet --package eio-sdk --target {{ guest_target }}
+
 # ── the gate ─────────────────────────────────────────────────────────────────
 
 # The one command CI runs. Dependencies run in order; the first failure aborts.
-ci: fmt-check lint build test check-nostd
+ci: fmt-check lint build test check-nostd check-guest
     @echo "ci: all gates passed"
 
 # ── run recipes ──────────────────────────────────────────────────────────────

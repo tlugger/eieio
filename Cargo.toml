@@ -6,6 +6,7 @@ resolver = "3"
 # because a glob that matches nothing is a hard error in cargo.
 members = [
     "crates/abi",
+    "crates/block-sdk",
     "crates/daemon",
     "crates/expr",
     "crates/host-core",
@@ -125,6 +126,28 @@ getrandom = "0.4"
 # `wasmtime::Error` is `anyhow::Error` (see above), so the daemon's own errors may as
 # well be too rather than converting at every boundary.
 anyhow = "1.0"
+
+# ── the guest's own dependencies (compiled into every block) ─────────────────
+#
+# Both are the guest's alone: nothing on the host side may reach for either, and
+# neither may ever appear in a ★ crate other than `block-sdk`.
+
+# The guest allocator behind `eio_alloc`/`eio_free` (SDK §4, ABI §9.6). It is the
+# allocator Rust's own wasm32 `std` uses, so a block gets the same one it would
+# have got from `std` — without the `std`.
+#
+# Selected by TARGET, not by `cfg` at the use site, and that distinction is load-
+# bearing: `dlmalloc/global`'s `sys` module has backends for wasm and unix only,
+# so on `thumbv7em-none-eabihf` and `riscv32imc-unknown-none-elf` it fails to
+# compile outright (measured: `release_global_lock` not found in `crate::sys`).
+# A `#[cfg]` on the `use` would not help — cargo would still build the crate.
+# `just check-nostd` walks both of those targets, so this gating is what keeps
+# `eio-sdk` in that list.
+dlmalloc = { version = "0.2", default-features = false, features = ["global"] }
+
+# The `log` facade, so a block author writes `log::info!` and it reaches the host's
+# `eio:core` `log` (SDK §2). Facade only: `eio-sdk` installs the backend.
+log = { version = "0.4", default-features = false }
 
 # Workspace-internal crates are pinned by path; the version keeps `cargo publish`
 # honest when these eventually reach crates.io.

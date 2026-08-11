@@ -1,0 +1,33 @@
+[package]
+name = "eio-sdk"
+description = "The guest-side crate eieio blocks are written against: allocator, panic handler, Ctx, error types (SDK-SPEC)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# ABI §8's codes, ABI §3's sentinels, ABI §9.6's alignment. The same crate the
+# host reads them from, which is the point: a guest that re-declared them could
+# drift from the host it is talking to. Deliberately NOT `eio-host-core`, which
+# would pull the expression interpreter and manifest parser into every block.
+eio-abi.workspace = true
+
+# `Value`, `Signal` and `Batch` (SDK §2). The same canonical CBOR the host
+# encodes and decodes (ABI §6.3.1), for the same reason.
+eio-signal.workspace = true
+
+# The facade a block author writes against; `logger` installs the backend.
+log.workspace = true
+
+# The guest allocator, on the only target with a heap to give. Target-gated
+# rather than `cfg`-gated at the use site: `dlmalloc/global` has backends for
+# wasm and unix only, so on the two bare-metal targets `just check-nostd` walks
+# it fails to compile outright. A `#[cfg]` on the `use` would not prevent cargo
+# building the crate. See the workspace manifest for the measured failure.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+dlmalloc.workspace = true
+
+[lints]
+workspace = true

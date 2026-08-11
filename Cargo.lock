@@ -471,6 +471,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlmalloc"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "eio-abi"
+version = "0.1.0"
+
+[[package]]
 name = "eio-daemon"
 version = "0.1.0"
 dependencies = [
@@ -503,6 +518,7 @@ dependencies = [
 name = "eio-host-core"
 version = "0.1.0"
 dependencies = [
+ "eio-abi",
  "eio-expr",
  "eio-manifest",
  "eio-signal",
@@ -522,6 +538,16 @@ dependencies = [
  "serde_json",
  "wasmparser 0.255.0",
  "wat",
+]
+
+[[package]]
+name = "eio-sdk"
+version = "0.1.0"
+dependencies = [
+ "dlmalloc",
+ "eio-abi",
+ "eio-signal",
+ "log",
 ]
 
 [[package]]
