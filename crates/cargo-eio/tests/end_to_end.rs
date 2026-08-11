@@ -246,3 +246,37 @@ fn a_name_abi_11_1_refuses_is_refused_before_anything_is_written() {
         );
     }
 }
+
+#[test]
+fn the_golden_blocks_build_through_the_tooling_a_block_author_uses() {
+    // ABI §13.2's five blocks are the closest thing the repository has to blocks somebody
+    // else wrote, and `cargo eio build` is what somebody else would run. Asserted here rather
+    // than in a shell recipe so it runs wherever the rest of the suite does — and what it
+    // buys over the plain `cargo build` the conformance harness does is the ABI §4 load-time
+    // check on every one of them, at the point that can say which block stopped being
+    // loadable.
+    let blocks = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/blocks");
+
+    for name in ["transform", "filter", "counter", "emitter", "gpio-echo"] {
+        let manifest = blocks.join(name).join("Cargo.toml");
+        let output = eio(
+            &blocks,
+            &[
+                "build",
+                "--manifest-path",
+                manifest.to_str().expect("a UTF-8 path"),
+            ],
+        );
+        assert!(output.status.success(), "{name}: {}", transcript(&output));
+
+        let manifest_json = blocks
+            .join("target/wasm32-unknown-unknown/release/manifest.json")
+            .to_path_buf();
+        let written = std::fs::read_to_string(&manifest_json).expect("a manifest was written");
+        let parsed = eio_manifest::parse(&written).expect("and it parses under ABI §11.1");
+        assert_eq!(
+            parsed.name, name,
+            "the manifest describes the block just built"
+        );
+    }
+}
