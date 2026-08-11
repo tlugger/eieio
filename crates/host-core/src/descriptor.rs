@@ -12,6 +12,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use eio_manifest::Manifest;
 use eio_signal::{Map, Value};
 
 /// What a block instance is told about itself at configure time (ABI §5.2).
@@ -97,6 +98,36 @@ impl Limits {
 }
 
 impl Descriptor {
+    /// The descriptor a validated manifest describes (ABI §5.2, §11).
+    ///
+    /// The name lists come from the manifest **in manifest order**, because that order *is*
+    /// the numbering: position in `inputs`/`outputs` is the port index and position in
+    /// `properties` is the `prop_id`. Building it here rather than in each host is the same
+    /// reasoning DAEMON §1 gives for the `required`/`default` rule — there is no engine and no
+    /// configuration format in it, only ABI semantics, and two hosts that numbered a block's
+    /// ports differently would be the divergence ABI §13 calls a conformance bug.
+    ///
+    /// `instance_id` defaults to the block's own name, which is what a single-instance run
+    /// wants and what a service overrides.
+    ///
+    /// **The manifest MUST have passed validation first** — the same obligation this type's
+    /// own documentation states, and one a constructor taking a parsed `Manifest` cannot
+    /// discharge on a caller's behalf.
+    pub fn from_manifest(
+        manifest: &Manifest,
+        instance_id: Option<String>,
+        limits: Limits,
+    ) -> Descriptor {
+        Descriptor {
+            instance_id: instance_id.unwrap_or_else(|| manifest.name.clone()),
+            block: manifest.name.clone(),
+            inputs: manifest.inputs.iter().map(|p| p.name.clone()).collect(),
+            outputs: manifest.outputs.iter().map(|p| p.name.clone()).collect(),
+            props: manifest.properties.iter().map(|p| p.name.clone()).collect(),
+            limits,
+        }
+    }
+
     /// The descriptor as the CBOR map of ABI §5.2.
     ///
     /// Built as a [`Value`] rather than encoded by hand so that the canonical form comes

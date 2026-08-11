@@ -72,14 +72,7 @@ impl InstanceSpec {
             .map_err(|error| anyhow::anyhow!("this block is not loadable: {error}"))?;
         refuse_unimplemented_capabilities(&manifest)?;
 
-        let descriptor = Descriptor {
-            instance_id: self.instance.unwrap_or_else(|| manifest.name.clone()),
-            block: manifest.name.clone(),
-            inputs: manifest.inputs.iter().map(|p| p.name.clone()).collect(),
-            outputs: manifest.outputs.iter().map(|p| p.name.clone()).collect(),
-            props: manifest.properties.iter().map(|p| p.name.clone()).collect(),
-            limits: self.limits,
-        };
+        let descriptor = Descriptor::from_manifest(&manifest, self.instance, self.limits);
         Ok(Loaded {
             manifest,
             descriptor,
