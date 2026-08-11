@@ -1,6 +1,6 @@
 ;; A block that is valid in every way except the one this host enforces: it uses SIMD.
 ;;
-;; ABI §4.3 places MVP conformance on the engine and nowhere else — `eio_manifest`
+;; ABI §4.3 places feature conformance on the engine and nowhere else — `eio_manifest`
 ;; deliberately does no WASM feature gating — so this fixture is the evidence for that
 ;; sentence rather than an illustration of it. Every ABI §4.1 export is present with the
 ;; right signature, the manifest agrees with the module, and `eio_manifest::validate`
@@ -8,8 +8,9 @@
 ;; thing wrong with it, and the engine is the only thing that can notice.
 ;;
 ;; What it protects: SIMD runs perfectly well under wasmtime at its defaults, so without the
-;; MVP-only configuration this block would deploy on a daemon-class node and be refused by
-;; wasm3 at flash time. That is the two-hosts divergence the shared crates exist to prevent
+;; engine's accepted-set configuration this block would deploy on a daemon-class node and be
+;; refused by wasm3 at flash time — measured, not assumed: wasm3 implements every proposal in
+;; ABI §4.3's set and does not implement this one. That is the two-hosts divergence the shared crates exist to prevent
 ;; (DAEMON §1), arriving through the one door the shared crates do not watch.
 (module
   (memory (export "memory") 1)

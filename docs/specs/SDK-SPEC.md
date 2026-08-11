@@ -244,9 +244,10 @@ The message MUST be formatted into a fixed buffer and truncated if it does not f
 ```
 cargo eio new <name>         template block repo (CI included)
 cargo eio build              wasm32-unknown-unknown, panic=abort, opt for size,
-                             -C target-feature=-bulk-memory (ABI §4.3: a host
-                             accepts MVP only, and rustc emits memory.copy),
                              embed eio:manifest section, emit manifest.json
+                             (no feature flags: ABI §4.3's accepted set is what
+                             rustc emits by default, and the flag this line
+                             used to carry was measured to do nothing)
 cargo eio test               native tests + harness run (§6)
 cargo eio aot --target esp32s3   WAMR AOT artifact for leaf targets
 cargo eio publish            package OCI artifact (+ AOT variants), push, sign (cosign)

@@ -74,16 +74,31 @@ use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFea
 /// host", which is precisely the situation.
 const UNIMPLEMENTED: i32 = eio_host_core::ErrorCode::Unsupported.as_i32();
 
-/// The WebAssembly this host accepts: core MVP, and nothing past it (ABI §1.1, §4.3).
+/// The WebAssembly this host accepts (ABI §1.1, §4.3).
 ///
-/// wasmparser's own `MVP` set, less `GC_TYPES`. That flag gates the `externref`/`anyref`
-/// *types* rather than a proposal, and wasmparser folds it into `MVP` only so the later sets
-/// need not repeat it; a wasmtime built without the `gc` cargo feature — this one (DAEMON
-/// §5.1) — refuses to build an engine that leaves it on at all. So the feature set decision
-/// and this one agree, and removing the flag here is what lets them.
+/// wasmparser's `MVP` set, less `GC_TYPES`, plus the six proposals the guest toolchain emits
+/// by default for `wasm32-unknown-unknown` — every one of which wasm3 executes.
 ///
-/// What stays enabled is `FLOATS`: MVP has floating point, and so does `expr`.
-const MVP: WasmFeatures = WasmFeatures::MVP.difference(WasmFeatures::GC_TYPES);
+/// This was strict MVP until it was measured. ABI §1.1 restricted blocks to core MVP on the
+/// grounds that the leaf interpreter admits nothing else; `crates/conformance/tests/wasm3.rs`
+/// runs each of these instructions on wasm3 and checks the value it produces, and runs a
+/// stock-built Rust block through ABI §5.1's whole lifecycle there. The restriction was
+/// protecting a constraint the protected engine does not have, while making a loadable Rust
+/// block impossible — `alloc::string::String::clone` in the precompiled `rust-std` contains a
+/// `memory.copy`, and no `RUSTFLAGS` rebuilds that.
+///
+/// `GC_TYPES` still goes: it gates the `externref`/`anyref` *types* rather than a proposal, and
+/// a wasmtime built without the `gc` cargo feature refuses to build an engine while it is set.
+/// `REFERENCE_TYPES` here is the `call_indirect` *encoding* rustc emits, not a guest using
+/// `externref` — which the type flag being absent is what guarantees.
+const ACCEPTED: WasmFeatures = WasmFeatures::MVP
+    .difference(WasmFeatures::GC_TYPES)
+    .union(WasmFeatures::BULK_MEMORY)
+    .union(WasmFeatures::REFERENCE_TYPES)
+    .union(WasmFeatures::SIGN_EXTENSION)
+    .union(WasmFeatures::MULTI_VALUE)
+    .union(WasmFeatures::SATURATING_FLOAT_TO_INT)
+    .union(WasmFeatures::MUTABLE_GLOBAL);
 
 /// How often the epoch ticker advances the engine's epoch.
 ///
@@ -242,7 +257,7 @@ impl Runtime {
         // two-hosts divergence the shared crates exist to prevent (DAEMON §1). Subtracting
         // from `all()` refuses it instead, on a host nobody has touched.
         config.wasm_features(WasmFeatures::all(), false);
-        config.wasm_features(MVP, true);
+        config.wasm_features(ACCEPTED, true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
         let engine = wasmtime::Engine::new(&config)?;
@@ -678,8 +693,8 @@ mod tests {
 
     #[test]
     fn a_core_mvp_module_is_accepted() {
-        // The control for every rejection below: this config refuses post-MVP features
-        // rather than refusing WebAssembly. Every instruction here is in the 2017 MVP.
+        // The control for every rejection below: this config refuses *some* proposals rather
+        // than refusing WebAssembly. Every instruction here is in the 2017 MVP.
         compile(
             &Runtime::new(Budgets::default()).expect("an engine"),
             r#"(module
@@ -689,18 +704,23 @@ mod tests {
                    (global.set $g (local.get 0))
                    (i32.add (global.get $g) (i32.load (i32.const 0)))))"#,
         )
-        .expect("core MVP is what this host runs");
+        .expect("core WASM is what this host runs");
     }
 
     #[test]
-    fn a_post_mvp_module_is_refused_by_the_engine() {
+    fn a_module_past_the_accepted_set_is_refused_by_the_engine() {
         // One engine for the whole table. Each case is a fresh `Module::new`, which is where
         // the refusal happens; rebuilding the engine per case would re-test `Runtime::new`
         // eight times and spawn an epoch ticker for each.
         let runtime = Runtime::new(Budgets::default()).expect("an engine");
-        // ABI §4.3: MVP conformance is enforced here and nowhere else — `eio_manifest`
+        // ABI §4.3: feature conformance is enforced here and nowhere else — `eio_manifest`
         // accepts every one of these. Each is the smallest module that needs its proposal,
         // paired with the words its rejection has to contain.
+        //
+        // These are the proposals still *outside* [`ACCEPTED`]. The six the guest toolchain
+        // emits have their own test below; what is left is what neither rustc emits nor wasm3
+        // implements, and admitting one of those would be the two-hosts divergence with
+        // nothing to catch it.
         //
         // Matching the message is the point rather than an incidental strictness: ABI §4.3
         // requires the rejection to *name* the proposal, because a deployer holding a valid
@@ -715,40 +735,10 @@ mod tests {
                      (i32x4.extract_lane 0 (v128.const i32x4 1 2 3 4))))"#,
             ),
             (
-                "bulk memory",
-                "bulk memory",
-                r#"(module (memory 1) (func (export "f")
-                     (memory.copy (i32.const 0) (i32.const 8) (i32.const 8))))"#,
-            ),
-            (
-                "multi-value",
-                "multi-value",
-                r#"(module (func (export "f") (result i32 i32)
-                     (i32.const 1) (i32.const 2)))"#,
-            ),
-            (
                 "tail call",
                 "tail call",
                 r#"(module (func $g (result i32) (i32.const 1))
                      (func (export "f") (result i32) (return_call $g)))"#,
-            ),
-            (
-                "sign extension",
-                "sign extension",
-                r#"(module (func (export "f") (result i32)
-                     (i32.extend8_s (i32.const 1))))"#,
-            ),
-            (
-                "saturating float-to-int",
-                "saturating float",
-                r#"(module (func (export "f") (result i32)
-                     (i32.trunc_sat_f32_s (f32.const 1))))"#,
-            ),
-            (
-                "reference types",
-                "reference types",
-                r#"(module (table 1 externref) (func (export "f") (result i32)
-                     (table.size 0)))"#,
             ),
             // A second linear memory needs no instruction to be past MVP: declaring it is
             // already the proposal.
@@ -759,7 +749,7 @@ mod tests {
             ),
         ] {
             let error = compile(&runtime, wat)
-                .expect_err(&format!("{proposal} is past MVP and this host is MVP only"));
+                .expect_err(&format!("{proposal} is outside the accepted set"));
             // `{:?}`, because the sentence naming the proposal is a *cause* — the top line
             // says only which function failed to compile. This is the same rendering the
             // deployer gets, since the daemon returns the error out of `main` (ABI §4.3).
@@ -768,6 +758,56 @@ mod tests {
                 message.contains(needle),
                 "refusing {proposal} has to say so, and said: {message}"
             );
+        }
+    }
+
+    #[test]
+    fn every_proposal_the_guest_toolchain_emits_is_accepted() {
+        // The other half of [`ACCEPTED`], and the half that used to be false. rustc enables
+        // all six of these by default for `wasm32-unknown-unknown`, so a host refusing any one
+        // of them refuses ordinary Rust blocks — which is what it did, until measured.
+        //
+        // `crates/conformance/tests/wasm3.rs` runs the same six on wasm3 and checks the value
+        // each produces. That pairing is the whole argument: this test says the daemon accepts
+        // them, that one says the leaf engine executes them correctly, and neither alone would
+        // justify the set.
+        let runtime = Runtime::new(Budgets::default()).expect("an engine");
+        for (proposal, wat) in [
+            (
+                "bulk memory",
+                r#"(module (memory 1) (func (export "f")
+                     (memory.copy (i32.const 0) (i32.const 8) (i32.const 8))))"#,
+            ),
+            (
+                "sign extension",
+                r#"(module (func (export "f") (result i32)
+                     (i32.extend8_s (i32.const 1))))"#,
+            ),
+            (
+                "multi-value",
+                r#"(module (func (export "f") (result i32 i32)
+                     (i32.const 1) (i32.const 2)))"#,
+            ),
+            (
+                "saturating float-to-int",
+                r#"(module (func (export "f") (result i32)
+                     (i32.trunc_sat_f32_s (f32.const 1))))"#,
+            ),
+            (
+                "reference types (the call_indirect encoding)",
+                r#"(module (table 1 funcref) (elem (i32.const 0) $g)
+                     (func $g (result i32) (i32.const 5))
+                     (type $t (func (result i32)))
+                     (func (export "f") (result i32)
+                       (call_indirect (type $t) (i32.const 0))))"#,
+            ),
+            (
+                "mutable globals",
+                r#"(module (global (export "g") (mut i32) (i32.const 0)))"#,
+            ),
+        ] {
+            compile(&runtime, wat)
+                .unwrap_or_else(|e| panic!("the guest toolchain emits {proposal}: {e:?}"));
         }
     }
 

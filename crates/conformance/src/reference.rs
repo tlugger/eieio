@@ -35,12 +35,31 @@ use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFea
 
 use crate::host::{Budget, Host, HostError};
 
-/// The WebAssembly this host accepts: core MVP (ABI §1.1, §4.3).
+/// The WebAssembly this host accepts (ABI §1.1, §4.3).
 ///
-/// wasmparser's own `MVP` set, less `GC_TYPES`. That flag gates the `externref`/`anyref`
-/// *types* rather than a proposal, and a wasmtime built without the `gc` cargo feature — this
-/// one — refuses to build an engine while it is set.
-const MVP: WasmFeatures = WasmFeatures::MVP.difference(WasmFeatures::GC_TYPES);
+/// wasmparser's `MVP` set, less `GC_TYPES`, plus the six proposals the guest toolchain emits
+/// by default for `wasm32-unknown-unknown` — every one of which wasm3 executes.
+///
+/// This was strict MVP until it was measured. ABI §1.1 restricted blocks to core MVP on the
+/// grounds that the leaf interpreter admits nothing else; `crates/conformance/tests/wasm3.rs`
+/// runs each of these instructions on wasm3 and checks the value it produces, and runs a
+/// stock-built Rust block through ABI §5.1's whole lifecycle there. The restriction was
+/// protecting a constraint the protected engine does not have, while making a loadable Rust
+/// block impossible — `alloc::string::String::clone` in the precompiled `rust-std` contains a
+/// `memory.copy`, and no `RUSTFLAGS` rebuilds that.
+///
+/// `GC_TYPES` still goes: it gates the `externref`/`anyref` *types* rather than a proposal, and
+/// a wasmtime built without the `gc` cargo feature refuses to build an engine while it is set.
+/// `REFERENCE_TYPES` here is the `call_indirect` *encoding* rustc emits, not a guest using
+/// `externref` — which the type flag being absent is what guarantees.
+const ACCEPTED: WasmFeatures = WasmFeatures::MVP
+    .difference(WasmFeatures::GC_TYPES)
+    .union(WasmFeatures::BULK_MEMORY)
+    .union(WasmFeatures::REFERENCE_TYPES)
+    .union(WasmFeatures::SIGN_EXTENSION)
+    .union(WasmFeatures::MULTI_VALUE)
+    .union(WasmFeatures::SATURATING_FLOAT_TO_INT)
+    .union(WasmFeatures::MUTABLE_GLOBAL);
 
 /// How often the epoch ticker advances the engine's epoch — the resolution of every deadline.
 const EPOCH_TICK: Duration = Duration::from_millis(1);
@@ -72,7 +91,7 @@ impl Reference {
     pub fn new() -> anyhow::Result<Reference> {
         let mut config = Config::new();
         config.wasm_features(WasmFeatures::all(), false);
-        config.wasm_features(MVP, true);
+        config.wasm_features(ACCEPTED, true);
         config.consume_fuel(true);
         config.epoch_interruption(true);
         let engine = wasmtime::Engine::new(&config)?;
@@ -532,20 +551,24 @@ mod tests {
     }
 
     #[test]
-    fn a_post_mvp_module_is_refused_with_the_proposal_named() {
+    fn a_module_outside_the_accepted_set_is_refused_with_the_proposal_named() {
         // ABI §4.3 requires the rejection to name the proposal. The reference host is where a
         // block author meets that rule first, so it has to hold here as well as in the daemon.
+        //
+        // SIMD rather than bulk memory: bulk memory is inside [`ACCEPTED`] now, and wasm3 does
+        // not implement SIMD, so this is a proposal admitting it would genuinely divide the
+        // two engines.
         let mut reference = Reference::new().expect("an engine");
         let wasm = wat::parse_str(
-            r#"(module (memory 1) (func (export "f")
-                 (memory.copy (i32.const 0) (i32.const 8) (i32.const 8))))"#,
+            r#"(module (func (export "f") (result i32)
+                 (i32x4.extract_lane 0 (v128.const i32x4 1 2 3 4))))"#,
         )
         .expect("the snippet assembles");
         let Err(error) = reference.instantiate(&wasm, Budget::default()) else {
-            panic!("bulk memory is past MVP and this host is MVP only")
+            panic!("simd is outside the accepted set")
         };
         assert!(
-            format!("{error}").to_lowercase().contains("bulk memory"),
+            format!("{error}").to_lowercase().contains("simd"),
             "refusing a proposal has to say which, and said: {error}"
         );
     }

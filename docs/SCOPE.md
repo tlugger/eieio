@@ -72,6 +72,10 @@ The daemon and leaf runtime are written in Rust. Rationale: strongest WASM hosti
 
 Blocks compile to **core WASM modules** (`wasm32-unknown-unknown`) with a **hand-specified ABI** — not the WASM component model. Rationale: core modules run everywhere from wasmtime down to WAMR/wasm3 on MCU-class hardware; component model support does not exist at the embedded tier. Ergonomics are traded for reach, consistent with the embedded north star.
 
+**How much past core WASM 1.0 is admitted is a measurement, not a preference** (ABI §1.1, §4.3). This decision originally read "MVP and nothing more", justified by the claim that the leaf interpreter admits nothing else. That claim was never tested, and is false: wasm3 executes bulk memory, sign extension, reference types, multi-value and non-trapping float-to-int, and runs a stock-built Rust block through the whole lifecycle. Meanwhile the restriction made a Rust block impossible to produce at all — `alloc::string::String::clone` in the precompiled `rust-std` contains a `memory.copy`, and no compiler flag rebuilds that.
+
+So the accepted set is what the guest toolchain emits *and* the leaf engine runs, and it is pinned by `crates/conformance/tests/wasm3.rs` rather than by prose here: the suite runs each instruction on wasm3 and checks the value it produces. Anything further — SIMD, tail calls, threads, exceptions, GC, the component model — stays refused, because wasm3 does not implement it. Widening the set again means measuring again.
+
 Consequences:
 
 - Hot-install without recompiling the daemon (restores nio's "add a block, restart, go" magic).
