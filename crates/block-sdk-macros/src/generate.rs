@@ -46,6 +46,7 @@ pub fn expand(block: &Block) -> TokenStream {
     let state = state(block);
     let declared = declared_types(block);
     let capabilities = capability_trait(block);
+    let builder = build_expression(block);
 
     quote! {
         #item
@@ -57,6 +58,20 @@ pub fn expand(block: &Block) -> TokenStream {
             #state
             #exports
         };
+
+        // The same constructor the generated exports use, reachable by name so a test can
+        // build the block without re-deriving its `prop_id`s (SDK §6.1).
+        //
+        // Off the guest, where nothing calls it: a block's exports use the `build()` above,
+        // and this would be a second copy of it riding into every module on the hope that
+        // `--gc-sections` removes it. The size-optimization defaults are still an open item
+        // (SDK §8), so leaning on that would be leaning on something unpinned.
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        impl ::eio_sdk::Bound for #ident {
+            fn bound() -> #ident {
+                #builder
+            }
+        }
 
         // A block that forgot `impl Block for _` should hear about the trait, not about
         // twenty missing methods inside generated code it never wrote.
@@ -320,13 +335,12 @@ fn manifest(block: &Block) -> Manifest {
     }
 }
 
-/// The instance's state: the block, its `Ctx`, and its descriptor.
+/// A fresh block with every `Prop<T>` bound to its `prop_id` (ABI §5.2).
 ///
-/// One `static mut` behind accessors, which is what a single-threaded WASM instance is:
-/// ABI §1.2 gives it one caller at a time and forbids the host from calling into a guest
-/// that is mid-call, so there is no concurrency for a lock to protect and no atomics on
-/// the leaf tier to build one from.
-fn state(block: &Block) -> TokenStream {
+/// Shared by the generated `build()` and the `Bound` impl, so a test and the runtime
+/// construct the instance the same way — there is one definition of which field is
+/// `prop_id` 0.
+fn build_expression(block: &Block) -> TokenStream {
     let ident = &block.item.ident;
     let initializers: Vec<_> = block
         .props
@@ -338,7 +352,6 @@ fn state(block: &Block) -> TokenStream {
             quote! { #field: ::eio_sdk::Prop::new(::eio_sdk::PropId::new(#index)) }
         })
         .collect();
-
     let others: Vec<_> = block
         .item
         .fields
@@ -349,7 +362,18 @@ fn state(block: &Block) -> TokenStream {
             quote! { #name: ::core::default::Default::default() }
         })
         .collect();
+    quote! { #ident { #(#initializers,)* #(#others,)* } }
+}
 
+/// The instance's state: the block, its `Ctx`, and its descriptor.
+///
+/// One `static mut` behind accessors, which is what a single-threaded WASM instance is:
+/// ABI §1.2 gives it one caller at a time and forbids the host from calling into a guest
+/// that is mid-call, so there is no concurrency for a lock to protect and no atomics on
+/// the leaf tier to build one from.
+fn state(block: &Block) -> TokenStream {
+    let ident = &block.item.ident;
+    let builder = build_expression(block);
     quote! {
         /// The instance, live between `eio_configure` and death.
         static mut BLOCK: ::core::option::Option<#ident> = ::core::option::Option::None;
@@ -376,10 +400,7 @@ fn state(block: &Block) -> TokenStream {
 
         /// A fresh block with every `Prop<T>` bound to its `prop_id` (ABI §5.2).
         fn build() -> #ident {
-            #ident {
-                #(#initializers,)*
-                #(#others,)*
-            }
+            #builder
         }
     }
 }

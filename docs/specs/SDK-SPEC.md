@@ -256,10 +256,68 @@ The template repo's CI runs build/test/publish on tag — this is the "block rep
 
 ## 6. Testing story
 
-Two layers, both in-template:
+Two layers, both in-template, and neither catches the other's bugs — which is why there are
+two:
 
-1. **Native unit tests** — `TestHost`: a mock implementing the host side in-process (no WASM): scripted property tables (real `expr` crate evaluates them — same interpreter, honest semantics), signal delivery, emit capture, capability stubs (virtual GPIO/clock/state). Fast inner loop: `host.deliver("default", batch); assert_eq!(host.emitted("above").len(), 2);`
-2. **Conformance run** — the same tests executed against the compiled `.wasm` under the reference harness (ABI §13), catching boundary bugs the native layer can't (memory conventions, encoding, limits).
+1. **Native unit tests** — `TestHost`: a host implementing the host side in-process (no
+   WASM). Fast inner loop:
+   `host.deliver("default", batch)?; assert_eq!(host.signals("above").len(), 2);`
+2. **Conformance run** — the same block compiled to `.wasm` and driven under the reference
+   harness (ABI §13), catching the boundary bugs the native layer cannot see: linear
+   memory, `(ptr, len)`, CBOR crossing an engine, fuel and deadlines.
+
+### 6.1 `TestHost` (normative)
+
+`TestHost` lives in **`eio-test-host`**, not in `eio-sdk`. It is a *host* — it drives a
+block the way a daemon does — so its dependency on `host-core` sits on the host side of the
+boundary. Folding it into `eio-sdk` would put the expression interpreter one cargo feature
+away from every guest, which is the coupling `eio-abi` was extracted to prevent (DAEMON §1).
+Block templates take it as a dev-dependency.
+
+**Properties are resolved by `host-core`'s `PropContext`** — the real `expr` interpreter,
+the real per-callback cache, the real constant folding, the real declared-type check. Not
+an evaluator that behaves like ABI §7.1 but the implementation of it. A stub evaluator
+would make the fast layer a place where blocks pass and nodes fail, and ABI §13 calls that
+divergence a conformance bug.
+
+|Building|Meaning|
+|---|---|
+|`TestHost::<B>::builder()`|A fresh `B`, its `Prop<T>` fields bound by the `#[block]` macro through `Bound`. A test names the type and nothing else — binding a `prop_id` is the macro's job, and ABI §5.2 fixes it as the field's position.|
+|`.inputs([..])` / `.outputs([..])`|Port names, position = index (ABI §5.2)|
+|`.property(name, ty, source)`|A property and its expression. A literal is a trivial expression (ABI §11)|
+|`.unset_property(name, ty)`|ABI §7.1's "no value at all": keeps its `prop_id`, answers `ERR_NOT_FOUND`|
+|`.limits(max_payload, max_batch)`|What the descriptor publishes (ABI §9.7). Neither has a floor, and setting them small is the only way to find out whether a block reads them|
+|`.scripted(..)`|Capability answers, before the lifecycle runs — `configure` and `start` use capabilities too|
+|`.configure()` / `.start()`|ABI §5.1's lifecycle, stopping after the first or running both|
+
+|Driving|Meaning|
+|---|---|
+|`deliver(port, batch)` / `deliver_one(port, signal)`|ABI §6.1, by port *name*. A batch beyond `max_batch` is refused before the block is called, as §9.7 requires of a host|
+|`fire_timer(id)`, `fire_gpio(watch, level)`, `complete_http(req, status, body)`|ABI §4.2's callbacks. The host drives these because that is which side they happen on|
+|`stop()`|ABI §5.1|
+
+|Asserting|Meaning|
+|---|---|
+|`emitted(port)` / `signals(port)` / `emissions()`|What the block emitted, by port name. `err` reaches `PORT_ERR` (ABI §6.4)|
+|`property_failures()`|ABI §7.1's per-signal failures. How a test tells "the block skipped that signal deliberately" from "the expression was wrong" — identical from the emissions alone|
+|`reported_errors()`|Detail the block sent through `eio:core` `error` (ABI §8)|
+|`block()`|The block itself, for asserting on its own state|
+
+Scripted capability answers are **queued, not set**: a block that reads twice gets two
+answers, which is what lets a test script a sensor that changes between polls. A refusal
+(`Throttle::Throttled`) is scriptable for the same reason it has to be — ABI §7.2's flash
+wear budget is a property of the hardware, so a block's back-off path is otherwise
+unreachable in a test.
+
+**One block per test crate.** `#[block]` generates `#[unsafe(no_mangle)]` exports and a
+single `EIO_MANIFEST`, so a second block in the same crate is a link error — §1's
+one-block-per-module rule, met from the other side. In practice each block gets its own
+file under `tests/`, which cargo compiles as its own crate.
+
+**What `TestHost` does not do.** It runs the block as native Rust. There is no linear
+memory, no `(ptr, len)`, no engine, no fuel and no deadline — so a block that passes here
+can still fail the harness, and that is the division of labour §6 describes rather than a
+gap in either layer.
 
 ## 7. Non-Rust authorship (deferred, SCOPE §6)
 
@@ -267,6 +325,6 @@ The ABI permits any language; the SDK does not chase this in v1. The conformance
 
 ## 8. Expansion list (for the in-depth pass)
 
-TestHost API, template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy.
+template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy.
 
-Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; the `HttpRequest`/`HttpResponse` types are normative in §3.3, which also records the `request_tagged` decision; §2, §3 and §4 are expanded.
+Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; the `HttpRequest`/`HttpResponse` types are normative in §3.3, which also records the `request_tagged` decision; the `TestHost` API is normative in §6.1; §2, §3, §4 and §6 are expanded.

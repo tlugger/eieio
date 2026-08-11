@@ -292,8 +292,9 @@ pub use wasm::{
 ))]
 pub use stub::{
     Call, Recorder, emit, error, gpio_mode, gpio_read, gpio_unwatch, gpio_watch, gpio_write,
-    http_request, i2c_read, i2c_write, i2c_write_read, log, prop, rand, recorded, state_del,
-    state_get, state_put, time_mono_ms, time_unix_ms, timer_cancel, timer_set,
+    http_request, i2c_read, i2c_write, i2c_write_read, log, prop, rand, recorded,
+    set_prop_answerer, state_del, state_get, state_put, take_calls, time_mono_ms, time_unix_ms,
+    timer_cancel, timer_set,
 };
 
 #[cfg(target_os = "none")]
@@ -313,6 +314,7 @@ mod stub {
     use eio_abi::Level;
 
     use alloc::collections::VecDeque;
+    use alloc::rc::Rc;
     use alloc::string::{String, ToString};
     use alloc::vec::Vec;
     use core::cell::RefCell;
@@ -392,6 +394,20 @@ mod stub {
         /// A status every capability call returns instead of succeeding, if set — how a
         /// test reaches `ERR_THROTTLED` (ABI §7.2) without a real flash budget.
         refuse_with: Option<i32>,
+        /// What answers `prop`, when something richer than a queue is driving.
+        ///
+        /// The one seam in this stub, and it exists because `prop` is the one call whose
+        /// answer depends on *evaluating* something: ABI §7.1 makes a property an
+        /// expression resolved per signal, so a queue can only replay answers a test
+        /// worked out in advance, in the order the block happens to ask. `eio-test-host`
+        /// installs the real protocol here — `host-core`'s `PropContext`, the same
+        /// implementation a daemon runs.
+        ///
+        /// Nothing else needs a seam. Emissions are recorded and read back, the capability
+        /// answers are scriptable already, and timers, GPIO edges and HTTP completions are
+        /// *callbacks* — a host drives those by calling the block, not by answering it.
+        #[allow(clippy::type_complexity)]
+        prop_answerer: Option<Rc<dyn Fn(i32, i32, &mut [u8]) -> i32>>,
     }
 
     thread_local! {
@@ -418,6 +434,16 @@ mod stub {
         /// Starts recording on this thread, discarding anything a previous test left.
         pub fn new() -> Recorder {
             STATE.with(|state| *state.borrow_mut() = State::default());
+            Recorder { _private: () }
+        }
+
+        /// A handle on whatever this thread is already recording, changing nothing.
+        ///
+        /// [`Recorder::new`] clears the state, which is right when a test *is* the thing
+        /// driving. It is wrong for a caller layered above one — `eio-test-host` drains
+        /// after every callback and scripts answers between them, so a handle that reset
+        /// would throw away the answers it was about to queue.
+        pub fn attach() -> Recorder {
             Recorder { _private: () }
         }
 
@@ -511,6 +537,28 @@ mod stub {
         refusal().unwrap_or(0)
     }
 
+    /// Installs what answers `prop` on this thread (see [`State::prop_answerer`]).
+    ///
+    /// Returns the previous answerer, so a caller can restore it. `Recorder::new` clears
+    /// it, which is what keeps a test that installed one from leaking into the next.
+    #[allow(clippy::type_complexity)]
+    pub fn set_prop_answerer(
+        answerer: Option<Rc<dyn Fn(i32, i32, &mut [u8]) -> i32>>,
+    ) -> Option<Rc<dyn Fn(i32, i32, &mut [u8]) -> i32>> {
+        STATE.with(|state| core::mem::replace(&mut state.borrow_mut().prop_answerer, answerer))
+    }
+
+    /// Takes the calls recorded so far, leaving everything else in place.
+    ///
+    /// What a caller draining between callbacks needs, and distinct from
+    /// [`Recorder::new`] in exactly the way that matters: `new` resets the whole stub,
+    /// including queued answers and any installed `prop` answerer. Draining with it
+    /// would discard the answers a test queued for the *next* callback, and unhook the
+    /// host that was driving.
+    pub fn take_calls() -> Vec<Call> {
+        STATE.with(|state| core::mem::take(&mut state.borrow_mut().calls))
+    }
+
     /// Every call recorded on this thread, in order.
     pub fn recorded() -> Vec<Call> {
         STATE.with(|state| state.borrow().calls.clone())
@@ -536,6 +584,13 @@ mod stub {
     /// grow-and-retry loop is exercised rather than merely compiled.
     pub fn prop(prop_id: i32, signal_idx: i32, buffer: &mut [u8]) -> i32 {
         record(Call::Prop(prop_id, signal_idx));
+        // Taken out of the cell before calling, not called through the borrow: the
+        // answerer reaches back into `host-core`, which is free to do anything, and a
+        // `RefCell` held across that is a panic waiting for the first re-entrant read.
+        let installed = STATE.with(|state| state.borrow().prop_answerer.clone());
+        if let Some(answer) = installed {
+            return answer(prop_id, signal_idx, buffer);
+        }
         let answer = STATE.with(|state| state.borrow_mut().prop_answers.pop_front());
         let Some(answer) = answer else {
             // ABI §7.1: no value at all.

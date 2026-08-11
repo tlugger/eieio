@@ -79,6 +79,18 @@ pub trait Block: Sized {
     }
 }
 
+/// A block the `#[block]` macro can construct with its properties bound (SDK §1).
+///
+/// Implemented by the macro, never by hand. It exists because binding a `Prop<T>` to its
+/// `prop_id` is the macro's job — ABI §5.2 fixes the id as the field's position, and a
+/// caller writing `Prop::new(PropId::new(0))` is re-deriving something the macro already
+/// knows and can get wrong. `eio-test-host` uses this so a test names the block's type and
+/// nothing else.
+pub trait Bound: Block {
+    /// A fresh instance, every `Prop<T>` bound and every other field `Default`.
+    fn bound() -> Self;
+}
+
 /// A typed handle on one of the block's properties (SDK §1).
 ///
 /// Holds only its `prop_id` — ABI §5.2 fixes that as the property's position in the

@@ -1,0 +1,31 @@
+[package]
+name = "eio-test-host"
+description = "A native in-process host for testing eieio blocks without a WASM engine (SDK-SPEC §6.1)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A `std` crate, and deliberately separate from `eio-sdk`. This is a *host* — it drives a
+# block the way a daemon does — so its dependency on `host-core` sits on the host side of
+# the boundary. Folding it into `eio-sdk` would put the expression interpreter one cargo
+# feature away from every guest, which is the coupling `eio-abi` exists to prevent.
+[dependencies]
+# ABI §7.1's property protocol, entire: the real `expr` interpreter, the per-callback
+# cache, constant folding and the declared-type check. Reusing it is what makes a
+# TestHost run and a daemon run the same run — ABI §13 calls the alternative a
+# conformance bug, and SDK §6.1 says "never a stub evaluator" for the same reason.
+eio-host-core.workspace = true
+
+# The block under test, its `Ctx`, and the recording stub this drives.
+eio-sdk.workspace = true
+
+# Ports, property types and the declared-type rule (ABI §11.1).
+eio-manifest.workspace = true
+
+# Batches and values.
+eio-signal.workspace = true
+
+[lints]
+workspace = true

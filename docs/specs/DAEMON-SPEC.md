@@ -29,6 +29,9 @@ crates/
   block-sdk-macros/  The `#[block]` attribute macro (SDK-SPEC §1). A separate
                    crate because the language requires it: a proc-macro crate
                    can export nothing but macros. Host-compiled, so not ★
+  test-host/       Native in-process host for testing blocks (SDK-SPEC §6.1).
+                   A *host*, so it depends on host-core; separate from block-sdk
+                   so a guest never can
   cargo-eio/       Block build/publish tooling (SDK-SPEC §5)
   conformance/     Reference harness + golden blocks (ABI §13)
 ```
@@ -59,6 +62,7 @@ For the same reason the **property scope is the driver's**, not its caller's. AB
 |`daemon/`|`eio-daemon`|—|
 |`block-sdk/`|`eio-sdk`|`eio_sdk`|
 |`block-sdk-macros/`|`eio-sdk-macros`|`eio_sdk_macros`|
+|`test-host/`|`eio-test-host`|`eio_test_host`|
 |`cargo-eio/`|`cargo-eio`|—|
 |`conformance/`|`eio-conformance`|`eio_conformance`|
 

@@ -8,6 +8,7 @@ members = [
     "crates/abi",
     "crates/block-sdk",
     "crates/block-sdk-macros",
+    "crates/test-host",
     "crates/daemon",
     "crates/expr",
     "crates/host-core",
@@ -171,7 +172,9 @@ eio-sdk-macros = { path = "crates/block-sdk-macros", version = "0.1.0" }
 eio-expr = { path = "crates/expr", version = "0.1.0" }
 eio-host-core = { path = "crates/host-core", version = "0.1.0" }
 eio-manifest = { path = "crates/manifest", version = "0.1.0" }
+eio-sdk = { path = "crates/block-sdk", version = "0.1.0" }
 eio-signal = { path = "crates/signal", version = "0.1.0" }
+eio-test-host = { path = "crates/test-host", version = "0.1.0" }
 
 # Lint levels are shared here; the -D warnings escalation belongs to the `just
 # lint` recipe, so a local `cargo build` stays usable while CI stays strict.

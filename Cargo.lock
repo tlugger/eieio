@@ -574,6 +574,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "eio-test-host"
+version = "0.1.0"
+dependencies = [
+ "eio-host-core",
+ "eio-manifest",
+ "eio-sdk",
+ "eio-signal",
+]
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
