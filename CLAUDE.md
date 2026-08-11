@@ -86,7 +86,7 @@ Bottom-up, most-specified first. Do not start a later item because an earlier on
 
 These are the decisions most likely to be eroded by a reasonable-seeming local improvement:
 
-- **Core WASM only.** No WASI, no component model, no threads, no reference types beyond MVP. The modules must run under wasm3. Reaching for a component-model convenience deletes the embedded tier (SCOPE §3.2, ABI §1).
+- **Core WASM plus the measured six, nothing more.** No WASI, no component model, no threads. The accepted set is core WASM 1.0 plus exactly the six proposals ABI §4.3 lists — what the Rust toolchain emits by default *and* wasm3 demonstrably executes, pinned by the conformance suite on both engines. Widening it again means measuring again (SCOPE §3.2, ABI §1.1, §4.3). Reaching for a component-model convenience still deletes the embedded tier.
 - **Copies, not shared references,** across the boundary. Host never retains a guest pointer past the call (ABI §9).
 - **`emit` enqueues; it does not deliver.** Routing happens after the callback returns. This is what makes reentrancy unconstructible (ABI §6.2).
 - **Traps are death; status codes are life.** A non-zero callback return is logged and counted, never fatal. Only traps, fuel exhaustion, and deadline violations kill an instance (ABI §8).
