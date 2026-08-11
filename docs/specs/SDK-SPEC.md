@@ -263,8 +263,9 @@ two:
    WASM). Fast inner loop:
    `host.deliver("default", batch)?; assert_eq!(host.signals("above").len(), 2);`
 2. **Conformance run** — the same block compiled to `.wasm` and driven under the reference
-   harness (ABI §13), catching the boundary bugs the native layer cannot see: linear
-   memory, `(ptr, len)`, CBOR crossing an engine, fuel and deadlines.
+   harness (ABI §13.1), catching the boundary bugs the native layer cannot see: linear
+   memory, `(ptr, len)`, CBOR crossing an engine, fuel and deadlines. The scenario a block
+   author writes is a data file, not Rust (§13.1), so the same one runs on every host.
 
 ### 6.1 `TestHost` (normative)
 
@@ -321,7 +322,7 @@ gap in either layer.
 
 ## 7. Non-Rust authorship (deferred, SCOPE §6)
 
-The ABI permits any language; the SDK does not chase this in v1. The conformance harness + golden blocks are the de facto spec for future SDKs (TinyGo, AssemblyScript, componentized Python for legacy nio-blocks migration). No design work now beyond keeping the harness language-agnostic.
+The ABI permits any language; the SDK does not chase this in v1. The conformance harness + golden blocks are the de facto spec for future SDKs (TinyGo, AssemblyScript, componentized Python for legacy nio-blocks migration). No design work now beyond keeping the harness language-agnostic — which ABI §13.1 makes structural rather than aspirational: it consumes a `.wasm` and a manifest, its scenarios are data, and `eio-conformance` does not depend on `eio-sdk`.
 
 ## 8. Expansion list (for the in-depth pass)
 

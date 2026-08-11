@@ -466,10 +466,94 @@ One consequence follows from EXPR rather than from anything here: the expression
 
 The monorepo carries:
 
-1. **Reference harness** — a minimal host (wasmtime-based) that drives a module through the full lifecycle with scripted deliveries, property tables, and fault injection (undersized buffers, `ERR_THROTTLED` state, capability denial).
-2. **Golden blocks** — small blocks exercising each contract area: pure transform, multi-port routing (filter), timer emitter (simulator), stateful counter, GPIO echo, hostile blocks (spinner, allocator-liar, reentrancy-prober, oversize-emitter).
+1. **Reference harness** (§13.1) — a minimal host (wasmtime-based) that drives a module through the full lifecycle with scripted deliveries, property tables, and fault injection (undersized buffers, `ERR_THROTTLED` state, capability denial).
+2. **Golden blocks** (§13.2) — small blocks exercising each contract area: pure transform, multi-port routing (filter), timer emitter (simulator), stateful counter, GPIO echo, hostile blocks (spinner, allocator-liar, reentrancy-prober, oversize-emitter).
 
 Both the daemon and the leaf runtime MUST pass the harness against the golden blocks. Divergence between the two hosts is a conformance bug by definition.
+
+### 13.1 Reference harness
+
+The harness drives a **host**; the wasmtime reference implementation is one host and not the subject. A conformant host MUST therefore be drivable by it, which costs exactly two things: a way to instantiate a module, and a way to call its exports and read and write its linear memory. Anything more the harness needed of a host would be a requirement this specification does not make.
+
+A host also states which capability namespaces (§7.2–§7.6) it implements, and the harness asks *before* instantiating. Only `eio:core` is promised unconditionally (§7.0); every other namespace is a question about the device, settled at deploy validation (SCOPE §3.3). A scenario needing one the host does not implement is reported **skipped, with the namespace named** — never passed over, because a suite that counted an unreachable scenario as a pass would claim coverage the platform does not have. Asking beforehand is also what keeps the report legible: a module importing an unimplemented namespace fails to *link*, and a link failure reads as "this module is broken".
+
+The reference binding is written **independently of any production host's**, deliberately. A harness sharing the daemon's engine binding could only ever report that the binding agrees with itself, and "both hosts MUST pass" would be a statement about one implementation.
+
+**Scenarios are data, not code.** A scenario is a document a host in any language can read, because the leaf runtime and every later host MUST run the same ones — a suite written in the host's own language can only test that host. What the *harness* is written in is not constrained; only the suite is.
+
+A scenario fixes:
+
+- The module, and the manifest to validate it against when the module carries none (§4.4).
+- `instance_id`, the `limits` the descriptor publishes (§5.2, §9.7), and the property values a service would supply. **Ports and `prop_id`s come from the manifest**, resolved by §11.1's `required`/`default` rule; a scenario restating them would be a second numbering free to disagree with the first.
+- The execution budget (§10) — fuel and wall-clock deadline — because exhaustion is a fault a scenario injects rather than a property of the machine it runs on.
+- A sequence of **steps**: one lifecycle call each, walking §5.1 from `eio_configure` to `eio_stop`.
+
+**Batches are canonical CBOR, written as hex.** §6.3.1 admits exactly one encoding of any batch, and pinning bytes is half of what this suite is for. A JSON spelling of a batch would be a second, lossier data model — it has no byte string, and it resolves duplicate keys before rule 7 can reject them.
+
+**The host is deterministic.** `time_unix_ms`, `time_mono_ms` and `rand` are fixed or seeded by the scenario. §7.0 mediates all three precisely so that a host holds this lever; a conformance run that is not reproducible cannot pin a divergence to a change.
+
+#### Observation vocabulary
+
+What a scenario may assert about a step, and therefore what a host MUST make observable to whatever embeds it:
+
+|Observation|Section|
+|---|---|
+|The status a callback returned, or the code it was rejected/refused with|§8, §5.1|
+|The death and its kind: trap, fuel, deadline, engine|§8, §10|
+|A delivery the *host* declined — distinct from any status, because the guest was never called|§9.7|
+|Emissions, per port, in order, as canonical bytes|§6.2, §6.3.1|
+|Guest→host calls, in order, by name|§7|
+|Property **evaluations**, counted separately from `prop` calls|§7.1|
+|`log` lines and `error` details|§7.0|
+|The allocation ledger below|§9|
+
+`prop` calls and property evaluations are separate numbers on purpose: §7.1 requires the result to be cached for the duration of the callback, so grow-and-retry is two calls and one evaluation. A single count could not tell a compliant host from one that re-evaluates.
+
+#### Fault injection
+
+A scenario may inject any of these, and a host MUST behave as the cited section says under each:
+
+|Fault|How it is injected|Expected|
+|---|---|---|
+|Undersized guest buffer|an answer larger than the guest's first `(buf, cap)`|grow-and-retry (§8), one evaluation (§7.1)|
+|`ERR_THROTTLED` state|scripted refusal of `state_put`|§7.2; the block backs off, the instance lives|
+|Capability denial|every function of a namespace answers `ERR_CAPABILITY`|§8, and the instance lives|
+|Oversize delivery|`max_payload`/`max_batch` set below the batch|refused, guest never called (§9.7)|
+|Oversize emission|the block emits past `max_payload`|`ERR_LIMIT` to the emitter (§6.2)|
+|Budget exhaustion|fuel or deadline set below what the callback needs|a trap; the instance is DEAD (§10)|
+|A lying allocator|`eio_alloc` answers misaligned, zero, or out of bounds|`0` is a refusal and survivable (§9.5); the other two are death (§9.6)|
+
+The undersized-buffer fault is worth stating exactly, because it cannot be what it sounds like: a host does not choose a guest's buffer size and cannot make one too small. What it can do is answer with a value that does not fit the buffer it was handed, which is the condition §8's grow-and-retry exists for and the only way to reach that path from the host side.
+
+#### The allocation ledger, and what it cannot see
+
+Every run records every `eio_alloc` the host made for an inbound payload (§6.1): the size asked for, the pointer returned, and whether that pointer was accepted, refused as `0` (§9.5), or rejected as a lie (§9.6). Two host-side invariants are checked on every run without a scenario asking for them:
+
+- **The host MUST NOT call `eio_free`.** Rule §9.2 makes the guest the owner from the moment the callback begins, and a host-side free would be the second owner that rule exists to prevent.
+- **The host MUST NOT write into guest memory it did not allocate** (§9.1). The other writing path — a `(buf, cap)` the guest supplied in the current call — is bounded by `cap` under the size convention, so it needs no ledger to check.
+
+What no harness can see is the *guest's* frees. `eio_free` is an export (§4.1), so a guest releasing an inbound payload calls it as an ordinary intra-module call, which no engine surfaces to its embedder. A harness claiming to check §6.1's "the guest MUST `eio_free` it" from the outside would be claiming knowledge no host has. That obligation is therefore tested from the *inside*, by a golden block that counts its own allocations and frees and refuses to stop unbalanced (§13.2); the harness's part is to run enough deliveries for a leak to show and to report the guest's linear-memory growth across the run.
+
+### 13.2 Golden blocks
+
+Small blocks, each exercising one contract area, and each self-checking where the ABI gives it something to check:
+
+|Block|Exercises|
+|---|---|
+|Pure transform|§6.1, §6.2, §7.1 — a batch in, a batch out, one property per signal|
+|Filter|§5.2, §6.2 — multi-port routing by an expression-valued predicate|
+|Timer emitter|§4.2, §7.3 — emission with no inbound batch at all|
+|Stateful counter|§7.2 — durable state, and the allocation self-count of §13.1|
+|GPIO echo|§4.2, §7.4 — a watch, an edge, an output|
+
+And the hostile blocks, which are conformant modules behaving badly on purpose — a host MUST survive every one of them with the outcome named:
+
+|Block|Behaviour|Host MUST|
+|---|---|---|
+|Spinner|never returns from a callback|kill it on fuel or deadline (§10) and survive|
+|Allocator-liar|`eio_alloc` returns misaligned, out-of-bounds, or zero pointers|discard the instance on the first two (§9.6), fail the delivery on the third (§9.5)|
+|Reentrancy-prober|emits from inside a callback and looks for delivery before it returns|never deliver mid-call (§6.2); the probe MUST observe nothing|
+|Oversize-emitter|emits past `max_payload` and on undeclared ports|answer `ERR_LIMIT` and `ERR_INVALID_ARG` (§6.2) without reading the payload|
 
 ---
 
