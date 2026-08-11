@@ -1,0 +1,65 @@
+# {{name}}
+
+An [eieio](https://github.com/tlugger/eieio) block: a WASM module a node loads, configures
+and wires into a service.
+
+It reads each incoming signal's `n` and emits it incremented. That behaviour is a starting
+point; the shape around it is the part worth keeping.
+
+## The shape
+
+```
+src/lib.rs           the block: one struct, one #[block] attribute, one Block impl
+tests/native.rs      the fast layer — the block as native Rust, no engine (SDK §6.1)
+conformance/         the boundary layer — the same block as .wasm, under the reference
+                     harness (ABI §13.1)
+```
+
+Both test layers exist because neither catches the other's bugs. `tests/native.rs` runs in
+milliseconds and fails with a Rust backtrace; the conformance scenarios are the only place
+linear memory, `(ptr, len)` and CBOR crossing an engine are exercised at all. A scenario is
+a **data file**, so the same one runs on every host — including the leaf runtime.
+
+## Working on it
+
+```sh
+cargo eio test      # native tests, then the module, then the conformance scenarios
+cargo eio build     # the module and its manifest.json
+```
+
+`cargo eio build` builds for `wasm32-unknown-unknown` with `panic = "abort"` and the size
+profile (SDK §5.2), then runs the same load-time validation a node runs — exports and their
+signatures, imports within the declared capabilities, the embedded manifest — and writes
+that manifest as `manifest.json` beside the `.wasm`. A module that builds is a module a node
+accepts.
+
+## Configuring it
+
+Every property is an expression (ABI §11). `next` defaults to `(+ $n 1)`, and whoever deploys
+this block may replace it without rebuilding — which is also how to try one out:
+
+```sh
+eio-daemon dev run-block target/wasm32-unknown-unknown/release/{{lib}}.wasm \
+  --prop 'next=(* $n 2)' --batch '[{"n": 21}]'
+```
+
+Expressions are pure and terminating: no IO, no clock, no RNG, no loops. `$n` on a signal
+that has no `n` is an error rather than a null — a config typo fails loudly and per signal,
+not silently at 2 a.m.
+
+## Adding a port, a property, a capability
+
+All three are attribute arguments on the struct, and all three reach the manifest from
+there — there is no second place to keep in step:
+
+```rust
+#[block(
+    name = "{{name}}",
+    inputs(r#in),
+    outputs(out, rejected),      // Out::Rejected now exists; emitting elsewhere will not compile
+    capabilities(state, timer)   // ctx.state() and ctx.timers() now exist
+)]
+```
+
+A capability you declare and never call is a module every conformant host refuses (ABI §4.2),
+so declare what you use.

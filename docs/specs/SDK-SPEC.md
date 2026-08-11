@@ -239,21 +239,128 @@ The message MUST be formatted into a fixed buffer and truncated if it does not f
 
 ## 5. Build and packaging tooling
 
-**PROPOSED:** a `cargo eio` subcommand (separate `cargo-eio` crate):
+A `cargo eio` subcommand (separate `cargo-eio` crate):
 
 ```
-cargo eio new <name>         template block repo (CI included)
+cargo eio new <name>         template block repo (CI included)          §5.1
 cargo eio build              wasm32-unknown-unknown, panic=abort, opt for size,
                              embed eio:manifest section, emit manifest.json
                              (no feature flags: ABI §4.3's accepted set is what
                              rustc emits by default, and the flag this line
-                             used to carry was measured to do nothing)
-cargo eio test               native tests + harness run (§6)
+                             used to carry was measured to do nothing)   §5.2
+cargo eio test               native tests + harness run (§6)             §5.3
+```
+
+**PROPOSED**, and unimplemented:
+
+```
 cargo eio aot --target esp32s3   WAMR AOT artifact for leaf targets
 cargo eio publish            package OCI artifact (+ AOT variants), push, sign (cosign)
 ```
 
-The template repo's CI runs build/test/publish on tag — this is the "block repos independently released to the registry" flow from SCOPE §3.6 made concrete.
+Both belong to the registry work of SCOPE §3.6, which has not happened: there is nothing to
+push to and no signing story to sign against, and a `publish` that wrote to a place nobody
+has agreed on would be a decision made by a tool. They stay marked until that epic reaches
+them.
+
+The template repo's CI runs build/test/publish on tag — this is the "block repos independently released to the registry" flow from SCOPE §3.6 made concrete. Until `publish` exists the generated workflow runs build and test, and says in place what the tag job is waiting for; a workflow that referenced a subcommand nobody can run would fail on the first tag anyone pushed.
+
+### 5.1 The template (normative)
+
+`cargo eio new <name>` writes a block repo that builds, tests and passes conformance with no
+further editing. That is the whole requirement, and it is a requirement rather than a
+courtesy: a template whose first run fails teaches a block author that the toolchain is
+approximate.
+
+```
+<name>/
+  Cargo.toml               the block crate; NOT a workspace member of anything
+  src/lib.rs               one #[block] struct and its Block impl (§1)
+  tests/native.rs          the TestHost layer (§6.1)
+  conformance/*.json       the harness layer (§6, ABI §13.1)
+  .github/workflows/ci.yml build + test
+  .gitignore
+  README.md
+```
+
+Four things about it are normative, because each is load-bearing somewhere else:
+
+- **`[lib] crate-type = ["cdylib", "rlib"]`.** The `cdylib` is the block; the `rlib` is what
+  lets `tests/native.rs` name the block's type at all. A `cdylib`-only crate cannot be
+  imported by its own integration test, which would put §6.1's whole layer out of reach.
+  It does not change what the guest build emits.
+- **The crate carries an empty `[workspace]` table.** A block repo is its own thing, and a
+  template generated inside some other checkout must not silently join that checkout's
+  workspace.
+- **The dependency on `eio-sdk` is a registry dependency.** `cargo eio new --sdk-path <DIR>`
+  rewrites it, and `eio-test-host`, to path dependencies against a local eieio checkout —
+  which is what the tooling's own tests use, so "the template builds out of the box" is
+  measured rather than asserted.
+- **`[profile.release]` restates §5.2's defaults.** `cargo eio build` enforces them anyway;
+  restating them is what makes a plain `cargo build --release --target wasm32-unknown-unknown`
+  produce the same module. A block author who reaches for cargo directly should not get a
+  different artifact.
+
+The conformance scenarios name the built module by path, relative to the scenario file
+(`../target/wasm32-unknown-unknown/release/<lib>.wasm`), because ABI §13.1 already says a
+scenario names its module. Nothing about a block's suite is special: the same files run under
+any host the harness can drive.
+
+### 5.2 Size-optimization defaults (normative)
+
+Blocks are pulled over networks onto devices measured in kilobytes of flash (SCOPE §3.7), so
+the size posture is part of the contract rather than a preference. `cargo eio build` invokes:
+
+```
+cargo build --release --target wasm32-unknown-unknown
+  --config 'profile.release.panic="abort"'
+  --config 'profile.release.opt-level="z"'
+  --config 'profile.release.lto=true'
+  --config 'profile.release.strip=true'
+```
+
+|Setting|Why|
+|---|---|
+|`panic = "abort"`|§4 requires it: a guest has no unwinder and a panic MUST become a trap. This one is a correctness rule wearing a profile's clothes.|
+|`opt-level = "z"`|Size over speed. A block's work is bounded by its fuel budget (ABI §10), not by its instruction count.|
+|`lto = true`|Fat LTO across the block and the SDK; it is what removes the capability wrappers a block never calls.|
+|`strip = true`|Symbol names are the largest single component of an unstripped guest, and no host reads them: ABI §8's death report is a trap and a status code, and §4.3's diagnostics name imports and proposals rather than functions.|
+
+They are passed as `--config` rather than left to the block's own manifest **deliberately, and
+this is the point of the subcommand existing**: config-level profile settings override the
+manifest's, so a block cannot ship with `panic = "unwind"` by editing a file. §4's rule is not
+one a block author may opt out of on their own machine.
+
+**No feature flags of any kind are passed.** ABI §4.3's accepted set is exactly what rustc
+emits by default; the flag earlier drafts required here was measured to do nothing.
+
+**`wasm-opt` is not invoked, and that is a decision rather than a gap.** Binaryen is a C++
+toolchain, not a Rust dependency: requiring it would make `cargo eio build` fail on a machine
+that has the Rust toolchain and nothing else, and would make the shipped artifact depend on
+which version of a non-pinned external binary the builder happened to have — for a platform
+whose two hosts must agree byte for byte. A block author who wants the last few percent runs
+it themselves on the emitted module. If it is ever adopted it will be adopted as a pinned,
+verified download in the release pipeline, where a reproducibility claim can be made about it.
+
+After the build, `cargo eio build` reads the emitted module, validates it under the manifest
+crate's full load-time checks (ABI §4: exports and their signatures, imports within declared
+capabilities, capability-paired callbacks, the embedded manifest) and writes that manifest as
+`manifest.json` beside the `.wasm`. The validation is the same one a host performs at load, so
+a module that builds here is one a node will accept — that is what makes the build step worth
+more than `cargo build` with flags.
+
+### 5.3 `cargo eio test`
+
+Both of §6's layers, in the order that makes a failure legible:
+
+1. `cargo test` — the native `TestHost` layer, which is fast and fails with a Rust backtrace.
+2. `cargo eio build` — because the harness layer needs the module the block actually ships.
+3. Every scenario in `conformance/`, against the reference harness (ABI §13.1).
+
+Native first because a block that is wrong is wrong more cheaply there, and a conformance
+report on a block whose logic is broken says the same thing at ten times the length. A block
+repo with no `conformance/` directory runs the first layer and says plainly that it ran only
+one of two — never silently, since a suite nobody notices is missing is a suite nobody writes.
 
 ## 6. Testing story
 
@@ -327,6 +434,6 @@ The ABI permits any language; the SDK does not chase this in v1. The conformance
 
 ## 8. Expansion list (for the in-depth pass)
 
-template repo contents, size-optimization defaults (opt-level, lto, strip, wasm-opt pass), SDK versioning vs ABI versioning policy.
+SDK versioning vs ABI versioning policy.
 
-Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; the `HttpRequest`/`HttpResponse` types are normative in §3.3, which also records the `request_tagged` decision; the `TestHost` API is normative in §6.1; §2, §3, §4 and §6 are expanded.
+Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; the `HttpRequest`/`HttpResponse` types are normative in §3.3, which also records the `request_tagged` decision; the `TestHost` API is normative in §6.1; the template's contents are normative in §5.1 and the size-optimization defaults in §5.2, which also records the `wasm-opt` decision; §2, §3, §4 and §6 are expanded.

@@ -1,0 +1,45 @@
+# The gate for this block.
+#
+# `cargo eio test` runs both of SDK §6's layers — the native tests and the conformance
+# scenarios against the built module — so this workflow is the same command a developer
+# runs locally. Anything added here that cannot be run locally is a failure nobody can
+# reproduce.
+#
+# SDK §5 describes a tag-triggered publish job as well; `cargo eio publish` is still
+# PROPOSED and unimplemented, so there is nothing to call yet. When the registry work
+# lands (SCOPE §3.6), that job goes here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        # actions/checkout v7.0.1, pinned to a commit rather than a tag: a tag can move.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install the guest target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install cargo-eio
+        run: cargo install cargo-eio
+
+      - name: Test — native, then the module under the conformance harness
+        run: cargo eio test
+
+      - name: Build the module and its manifest
+        run: cargo eio build

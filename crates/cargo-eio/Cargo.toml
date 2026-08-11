@@ -1,0 +1,39 @@
+[package]
+name = "cargo-eio"
+description = "The cargo subcommand that builds, tests and scaffolds eieio blocks (SDK-SPEC §5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The one crate whose package name is not `eio-*`: cargo discovers subcommands by binary
+# name, so `cargo eio` requires a binary called `cargo-eio` (DAEMON §1).
+[[bin]]
+name = "cargo-eio"
+path = "src/main.rs"
+
+[dependencies]
+# ABI §4's load-time checks, entire. `cargo eio build` runs the same validation a host runs
+# at load (SDK §5.2), which is what makes a module that builds one a node will accept —
+# and it runs *the* implementation, never a build-time approximation of it (DAEMON §1).
+eio-manifest.workspace = true
+
+# The reference harness (ABI §13.1), for `cargo eio test`'s second layer. This is what
+# makes the subcommand worth more than `cargo test`: the boundary bugs — linear memory,
+# `(ptr, len)`, CBOR crossing an engine — are invisible to the native layer (SDK §6).
+eio-conformance.workspace = true
+
+# Derive rather than the builder, as the daemon does: the flags and the struct cannot drift.
+clap.workspace = true
+
+# Cargo's `--message-format=json` stream, which is how the emitted module is found. Guessing
+# `target/<triple>/release/<name>.wasm` would re-derive cargo's own naming rules.
+serde.workspace = true
+serde_json.workspace = true
+
+# Same reason as the daemon's: every `?` in a std binary wants one error type.
+anyhow.workspace = true
+
+[lints]
+workspace = true

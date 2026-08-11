@@ -1,0 +1,43 @@
+//! `{{name}}` — an eieio block.
+//!
+//! One struct, one `#[block]` attribute, one trait impl (SDK §1). The attribute generates
+//! every ABI export, the typed `In`/`Out` port enums, the `Prop<T>` handles and the
+//! `eio:manifest` custom section that makes the module self-describing (ABI §4.4) — so a
+//! block author writes safe Rust and never sees the raw ABI.
+
+#![no_std]
+
+extern crate alloc;
+
+use eio_sdk::prelude::*;
+
+#[block(
+    name = "{{name}}",
+    description = "Emits each incoming signal's `n`, incremented",
+    inputs(r#in),
+    outputs(out)
+)]
+pub struct {{struct}} {
+    /// Every property is an expression (ABI §11) — this one reads the signal it is
+    /// evaluated against, so a deployer can replace it without rebuilding the block.
+    #[prop(ty = "int", desc = "What each signal becomes", default = "(+ $n 1)")]
+    next: Prop<i64>,
+}
+
+impl Block for {{struct}} {
+    fn process_signals(&mut self, ctx: &mut Ctx, _input: u32, batch: Batch) -> BlockResult {
+        let mut out = Batch::new();
+        for index in 0..batch.len() as u32 {
+            // The grow-and-retry loop, the CBOR decode and the declared-type check are all
+            // the SDK's (SDK §1.2); a block author writes this line.
+            let next = self.next.get(ctx, index)?;
+            let mut signal = Signal::new();
+            signal.set(alloc::string::String::from("n"), Value::Int(next));
+            out.push(signal);
+        }
+        // Emitting to an undeclared port is a compile error, not a runtime one: `Out` comes
+        // from the attribute above, and its discriminant *is* ABI §5.2's port index.
+        ctx.emit(Out::Out, &out)?;
+        Ok(())
+    }
+}

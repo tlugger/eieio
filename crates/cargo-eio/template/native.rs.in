@@ -1,0 +1,54 @@
+//! The fast layer (SDK §6.1): the block as native Rust, with no WASM engine.
+//!
+//! `TestHost` is a real host — properties here are resolved by the same `expr` interpreter,
+//! the same per-callback cache and the same declared-type check a node uses — so a routing
+//! decision in this test is the decision a node would make. What it cannot see is the
+//! boundary itself: linear memory, `(ptr, len)`, CBOR crossing an engine. That is the other
+//! layer's job, and `cargo eio test` runs both.
+
+use eio_sdk::prelude::*;
+use eio_test_host::{PropertyType, TestHost, batch, signal};
+use {{lib}}::{{struct}};
+
+/// The block configured as a service would configure it (ABI §5.2, §11.1).
+fn host() -> TestHost<{{struct}}> {
+    TestHost::<{{struct}}>::builder()
+        .inputs(["in"])
+        .outputs(["out"])
+        .property("next", PropertyType::Int, "(+ $n 1)")
+        .start()
+        .expect("it configures and starts")
+}
+
+#[test]
+fn every_signal_is_incremented() {
+    let mut host = host();
+
+    host.deliver(
+        "in",
+        batch([
+            signal([("n", Value::Int(1))]),
+            signal([("n", Value::Int(41))]),
+        ]),
+    )
+    .expect("delivered");
+
+    let out = host.signals("out");
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].get("n"), Some(&Value::Int(2)));
+    assert_eq!(out[1].get("n"), Some(&Value::Int(42)));
+}
+
+#[test]
+fn a_signal_without_n_fails_that_signal() {
+    // Missing data is an error, not null (EXPR §6): `$n` on a signal without `n` fails that
+    // signal's evaluation. This block propagates it with `?`, so the callback returns
+    // non-zero — logged and counted by a host, never fatal (ABI §8). Handling it another
+    // way is the block's choice; that choice is what this test would pin.
+    let mut host = host();
+
+    let outcome = host.deliver_one("in", signal([("something-else", Value::Int(1))]));
+
+    assert!(outcome.is_err(), "the property failed for that signal");
+    assert_eq!(host.property_failures().len(), 1);
+}

@@ -1,0 +1,5 @@
+# Build artifacts. `cargo eio build` writes the module and its manifest.json in here too.
+/target/
+
+# Cargo.lock IS committed: this crate ships a binary artifact, and a block that builds
+# differently on two days is a block whose bytes nobody can vouch for.

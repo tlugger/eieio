@@ -1,0 +1,21 @@
+{
+  "name": "{{name}}-completes-its-lifecycle",
+  "spec": "ABI §5.1, §6.1, §6.2, §6.3.1, §7.1",
+  "note": "The same block as tests/native.rs, driven across a real WASM boundary. Batches are canonical CBOR as hex (ABI §6.3.1) because pinning bytes is half of what a conformance suite is for: [{\"n\":1},{\"n\":41}] in, [{\"n\":2},{\"n\":42}] out.",
+  "module": "../target/wasm32-unknown-unknown/release/{{lib}}.wasm",
+  "limits": { "max_payload": 65536, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "82a1616e01a1616e1829" } },
+      "expect": {
+        "status": 0,
+        "evaluations": 2,
+        "emissions": [ { "port": "out", "batch": "82a1616e02a1616e182a" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

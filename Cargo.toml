@@ -8,6 +8,7 @@ members = [
     "crates/abi",
     "crates/block-sdk",
     "crates/block-sdk-macros",
+    "crates/cargo-eio",
     "crates/conformance",
     "crates/test-host",
     "crates/daemon",

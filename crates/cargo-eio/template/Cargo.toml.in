@@ -1,0 +1,33 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A block repo is its own thing (SDK §5.1). Without this table, a block generated inside
+# another cargo checkout would silently join that checkout's workspace.
+[workspace]
+
+# `cdylib` is the block; `rlib` is what lets `tests/native.rs` name its type at all, since
+# an integration test cannot import a cdylib-only crate (SDK §5.1). The `.wasm` is the same
+# either way.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+{{sdk_dep}}
+
+[dev-dependencies]
+# SDK §6.1's native host: the real `expr` interpreter and the real property protocol, with
+# no WASM engine in the way.
+{{test_host_dep}}
+
+# `cargo eio build` enforces these anyway (SDK §5.2). They are restated here so that a plain
+# `cargo build --release --target wasm32-unknown-unknown` produces the same module — and
+# `panic = "abort"` is not a preference: a guest has no unwinder, so a panic MUST become a
+# trap (SDK §4).
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+strip = true
