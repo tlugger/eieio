@@ -61,7 +61,8 @@ use std::time::Duration;
 
 use eio_host_core::exports::{core_fn, namespace};
 use eio_host_core::{
-    Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind, memory_range,
+    Arg, Engine, EngineError, ExprBudgets, HostCall, HostFn, Memory, Ret, Trap, TrapKind,
+    memory_range,
 };
 use eio_manifest::MEMORY_EXPORT;
 use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFeatures};
@@ -183,17 +184,25 @@ struct State {
     core: [Option<HostFn>; CoreFn::ALL.len()],
 }
 
-/// What one guest entry is allowed to consume (ABI §10).
+/// What one guest entry is allowed to consume (ABI §10), and what one expression is (EXPR §9).
 ///
 /// Host configuration, not ABI constants — §10 says so plainly, and leaf hosts will be
-/// tighter. Both numbers are therefore stated by whoever builds a [`Runtime`] rather than
-/// defaulted silently anywhere below this type.
+/// tighter. Every number here is therefore stated by whoever builds a [`Runtime`] rather than
+/// defaulted silently anywhere below this type, and `node.toml`'s `[budgets]` is where a
+/// daemon-class node states them (DAEMON §2.1).
+///
+/// The expression budgets travel with the guest ones because they are one operator decision
+/// about one node: a callback's fuel bounds what the *guest* runs, and EXPR §9's bounds what
+/// the host runs on the guest's behalf when it evaluates a property (ABI §7.1). Splitting them
+/// across two types would give a caller two chances to configure half a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budgets {
     /// Fuel per guest entry. wasmtime's unit: roughly one per WASM instruction executed.
     pub fuel: u64,
     /// Wall-clock time per guest entry, rounded up to [`EPOCH_TICK`].
     pub deadline: Duration,
+    /// What one property expression may consume, and the decode bound that travels with it.
+    pub expr: ExprBudgets,
 }
 
 impl Budgets {
@@ -228,6 +237,7 @@ impl Default for Budgets {
         Budgets {
             fuel: Budgets::DEFAULT_FUEL,
             deadline: Budgets::DEFAULT_DEADLINE,
+            expr: ExprBudgets::DEFAULT,
         }
     }
 }
@@ -263,6 +273,15 @@ impl Runtime {
         let engine = wasmtime::Engine::new(&config)?;
         spawn_epoch_ticker(&engine)?;
         Ok(Runtime { engine, budgets })
+    }
+
+    /// What one property expression may consume on this node (EXPR §9, DAEMON §2.1).
+    ///
+    /// Read off the runtime rather than passed alongside it, so that an instance cannot be
+    /// built with expression budgets other than the node's — the same reason ABI §10's two
+    /// numbers are armed from here rather than by each caller.
+    pub fn expr(&self) -> ExprBudgets {
+        self.budgets.expr
     }
 
     /// Compiles `wasm` to a module this runtime can instantiate.

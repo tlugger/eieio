@@ -129,6 +129,9 @@ tokio = { version = "1.53", default-features = false, features = [
     "rt",
     "sync",
     "macros",
+    # `run` stops on SIGTERM and SIGINT rather than being killed by them, so that ABI §5.1
+    # step 5's `eio_stop` runs on the way out (DAEMON §3).
+    "signal",
 ] }
 
 # Structured logging, with guest `log` calls tagged (service, instance) (DAEMON §11).

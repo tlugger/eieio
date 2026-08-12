@@ -1,11 +1,15 @@
 //! The eieio daemon (DAEMON-SPEC).
 //!
-//! A daemon-class node runtime (SCOPE §3.7). Today it is a skeleton: it can load one block,
-//! configure it, start it, deliver a batch and print what the block emits. Services, the
-//! router, the executor, the block cache and the management API arrive with their own
-//! epics; what is already load-bearing is the split this crate sits on top of — every ABI
-//! rule it obeys is obeyed inside `eio_host_core`, so the leaf runtime will obey the same
-//! one (DAEMON §1).
+//! A daemon-class node runtime (SCOPE §3.7). `run` is a node: it reads `node.toml`, boots the
+//! services in its data directory and stays up (DAEMON §2, §3). `dev run-block` is the other
+//! half — one block, no node around it, for whoever is writing the block (§12).
+//!
+//! What is missing is the management plane. The block manager pulls nothing yet, so a service
+//! resolves against a cache somebody else filled (§4, `blocks`); the API is parsed out of
+//! `node.toml` and bound by nothing (§9); and there is no supervision, so an instance that
+//! dies stays dead (§8). Each arrives with its own issue. What is already load-bearing is the
+//! split this crate sits on top of — every ABI rule it obeys is obeyed inside
+//! `eio_host_core`, so the leaf runtime will obey the same one (DAEMON §1).
 //!
 //! # Why this runtime has almost nothing on it
 //!
@@ -13,13 +17,16 @@
 //! the ABI showing through (§1.2: one instance, one caller at a time) — so every block
 //! instance lives on a thread of its own, with its own current-thread runtime (DAEMON §5,
 //! `executor`). What runs *here* is whatever talks to those instances through their
-//! mailboxes: today `dev run-block`, and later the management API (§9).
+//! mailboxes: `run`'s boot and shutdown, `dev run-block`, and later the management API (§9).
 
+mod blocks;
+mod boot;
 mod core_fns;
 mod engine;
 mod executor;
 mod instance;
 mod json_batch;
+mod node;
 mod router;
 mod run;
 
@@ -27,13 +34,15 @@ mod run;
 mod conformance;
 #[cfg(test)]
 mod end_to_end;
+#[cfg(test)]
+mod scratch;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
-use eio_host_core::Limits;
+use eio_host_core::{ExprBudgets, Limits};
 use tracing_subscriber::EnvFilter;
 
 use crate::engine::Budgets;
@@ -48,8 +57,8 @@ use crate::engine::Budgets;
 struct Cli {
     /// Node data directory (DAEMON-SPEC §2).
     ///
-    /// Accepted now so that scripts and unit files can be written against it; nothing reads
-    /// its contents yet — the on-disk layout is its own issue.
+    /// Created and provisioned by `run` if it does not exist; `dev` commands have no node
+    /// around them and never read it (§12).
     #[arg(long, global = true, default_value = "/etc/eieio")]
     data_dir: PathBuf,
 
@@ -58,7 +67,16 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value, built once from argv and moved once. Boxing `dev`'s arguments to \
+              even it up with `run`'s absence of them would add an allocation and a \
+              dereference to save nothing: this enum never lands in a collection"
+)]
 enum Command {
+    /// Run this node: load its configuration, start its services, and stay up (DAEMON §3).
+    Run,
+
     /// Development commands: run and inspect blocks outside any service.
     Dev {
         #[command(subcommand)]
@@ -120,11 +138,11 @@ struct RunBlockArgs {
     /// Largest payload, in bytes, this instance may emit or receive (ABI §9.7).
     ///
     /// Host configuration with no floor (SCOPE §3.4), so it is stated rather than assumed.
-    #[arg(long, default_value_t = 64 * 1024, value_name = "BYTES")]
+    #[arg(long, default_value_t = node::DEFAULT_MAX_PAYLOAD, value_name = "BYTES")]
     max_payload: u32,
 
     /// Largest number of signals in one batch (ABI §9.7).
-    #[arg(long, default_value_t = 1024, value_name = "SIGNALS")]
+    #[arg(long, default_value_t = node::DEFAULT_MAX_BATCH, value_name = "SIGNALS")]
     max_batch: u32,
 
     /// Fuel one guest entry may burn before it is killed (ABI §10).
@@ -141,7 +159,7 @@ struct RunBlockArgs {
     deadline_ms: u64,
 
     /// How many work items the instance's mailbox holds (DAEMON §5).
-    #[arg(long, default_value_t = 64, value_name = "ITEMS")]
+    #[arg(long, default_value_t = node::DEFAULT_MAILBOX, value_name = "ITEMS")]
     mailbox: usize,
 }
 
@@ -171,6 +189,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::debug!(data_dir = %cli.data_dir.display(), "starting");
 
     match cli.command {
+        Command::Run => run_node(&cli.data_dir).await,
+
         Command::Dev {
             command: DevCommand::RunBlock(args),
         } => {
@@ -193,6 +213,10 @@ async fn main() -> anyhow::Result<()> {
                 budgets: Budgets {
                     fuel: args.fuel,
                     deadline: Duration::from_millis(args.deadline_ms),
+                    // EXPR §9's reference budgets. `dev run-block` has no node around it
+                    // (§12) and so no `node.toml` to state them, and a block being debugged
+                    // wants the numbers the spec publishes rather than a node's local ones.
+                    expr: ExprBudgets::DEFAULT,
                 },
                 mailbox: args.mailbox,
             })
@@ -201,6 +225,68 @@ async fn main() -> anyhow::Result<()> {
             // seen everything worth seeing.
             .map(drop)
         }
+    }
+}
+
+/// `run`: DAEMON §3's boot sequence, then stay up until asked to stop.
+///
+/// The only errors that reach here are the node's own — a data directory that cannot be
+/// created, a `node.toml` that will not parse. A *service* never produces one: §3 makes one
+/// service's failure that service's, so a node with nothing but broken services still comes
+/// up and still says so.
+async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let node = node::Node::open(data_dir)?;
+    tracing::info!(
+        node = %node.id,
+        name = node.name.as_deref().unwrap_or("-"),
+        data_dir = %node.layout().root().display(),
+        // Parsed, and not bound: nothing serves it yet (DAEMON §2.1, eieio-8yq.4).
+        listen = %node.listen,
+        "node"
+    );
+
+    let executor = executor::Executor::new(node.budgets, node.mailbox)?;
+    let services = boot::boot(&node, &executor).await;
+    let counts = services.counts();
+    tracing::info!(
+        running = counts.running,
+        stopped = counts.stopped,
+        errored = counts.errored,
+        "services"
+    );
+
+    shutdown().await;
+    tracing::info!("stopping");
+    services.stop().await;
+    services.join();
+    Ok(())
+}
+
+/// Waits for the signal that means "stop".
+///
+/// `SIGTERM` because that is what an init system sends, and `SIGINT` because that is what a
+/// terminal sends; a node that only handled one of them would be killed rather than stopped by
+/// the other, and ABI §5.1 step 5's `eio_stop` would never run.
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(terminate) => terminate,
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM cannot be handled; waiting for SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 

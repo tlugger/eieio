@@ -12,7 +12,7 @@ It is separate from DAEMON-SPEC because its readers are: the daemon that runs a 
 
 ## 1. The file
 
-TOML. One file, one service, and the service is the deployable unit (DAEMON §2). It lives at `<data-dir>/services/<file>.toml`.
+TOML. One file, one service, and the service is the deployable unit (DAEMON §2). It lives at `<data-dir>/services/<name>.toml`, and **the stem MUST equal the service's `name`** — `kitchen.toml` declares `name = "kitchen"`. §3 requires a name to be unique per node and this is what makes that structural rather than checked: a filesystem has already refused the second `kitchen.toml`. It is also what lets the management API address a service by name without holding an index from names to filenames, which would be state the API kept that the files did not (DAEMON §2). A host MUST refuse a file whose stem and `name` disagree; §7's "one service failing MUST NOT stop another" covers it like any other invalidity.
 
 ```toml
 name = "kitchen"

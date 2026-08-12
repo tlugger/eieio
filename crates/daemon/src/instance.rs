@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use eio_host_core::{
-    Configured, Configuring, Delivering, Descriptor, ExprBudgets, Limits, Outcome, PropContext,
-    Running, Starting, Status, Trap, exports::optional, resolve,
+    Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext, Running,
+    Starting, Status, Trap, exports::optional, resolve,
 };
 use eio_manifest::{Abi, Manifest};
 use eio_signal::Batch;
@@ -293,8 +293,9 @@ impl Live {
         // One `ExprBudgets` for the instance, feeding both the expression compile and `emit`'s
         // decode bound. That is what makes ABI §6.3.1 rule 9 hold here rather than being a
         // thing to remember: the two numbers cannot drift because there is one source of
-        // them. `DEFAULT` until `node.toml` states them (DAEMON §3).
-        let budgets = ExprBudgets::DEFAULT;
+        // them — the node's, stated in `node.toml` (DAEMON §2.1) and carried on the runtime
+        // every instance on this node is built from.
+        let budgets = runtime.expr();
         let sources = resolve(&prepared.manifest, &prepared.props)?;
         let properties = PropContext::compile_with_limits(&sources, budgets.eval())
             .map_err(|error| anyhow::anyhow!("this configuration is invalid: {error}"))?;
@@ -562,7 +563,12 @@ impl Live {
 /// negotiation amounts to for a node with no devices — and it is much more useful than the
 /// linker's answer, which would name a missing symbol rather than the capability that asked
 /// for it.
-fn refuse_unimplemented_capabilities(manifest: &Manifest) -> anyhow::Result<()> {
+///
+/// Reachable from boot as well as from here, because DAEMON §3 step 2 lists the capability
+/// check among a service's *validations*: a block wanting `gpio` on a node with no GPIO is a
+/// deployment aimed at the wrong node, which an operator answers by moving it — not by
+/// looking at why a service would not start.
+pub fn refuse_unimplemented_capabilities(manifest: &Manifest) -> anyhow::Result<()> {
     if manifest.capabilities.is_empty() {
         return Ok(());
     }

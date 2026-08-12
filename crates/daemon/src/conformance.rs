@@ -54,6 +54,7 @@ impl Host for Daemon {
                 let runtime = Runtime::new(Budgets {
                     fuel: budget.fuel,
                     deadline: budget.deadline,
+                    ..Budgets::default()
                 })
                 .map_err(|error| HostError::Refused(format!("{error:?}")))?;
                 &self.engine.insert((budget, runtime)).1

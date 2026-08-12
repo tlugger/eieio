@@ -1,0 +1,46 @@
+# This node, as it describes itself (DAEMON-SPEC §2.1).
+#
+# Written once, when the daemon found a data directory with no node.toml in it. It is
+# yours from here: nothing rewrites or reformats this file.
+
+# The node's identity. Opaque, and stable for the life of the node -- the Designer keys a
+# node by this, so that renaming one or giving it a new address is not a migration.
+id = "3f9c2a71b4e05d68"
+
+# An optional label for people. Nothing resolves by it.
+# name = "kitchen-pi"
+
+[api]
+# Where the management API listens.
+#
+# Loopback, because the API deploys arbitrary WASM to this node and transport security is
+# still an open question (SCOPE §3.11). Set it to 0.0.0.0:7373 to let the Designer and
+# other machines reach this node -- deliberately, on a network you trust.
+listen = "127.0.0.1:7373"
+
+[limits]
+# The largest payload and batch any block instance may emit or be delivered (ABI §9.7).
+# The ABI gives these no floor, so they are stated rather than assumed.
+max_payload = 65536
+max_batch = 1024
+
+[budgets]
+# What one guest callback may consume before it is killed (ABI §10).
+#
+# `fuel` is roughly one unit per WASM instruction. `deadline_ms` is the backstop for a
+# callback that is blocked rather than busy, which fuel cannot see.
+fuel = 100000000
+deadline_ms = 1000
+
+[budgets.expr]
+# What one property expression may consume (EXPR §9). Expressions are pure and
+# terminating by construction; these bound how much work a terminating one may do.
+max_fuel = 100000
+max_depth = 128
+max_range = 65536
+max_value_bytes = 262144
+
+[executor]
+# How many work items one block instance's mailbox holds before its senders feel it
+# (DAEMON §5). A depth of one is legal and means every sender waits for the previous item.
+mailbox = 64

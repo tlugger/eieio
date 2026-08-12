@@ -29,6 +29,11 @@ eio-host-core.workspace = true
 # implementation of it.
 eio-manifest.workspace = true
 
+# The service file, as a schema and two validation stages (SERVICE-SPEC). The daemon
+# is one of three callers — the CLI and the Designer's backend are the others — which
+# is why it is a crate and not a module here (DAEMON §1).
+eio-service.workspace = true
+
 # Batches on the way in and on the way out (ABI §6.3).
 eio-signal.workspace = true
 
@@ -49,6 +54,12 @@ anyhow.workspace = true
 # The `dev run-block` batch flag is JSON (DAEMON §12). Full `std` serde_json here,
 # unlike the `alloc`-only build the ★ crates share.
 serde_json = { workspace = true, default-features = false, features = ["std"] }
+
+# `node.toml` (DAEMON §2.1). The same `parse`-and-`serde` build `eio-service` uses:
+# the daemon writes a node's configuration file exactly once, from a commented
+# template, so there is nothing here for `display` to do.
+toml.workspace = true
+serde = { workspace = true, default-features = false, features = ["std", "derive"] }
 
 [dev-dependencies]
 # ABI §13's "both the daemon and the leaf runtime MUST pass the harness". A dev-dependency

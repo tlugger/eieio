@@ -40,10 +40,21 @@ fn every_example_service_parses() {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("readable");
-        match parse(&text) {
-            Ok(_) => seen += 1,
+        let parsed = match parse(&text) {
+            Ok(parsed) => parsed,
             Err(errors) => panic!("{}: {errors:#?}", path.display()),
-        }
+        };
+        // SERVICE §1: a service file's stem is its `name`. This crate cannot enforce it —
+        // `parse` takes a string and never sees a filename, and the host that reads the
+        // directory is the one that refuses a mismatch (DAEMON §3). What it can do is keep
+        // the examples honest, since they are what a person copies onto a real node.
+        assert_eq!(
+            path.file_stem().and_then(|stem| stem.to_str()),
+            Some(parsed.service.name.as_str()),
+            "{} would be refused at boot: its stem and its name disagree",
+            path.display()
+        );
+        seen += 1;
     }
     assert!(seen >= 3, "only {seen} example service(s) were checked");
 }

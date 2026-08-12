@@ -126,6 +126,14 @@ impl Mailboxes {
     /// Installed *before* the replacement instance is spawned, so work addressed to it
     /// queues rather than finding a closed channel — the same reason a service's mailboxes
     /// all exist before any of its instances do (DAEMON §6).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "only a restart replaces a mailbox, and nothing restarts anything yet: \
+                      supervision is DAEMON §8's, whose policy is OPEN (SCOPE §3.13)"
+        )
+    )]
     pub fn replace(&self, index: u32, mailbox: Mailbox) {
         *self.slots[index as usize]
             .write()
@@ -307,17 +315,8 @@ impl Outlet {
 /// A service: instances, wired to each other (DAEMON §6).
 ///
 /// The unit a node deploys and the thing the router owns. The service *file* that describes
-/// one is a separate concern (DAEMON §2, eieio-8yq.1); what is here is what a description
-/// resolves to.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the service file format and the management API (eieio-8yq) are the first \
-                  non-test callers; the graph the router owns is defined and tested now \
-                  because the end-to-end milestone (eieio-35h.6) is written against it"
-    )
-)]
+/// one is a separate concern (SERVICE-SPEC, `eio_service`); what is here is what a
+/// description resolves to, and [`crate::boot`] is what resolves one.
 #[derive(Debug)]
 pub struct Service {
     /// One slot per instance index, empty while an instance is between lives.
@@ -334,6 +333,16 @@ pub struct Service {
     ///
     /// Never empty and never reordered: it is what says how many instances the service has
     /// and what each of them is, whether or not one is running right now.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read only by `restart` and by the id lookups below, none of which has a \
+                      non-test caller yet — supervision is DAEMON §8's and the id lookups are \
+                      the management API's (eieio-8yq.4). Kept because a service that could \
+                      not say what it is made of could not bring an instance back"
+        )
+    )]
     prepared: Vec<Prepared>,
     /// The connection table, shared with every outlet.
     routes: Arc<Routes>,
@@ -343,7 +352,12 @@ pub struct Service {
 
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "see the note on `Service` itself")
+    expect(
+        dead_code,
+        reason = "`spawn`, `stop` and `join` are boot's (DAEMON §3); `restart` waits for \
+                  supervision (§8) and the three id lookups for the management API \
+                  (§9, eieio-8yq.4)"
+    )
 )]
 impl Service {
     /// Validates every block, wires the graph, and starts every instance (ABI §5.1).

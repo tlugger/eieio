@@ -613,6 +613,7 @@ async fn a_spinning_guest_runs_out_of_fuel_and_dies() {
     let budgets = Budgets {
         fuel: 1_000_000,
         deadline: Duration::from_secs(60),
+        ..Budgets::default()
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
     let (instance, mut events) = executor
@@ -642,6 +643,7 @@ async fn a_guest_that_overruns_its_deadline_dies_of_the_deadline() {
     let budgets = Budgets {
         fuel: u64::MAX,
         deadline: Duration::from_millis(50),
+        ..Budgets::default()
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
     let (instance, mut events) = executor
@@ -688,6 +690,7 @@ async fn a_spinning_instance_does_not_stall_another_one() {
     let budgets = Budgets {
         fuel: u64::MAX,
         deadline: Duration::from_secs(3),
+        ..Budgets::default()
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
     let (spinner, mut spinner_events) = executor.spawn(spec("spinner.wat")).await.expect("starts");

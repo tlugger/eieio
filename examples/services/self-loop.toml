@@ -7,7 +7,7 @@
 # Also here for a second reason: a hand-written id. `accumulator` is as valid an id as `b7k2`
 # is — the format asks that an id be stable, not that it look generated (SERVICE §2).
 
-name = "feedback"
+name = "self-loop"
 
 connections = [ "accumulator.out -> accumulator.in" ]
 

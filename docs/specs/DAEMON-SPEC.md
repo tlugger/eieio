@@ -91,14 +91,12 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
 
 ## 2. On-disk layout (source of truth, SCOPE §3.8)
 
-**PROPOSED:**
-
 ```
 /etc/eieio/                      (or --data-dir)
-  node.toml                    node identity, listen addr, limits, budgets
+  node.toml                    node identity, listen addr, limits, budgets (§2.1)
   auth/                        node token, TLS material (OPEN, SCOPE §3.11)
   services/
-    <service>.toml             one service definition per file
+    <name>.toml                one service definition per file
   blocks/                      OCI pull cache: <name>/<version>/block.wasm
                                (+ precompiled wasmtime artifact, keyed by engine hash)
   state/                       eio:state backing store
@@ -106,14 +104,65 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
 
 - **Service definition format: TOML** — human-first, comment-friendly, agents handle it fine; `schemas/service.schema.json` publishes the equivalent structure regardless. One file = one service = the deployable unit. **SERVICE-SPEC.md is the normative document**, and it is a separate one because the Designer and the CLI build against it as much as the daemon does.
 - Service file contents, in brief: the service name, block instances keyed by a short **id** with `name` as a mere label, a `block` reference and properties as expression strings under `props`, connections as `"<id>.<port> -> <id>.<port>"`, and an optional `[ui]` table the daemon MUST parse and MUST NOT interpret (Designer layout annotations — DESIGNER-SPEC §4).
+- **A service file's stem MUST equal its `name`** (SERVICE §1). `kitchen.toml` declares `name = "kitchen"` or it is not loaded, and the mismatch is that service's error rather than the node's. Two things follow, and both are why the rule is here rather than left to convention: SERVICE §3's "unique per node" becomes structural — the filesystem refuses the second `kitchen.toml` before the daemon has to — and `PUT /services/{s}` (§9) knows which file it writes without an index mapping names to filenames, which would be state the API holds that the files do not.
 - **The daemon never writes a service file** (SERVICE §2). Ids are minted by tooling at authoring time, so a reload never rewrites what a human or a git checkout put there.
+- **`node.toml` is the one file the daemon does write**, and only to create it (§2.1). SERVICE §2's never-write rule is about *service* files and the reason does not carry over: a service file is authored by a human, the Designer or an agent and round-trips through them, where node.toml describes the node to itself and has to exist before anything can be authored at all. Once written it is the operator's; the daemon never rewrites or normalizes it.
 - The management API is a thin CRUD layer over these files plus lifecycle commands. `PUT` writes the file, validates, and reports; it never holds state the file doesn't. Editing files directly on disk (or via git) and calling `POST /services/{s}/reload` is a first-class, supported path — this is the GitOps/agent story.
+
+### 2.1 `node.toml` (normative)
+
+What a node is, as against §2's service files, which are what it runs. Every field is OPTIONAL except `id`, and every default below is what a node runs on when the file omits it.
+
+```toml
+id = "n7k2p4qv"                  # REQUIRED. Opaque, stable, minted on first boot
+name = "kitchen-pi"              # OPTIONAL. A label; nothing resolves by it
+
+[api]
+listen = "127.0.0.1:7373"        # Management API address (§9)
+
+[limits]                         # ABI §9.7, per instance
+max_payload = 65536              # bytes
+max_batch = 1024                 # signals
+
+[budgets]                        # ABI §10, per guest entry
+fuel = 100000000
+deadline_ms = 1000
+
+[budgets.expr]                   # EXPR §9, per expression evaluation
+max_fuel = 100000
+max_depth = 128
+max_range = 65536
+max_value_bytes = 262144
+
+[executor]
+mailbox = 64                     # Work items one instance's mailbox holds (§5)
+```
+
+**Unknown fields MUST be rejected**, at every level, for the reason ABI §11.1 and SERVICE §3 both give: a typo'd knob that silently meant nothing is a node running on a default the operator believes they changed.
+
+**`id` is the node's identity, and `name` is not.** This is SERVICE §2's decision one level up and for the same reason: the Designer's registry (DESIGNER §3) keys a node by something that has to survive a rename and a new DHCP lease, and a name that identified a node would make renaming one a migration. An id is opaque, and a host MUST NOT parse meaning out of it.
+
+**First boot provisions.** A data directory with no `node.toml` is a fresh node, not an error: the daemon creates the directory tree of §2, mints an `id`, and writes a `node.toml` carrying it. `auth/` is created with owner-only permissions (0700 where the platform has them) because it is where SCOPE §3.11's token material lands (§9). Provisioning happens once — a second boot reads the id it wrote and MUST NOT mint another, since an id that changed per boot would identify nothing.
+
+**`listen` defaults to loopback** while transport security is OPEN (SCOPE §3.11). The management API deploys arbitrary WASM to the node, its only gate is a bearer token, and it has no transport security yet; a default that published that to every interface would make "install the package" the exposing act rather than a deliberate one. Making a node reachable is one line in the generated file, and the generated file says so.
+
+**Budgets configured here are the ones that run**, both of them: ABI §10's fuel and deadline bound a guest entry, and EXPR §9's bound each property expression the host evaluates for that guest (ABI §7.1). Neither has an ABI floor (SCOPE §3.4), which is why they are stated in a file rather than compiled in — and why a host with no `node.toml` still has to state them, which is what the defaults above are.
+
+A budget below one of EXPR §9's floors is **raised** to it rather than refused, because a floor is what a conforming expression is entitled to rely on and a host that would not boot over a number the spec is willing to choose for it helps nobody. An operator who writes `max_fuel = 1` gets the floor, and a block written against §9 keeps working.
+
+The CBOR decode bound that travels with them is deliberately **not** a knob. EXPR §9 rule 9 makes it a constraint rather than a preference — the decode depth MUST be at least the expression depth, or an expression could construct a value the boundary then refuses to encode — so it is derived from `[budgets.expr] max_depth` and raised to meet it. An operator who could set the two independently could set them into that contradiction, and a file that can express an invalid host is a file a host has to validate rather than read.
 
 ## 3. Boot sequence
 
-1. Load `node.toml`; bind API listener.
+1. Load `node.toml`, provisioning the data directory if this is a fresh node (§2.1); bind the API listener (§9).
 2. For each service file: parse → resolve block refs against cache (pull missing, §4) → validate (manifest/import cross-check per ABI §4.3, capability-vs-node check per SCOPE §3.3, expression static analysis per EXPR §10, connection graph check: ports exist, no dangling refs).
 3. Start services marked `autostart = true`. Validation failure of one service MUST NOT prevent the daemon or other services from starting; the failed service surfaces as errored via API.
+
+**One service's failure is that service's.** Step 2 runs per file and every way it can fail is contained: a file that will not parse, a stem that disagrees with its `name` (§2), a block the cache cannot answer for, a connection naming a port no manifest declares, an instance that will not configure or start. Each leaves that service **errored** and the node otherwise untouched — the daemon comes up, sibling services start, and the detail waits for `GET /services/{s}/errors` (§9). A node that refused to boot over one bad file would make every deploy able to take the node down with it, which is the failure mode SCOPE §3.8 keeps configuration on disk to avoid.
+
+**Errored means structured, not stringly.** SERVICE §7 requires a caller to tell its validation classes apart without matching on a message, and boot adds three of its own — unreadable file, stem/`name` mismatch, and an unresolvable block reference (§4) — which are subject to the same rule for the same reason: the Designer renders a boot failure on the offending service, block or connection (DESIGNER §5), which a sentence does not permit.
+
+A service that parses and validates but is not marked `autostart` is **loaded and stopped**, not errored: it is available to `POST /services/{s}/start` without re-reading anything. The three states a service is in after boot are therefore running, stopped, and errored.
 
 ## 4. Block manager
 
@@ -121,6 +170,18 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
 - Load-time validation is exactly ABI §4: exports present, imports ⊆ `eio:*`, imports ⊆ manifest capabilities, ABI version accepted, embedded manifest (if present) matches registry manifest.
 - Caches wasmtime-precompiled modules keyed by (digest, engine config hash) — cold-start matters on a Pi.
 - Airgap/offline: cache is authoritative when the registry is unreachable; a service whose blocks are cached starts fine offline.
+
+**How a reference names a cache entry.** §2's layout is `blocks/<name>/<version>/block.wasm`, and a service file carries a reference (SERVICE §4), so the mapping between them is normative:
+
+```
+reference = [ registry "/" ] [ namespace "/" ]... name ":" version
+```
+
+`name` is the last `/`-separated component before the tag and `version` is the tag, so `filter:1.2.0` and `ghcr.io/tlugger/filter:1.2.0` name the same cache entry. The registry and namespace are where a *pull* goes (that half of this section) and say nothing about where a pulled block sits, which is what lets a node resolve a service offline against a cache filled from anywhere.
+
+**The tag is REQUIRED.** A reference without one is refused rather than defaulted to `latest`: the cache is keyed by version, and a service pinned to a moving tag would resolve to whatever was pulled last — reproducibility being the thing SCOPE §3.6 versions blocks for. **Digest-pinned references** (`name@sha256:…`) are refused with a distinct error today; resolving one is this section's pull half, since a digest names an artifact and not a cache path.
+
+Resolution is therefore two halves with one seam. The **read** half — reference to cache entry to bytes, and every way that fails — is what boot (§3) needs and is what makes the airgap claim above true. The **pull** half — the registry client, digest verification, signature policy and the precompiled artifact — fills the cache and is where a reference's registry and namespace are finally used.
 
 ## 5. Executor
 
@@ -309,4 +370,4 @@ NaN and infinity need no rule here: a literal that overflows `binary64` is refus
 
 ## 13. Expansion list (for the in-depth pass)
 
-Per-subsystem deep specs needed: service file schema (normative), router semantics under reload (in-flight signal disposition), OCI auth for private registries, tap sampling strategy, mailbox sizing defaults, API error model, multi-arch AOT artifact selection, node.toml schema.
+Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), OCI auth for private registries, tap sampling strategy, mailbox sizing defaults, API error model, multi-arch AOT artifact selection.
