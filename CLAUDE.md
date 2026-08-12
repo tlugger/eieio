@@ -6,7 +6,7 @@ Guidance for agents working in this repository.
 
 eieio is a distributed stream-processing platform: WASM **blocks** wired into **services** running on **nodes** that form a **System**, targeting everything from servers down to MCUs. `README.md` is the human orientation; this file is how to build here.
 
-**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. Item 5 is under way: `block-sdk` is the guest runtime (allocator, panic handler, `Ctx`, error types) and `block-sdk-macros` is the `#[block]` macro that generates the ABI exports, the port enums, `Prop<T>` and the `eio:manifest` section. `test-host` runs a block natively for the fast inner loop, `conformance` is the reference harness plus its scenario suite over wasmtime and wasm3, and `cargo-eio` is `cargo eio new/build/test`. Still missing from item 5: the golden and hostile blocks (eieio-7d8.7, 7d8.8), so the daemon's and the harness's fixtures are still mostly hand-written `.wat` under `crates/daemon/tests/blocks/` and `crates/conformance/scenarios/blocks/`.
+**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. Item 5 is under way: `block-sdk` is the guest runtime (allocator, panic handler, `Ctx`, error types) and `block-sdk-macros` is the `#[block]` macro that generates the ABI exports, the port enums, `Prop<T>` and the `eio:manifest` section. `test-host` runs a block natively for the fast inner loop, `conformance` is the reference harness plus its scenario suite over wasmtime and wasm3, and `cargo-eio` is `cargo eio new/build/test`. `examples/blocks/` holds ABI §13.2's five golden blocks, written with the SDK, and `crates/conformance/scenarios/blocks/` the hand-written fixtures that test the harness itself. Item 6 is under way: `service` is the service-file schema, parser and validator (SERVICE-SPEC).
 
 ## The prime directive: specs are normative
 
@@ -29,6 +29,7 @@ If a spec turns out to be awkward to implement, that is a finding, not an obstac
 |`docs/specs/ABI-SPEC.md`|Host↔guest binary contract: exports, imports, memory rules, lifecycle, status codes, manifest schema, versioning. **Everything else builds against this.**|
 |`docs/specs/EXPR-SPEC.md`|The expression language: grammar, data model, evaluation, builtins, errors, budgets.|
 |`docs/specs/SDK-SPEC.md`|The guest-side Rust crate. High-level; expects expansion.|
+|`docs/specs/SERVICE-SPEC.md`|The service file: identity (a block instance is its **id**, never its name), block instances, properties, connections, the `[ui]` contract, validation classes.|
 |`docs/specs/DAEMON-SPEC.md`|Daemon-class node internals: crates, on-disk layout, executor, router, API. High-level; expects per-subsystem expansion.|
 |`docs/specs/DESIGNER-SPEC.md`|The visual management surface. High-level; expects expansion.|
 
@@ -58,16 +59,17 @@ Vocabulary is settled and used precisely: **System** (group of nodes), **Node** 
 Cargo.toml            workspace root
 crates/
   abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
-  daemon/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/  conformance/
+  service/  daemon/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
+  conformance/
 designer/             SvelteKit app, own package.json
 examples/
   services/           sample service TOMLs
-  blocks/             starter blocks for demos and tests
+  blocks/             ABI §13.2's golden blocks — their own cargo workspace
 docs/
   SCOPE.md  specs/
 ```
 
-★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `abi`, `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries. `block-sdk` is `no_std` by necessity: it compiles into guests, and `just check-guest` is its gate.
+★ crates **must stay `no_std`-compatible** (`alloc` permitted). They are compiled into the MCU leaf runtime and, in `expr`'s case, into the browser. A `std` dependency added to `abi`, `expr`, `signal`, `manifest`, or `host-core` breaks the embedded north star quietly — CI enforces it, and so should you. `daemon` and `cargo-eio` are `std` binaries, and so is `service` — nothing parses a service file on a leaf tier (SCOPE §3.7 deploys those by firmware build), and `toml` cannot compile without atomics anyway (DAEMON §1). `block-sdk` is `no_std` by necessity: it compiles into guests, and `just check-guest` is its gate.
 
 `abi` holds only what both sides of the boundary must agree on — ABI §8's status codes, §3's sentinels, §9.6's alignment — and **has no dependencies**. Keep it that way: anything added there is added to every block that ships. `host-core` re-exports all of it, so host code imports it from there (DAEMON §1).
 
