@@ -1,0 +1,17 @@
+{
+  "name": "a-refused-allocation-fails-the-delivery-and-not-the-instance",
+  "spec": "§9 rule 5, §8, §13.2",
+  "note": "The survivable half of ABI §13.2's allocator-liar, and the line §9 draws: a `0` from eio_alloc is the guest telling the truth about itself, so the delivery fails with ERR_LIMIT and the instance lives to be stopped normally. The guest is never called — the host could not build the payload to call it with — so the status is the host's answer rather than the block's.",
+  "module": "blocks/refuser.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": { "status": -5, "calls": [], "emissions": [] }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 1, "refused_allocations": 1 }
+}

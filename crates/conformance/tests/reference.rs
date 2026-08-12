@@ -29,7 +29,7 @@ fn the_reference_host_passes_the_suite() {
 
     summary.assert_ok();
     assert!(
-        summary.reports.len() >= 14,
+        summary.reports.len() >= 19,
         "the suite shrank to {} scenarios",
         summary.reports.len()
     );

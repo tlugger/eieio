@@ -1,0 +1,15 @@
+{
+  "name": "an-allocation-outside-linear-memory-discards-the-instance",
+  "spec": "§9 rule 6, §13.2",
+  "note": "The third answer eio_alloc can give wrongly, and it fails somewhere else than 08's misaligned pointer: this one is aligned and non-zero, so it passes every check the host can make on its own and is caught by the write that follows. ABI §9 rule 6 groups the two together — a pointer the guest cannot honour is not a refusal — and running both is the only way to show they end the same way. The instance was alive when it happened, so this is a death mid-run rather than a module that never configured. What makes this survivable for the *host* is not this scenario: there is no `unsafe` anywhere on the host side — not in host-core, not in the harness, not in the daemon — so a lying allocator meets the type system and the engine's bounds checks rather than a raw pointer. The scenario pins the outcome; safe Rust is what makes the outcome available.",
+  "module": "blocks/oob.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": { "dead": "engine" }
+    }
+  ]
+}

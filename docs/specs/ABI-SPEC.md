@@ -569,12 +569,24 @@ The guest-side allocation ledger belongs there for the same reason. §13.1 requi
 
 And the hostile blocks, which are conformant modules behaving badly on purpose — a host MUST survive every one of them with the outcome named:
 
-|Block|Behaviour|Host MUST|
-|---|---|---|
-|Spinner|never returns from a callback|kill it on fuel or deadline (§10) and survive|
-|Allocator-liar|`eio_alloc` returns misaligned, out-of-bounds, or zero pointers|discard the instance on the first two (§9.6), fail the delivery on the third (§9.5)|
-|Reentrancy-prober|emits from inside a callback and looks for delivery before it returns|never deliver mid-call (§6.2); the probe MUST observe nothing|
-|Oversize-emitter|emits past `max_payload` and on undeclared ports|answer `ERR_LIMIT` and `ERR_INVALID_ARG` (§6.2) without reading the payload|
+|Block|Behaviour|Host MUST|Pinned by|
+|---|---|---|---|
+|Spinner|never returns from a callback|kill it on fuel or deadline (§10) and survive|`blocks/spinner.wat`|
+|Allocator-liar|`eio_alloc` returns misaligned, out-of-bounds, or zero pointers|discard the instance on the first two (§9 rule 6), fail the delivery on the third (§9 rule 5)|`blocks/liar.wat`, `blocks/oob.wat`, `blocks/refuser.wat`|
+|Reentrancy-prober|emits from inside a callback and looks for delivery before it returns|never deliver mid-call (§6.2); the probe MUST observe nothing|`blocks/prober.wat`|
+|Oversize-emitter|emits past `max_payload` and on undeclared ports|answer `ERR_LIMIT` and `ERR_INVALID_ARG` (§6.2) without reading the payload|`blocks/harness.wat`, its `probe` port|
+
+The last column names the fixture, because a behaviour and a file are not the same thing and
+two of these are not one file each. The allocator-liar is three: §9's rules 5 and 6 are three
+different answers with three different outcomes, and two of them require the instance to
+survive `configure` first, so one fixture switching between them would hide which case a
+failure came from. The oversize-emitter is a *port* on the fixture that already probes §6.2's
+refusals from the guest's side — a second module making the same three assertions would be a
+second place for them to drift.
+
+"Without reading the payload" is stated as a pointer outside linear memory, which is what
+makes it checkable: a host that consulted the range before the length would fault on the read
+instead of answering `ERR_LIMIT`, and the block would say so.
 
 ---
 

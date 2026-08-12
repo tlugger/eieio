@@ -1,7 +1,7 @@
 {
   "name": "emits-three-fixed-refusals",
   "spec": "§6.2, §6.4, §9.7",
-  "note": "The three answers ABI §6.2 says are NOT host-defined, checked from the guest's side: a length beyond max_payload is ERR_LIMIT, an undeclared output port is ERR_INVALID_ARG, and PORT_ERR is always accepted. The block returns -1, -2 or -3 to name whichever was wrong, so a status of 0 is the assertion.",
+  "note": "The three answers ABI §6.2 says are NOT host-defined, checked from the guest's side: a length beyond max_payload is ERR_LIMIT, an undeclared output port is ERR_INVALID_ARG, and PORT_ERR is always accepted. The block returns -1, -2 or -3 to name whichever was wrong, so a status of 0 is the assertion. The oversized emission names a pointer OUTSIDE linear memory, which is how ABI §13.2's 'without reading the payload' becomes checkable: a host that consulted the range before the length would fault on the read instead of answering ERR_LIMIT.",
   "module": "blocks/harness.wat",
   "limits": { "max_payload": 1024, "max_batch": 16 },
   "steps": [

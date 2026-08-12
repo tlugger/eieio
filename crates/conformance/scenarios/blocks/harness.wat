@@ -127,9 +127,12 @@
 
   ;; `probe`: ABI §6.2's three fixed refusals, from the guest's side.
   (func $probe (result i32)
-    ;; A `len` beyond `max_payload` is `ERR_LIMIT`, and the host MUST refuse it without
-    ;; reading the payload — which is why the pointer here names a region that holds nothing.
-    (if (i32.ne (call $emit (i32.const 0) (i32.const 256) (i32.const 4096)) (i32.const -5))
+    ;; A `len` beyond `max_payload` is `ERR_LIMIT`, and ABI §13.2 requires the host to answer
+    ;; it "without reading the payload". Stated as a pointer *outside linear memory*, which is
+    ;; what makes the requirement checkable rather than merely written down: a host that
+    ;; consulted the range before the length would fault on the read instead of returning
+    ;; `ERR_LIMIT`, and this block would report `-1` instead of `0`.
+    (if (i32.ne (call $emit (i32.const 0) (i32.const 100000) (i32.const 4096)) (i32.const -5))
       (then (return (i32.const -1))))
     ;; An output port that is not an index into the descriptor's `outputs` is
     ;; `ERR_INVALID_ARG`.
@@ -141,5 +144,5 @@
       (then (return (i32.const -3))))
     (i32.const 0))
 
-  (@custom "eio:manifest" "{\"name\":\"transform\",\"version\":\"1.0.0\",\"abi\":{\"major\":1,\"minor\":0},\"description\":\"Reads a per-signal property, emits it, and probes emit's fixed refusals\",\"inputs\":[{\"name\":\"in\"},{\"name\":\"probe\"}],\"outputs\":[{\"name\":\"out\"}],\"properties\":[{\"name\":\"val\",\"type\":\"int\",\"description\":\"The signal's n, offset by 41\",\"default\":\"(+ $n 41)\"}]}")
+  (@custom "eio:manifest" "{\"name\":\"harness\",\"version\":\"1.0.0\",\"abi\":{\"major\":1,\"minor\":0},\"description\":\"Reads a per-signal property three times, and probes emit's three fixed refusals\",\"inputs\":[{\"name\":\"in\"},{\"name\":\"probe\"}],\"outputs\":[{\"name\":\"out\"}],\"properties\":[{\"name\":\"val\",\"type\":\"int\",\"description\":\"The signal's n, offset by 41\",\"default\":\"(+ $n 41)\"}]}")
 )
