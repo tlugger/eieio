@@ -475,13 +475,33 @@ use crate::instance::InstanceSpec;
 
 /// The block `name`, as the executor takes it, with no properties and generous limits.
 fn spec(name: &str) -> InstanceSpec {
+    spec_from(wasm(name))
+}
+
+/// The same, from bytes: a golden block is built, not assembled from a fixture here.
+fn spec_from(wasm: Vec<u8>) -> InstanceSpec {
     InstanceSpec {
-        wasm: wasm(name),
+        wasm,
         registry: None,
         props: BTreeMap::new(),
         instance: None,
         service: String::from("test"),
         limits: Limits::new(64 * 1024, 1024),
+    }
+}
+
+/// ABI §13.2's golden transform, as an `InstanceSpec`.
+///
+/// A real `eio-sdk` block rather than a `.wat` fixture, and only where that difference is
+/// the assertion: what a hostile block must not disturb is a block somebody would actually
+/// deploy — its own allocator, its own eighteen pages of linear memory, its own property
+/// evaluation — not a hand-written module that allocates by bumping a global.
+fn golden_transform() -> InstanceSpec {
+    let wasm = std::fs::read(eio_conformance::golden::build().join("transform.wasm"))
+        .expect("the golden blocks are built");
+    InstanceSpec {
+        props: BTreeMap::from([(String::from("val"), String::from("(+ $n 41)"))]),
+        ..spec_from(wasm)
     }
 }
 
@@ -663,28 +683,24 @@ async fn a_spinning_instance_does_not_stall_another_one() {
     // The reason DAEMON §5.1's "a `LocalSet` or a thread each" is resolved as a thread each:
     // a hostile block's blast radius is the block. The spinner is given three seconds of
     // wall clock and unlimited fuel, so it is definitely still spinning while the second
-    // instance is asked to do its work.
+    // instance is asked to do its work — and the second instance is one of ABI §13.2's
+    // golden blocks, because the claim is about what a hostile block does to a real one.
     let budgets = Budgets {
         fuel: u64::MAX,
         deadline: Duration::from_secs(3),
     };
     let executor = Executor::new(budgets, 4).expect("an executor");
     let (spinner, mut spinner_events) = executor.spawn(spec("spinner.wat")).await.expect("starts");
-    let (echo, mut echo_events) = executor
-        .spawn(InstanceSpec {
-            props: echo_props(),
-            ..spec("echo.wat")
-        })
-        .await
-        .expect("starts");
+    let (transform, mut transform_events) =
+        executor.spawn(golden_transform()).await.expect("starts");
 
     post(&spinner, deliver(0)).await;
     let began = Instant::now();
-    post(&echo, deliver(0)).await;
-    post(&echo, Work::Stop).await;
-    let events = drain(&mut echo_events).await;
+    post(&transform, deliver(0)).await;
+    post(&transform, Work::Stop).await;
+    let events = drain(&mut transform_events).await;
     let elapsed = began.elapsed();
-    echo.join();
+    transform.join();
 
     assert!(
         matches!(ending(&events), Some(Event::Stopped { .. })),
