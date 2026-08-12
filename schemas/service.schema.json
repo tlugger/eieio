@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tlugger/eieio/schemas/service.schema.json",
+  "title": "eieio service",
+  "description": "A graph of block instances on one node (SERVICE-SPEC). The file on disk is TOML; this describes the equivalent structure, which is what DAEMON-SPEC §2 promises regardless of the encoding. SERVICE-SPEC is the normative document and this is a structural gate derived from it: the rules it cannot express are listed in `x-not-enforced-here`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {
+    "name": {
+      "description": "The service's name, unique per node. A path component in the management API and a filename on disk, which is why it is held to the same pattern as everything else that is both.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
+      "maxLength": 64
+    },
+    "autostart": {
+      "description": "Whether the daemon starts this service at boot (DAEMON-SPEC §3). Absent means false.",
+      "type": "boolean",
+      "default": false
+    },
+    "blocks": {
+      "description": "Block instances, keyed by id. The key IS the identity (SERVICE-SPEC §2): `name` is a label, and connections, layout annotations and API paths all address the id.",
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
+        "maxLength": 64
+      },
+      "additionalProperties": { "$ref": "#/$defs/instance" },
+      "default": {}
+    },
+    "connections": {
+      "description": "The wiring, one string per edge: `<id>.<port> -> <id>.<port>`. Ids only — the moment a connection may name a block, a name is load-bearing again.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/connection" },
+      "default": []
+    },
+    "ui": {
+      "description": "The Designer's annotations: canvas positions, viewport, notes (DESIGNER-SPEC §4). The daemon MUST parse this and MUST NOT interpret it, so it has no schema here and never will.",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "instance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block"],
+      "properties": {
+        "name": {
+          "description": "A label for people and agents. Optional, repeatable, and meaningless to a host — nothing resolves by it.",
+          "type": "string"
+        },
+        "block": {
+          "description": "The block reference the block manager resolves, pulls and digest-verifies (SCOPE §3.6, DAEMON-SPEC §4). Its grammar is the registry's, not this format's.",
+          "type": "string",
+          "minLength": 1
+        },
+        "props": {
+          "description": "Property expressions by name (ABI-SPEC §11). Every value is a string because every property is an expression and a literal is a trivial one; a number here would invent the second kind of property ABI §11 exists to refuse.",
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$",
+            "maxLength": 64
+          },
+          "additionalProperties": { "type": "string" },
+          "default": {}
+        }
+      }
+    },
+    "connection": {
+      "description": "`<id>.<port> -> <id>.<port>`. Whitespace is permitted around the arrow and nowhere else.",
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9_-]*[a-z0-9])?\\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?[ \\t]*->[ \\t]*[a-z0-9]([a-z0-9_-]*[a-z0-9])?\\.[a-z0-9]([a-z0-9_-]*[a-z0-9])?$"
+    }
+  },
+  "x-not-enforced-here": [
+    "A connection naming an instance the file does not define (SERVICE-SPEC §7): JSON Schema cannot compare a string's contents against sibling object keys.",
+    "The same edge twice: `uniqueItems` would catch two identical strings but not `a.out->b.in` beside `a.out -> b.in`, which are the same edge.",
+    "`err` as a destination (ABI-SPEC §6.4): the pattern admits any port name on either side, because it is the direction that makes it wrong.",
+    "Whether a property expression parses and passes static analysis (EXPR-SPEC §10).",
+    "Whether a connection's ports exist on the referenced blocks' manifests, which needs the blocks resolved (SERVICE-SPEC §7 stage 2)."
+  ]
+}

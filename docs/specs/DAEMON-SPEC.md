@@ -23,6 +23,14 @@ crates/
                    Designer in-browser linting (DESIGNER-SPEC §5)
   signal/        ★ CBOR batch/signal encode-decode (minicbor). no_std
   manifest/      ★ Manifest schema types, parsing, import-section cross-check
+  service/         Service file schema, parsing and validation (SERVICE-SPEC).
+                   Deliberately NOT ★, for two reasons: nothing on a leaf tier
+                   parses one (SCOPE §3.7 deploys leaf targets by firmware
+                   build, not by config push), and `toml` cannot compile for a
+                   target without atomics — measured on `riscv32imc`, where
+                   `alloc::sync` does not exist. Shared by the daemon, the CLI
+                   and the Designer's backend, which is why it is a crate and
+                   not a daemon module
   daemon/          Binary: tokio runtime, wasmtime engine, OCI client,
                    management API, state store, pub/sub bridge
   block-sdk/       Guest-side (SDK-SPEC); published as `eio-sdk`
@@ -61,6 +69,7 @@ For the same reason the **property scope is the driver's**, not its caller's. AB
 |`expr/`|`eio-expr`|`eio_expr`|
 |`signal/`|`eio-signal`|`eio_signal`|
 |`manifest/`|`eio-manifest`|`eio_manifest`|
+|`service/`|`eio-service`|`eio_service`|
 |`daemon/`|`eio-daemon`|—|
 |`block-sdk/`|`eio-sdk`|`eio_sdk`|
 |`block-sdk-macros/`|`eio-sdk-macros`|`eio_sdk_macros`|
@@ -95,8 +104,9 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
   state/                       eio:state backing store
 ```
 
-- **Service definition format: TOML** (PROPOSED — human-first, comment-friendly, agents handle it fine; JSON Schema published for the equivalent structure regardless). One file = one service = the deployable unit.
-- Service file contents: service name, block instances (`name`, `block` OCI ref, properties as expression strings), connections (`from.port -> to.port`), an optional `[ui]` table the daemon MUST ignore (Designer layout annotations — DESIGNER-SPEC §4).
+- **Service definition format: TOML** — human-first, comment-friendly, agents handle it fine; `schemas/service.schema.json` publishes the equivalent structure regardless. One file = one service = the deployable unit. **SERVICE-SPEC.md is the normative document**, and it is a separate one because the Designer and the CLI build against it as much as the daemon does.
+- Service file contents, in brief: the service name, block instances keyed by a short **id** with `name` as a mere label, a `block` reference and properties as expression strings under `props`, connections as `"<id>.<port> -> <id>.<port>"`, and an optional `[ui]` table the daemon MUST parse and MUST NOT interpret (Designer layout annotations — DESIGNER-SPEC §4).
+- **The daemon never writes a service file** (SERVICE §2). Ids are minted by tooling at authoring time, so a reload never rewrites what a human or a git checkout put there.
 - The management API is a thin CRUD layer over these files plus lifecycle commands. `PUT` writes the file, validates, and reports; it never holds state the file doesn't. Editing files directly on disk (or via git) and calling `POST /services/{s}/reload` is a first-class, supported path — this is the GitOps/agent story.
 
 ## 3. Boot sequence

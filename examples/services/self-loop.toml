@@ -1,0 +1,15 @@
+# A block that feeds itself.
+#
+# Legal, and safe by construction: `emit` enqueues and routing happens after the callback
+# returns (ABI §6.2), so a self-edge cannot re-enter the guest. What it can do is fill the
+# instance's own mailbox, which is DAEMON §5's business rather than the format's.
+#
+# Also here for a second reason: a hand-written id. `accumulator` is as valid an id as `b7k2`
+# is — the format asks that an id be stable, not that it look generated (SERVICE §2).
+
+name = "feedback"
+
+connections = [ "accumulator.out -> accumulator.in" ]
+
+[blocks.accumulator]
+block = "counter:1.0.0"

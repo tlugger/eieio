@@ -1,0 +1,11 @@
+name = "twice"
+connections = [
+  "b7k2.out -> f3m9.in",
+  "b7k2.out -> f3m9.in",
+]
+
+[blocks.b7k2]
+block = "a:1.0.0"
+
+[blocks.f3m9]
+block = "b:1.0.0"

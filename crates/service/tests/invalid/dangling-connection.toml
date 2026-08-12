@@ -1,0 +1,5 @@
+name = "dangling"
+connections = [ "b7k2.out -> nope.in" ]
+
+[blocks.b7k2]
+block = "a:1.0.0"

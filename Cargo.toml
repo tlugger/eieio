@@ -15,6 +15,7 @@ members = [
     "crates/expr",
     "crates/host-core",
     "crates/manifest",
+    "crates/service",
     "crates/signal",
 ]
 
@@ -70,6 +71,17 @@ regex = "1.11"
 # Dev-dependency only. Validates the published JSON Schemas against the same fixtures the
 # Rust parsers accept and reject, so the schema and the types cannot drift apart.
 boon = "0.6"
+
+# The service file format (SERVICE-SPEC §1). `parse` and `serde`; deliberately not `display`,
+# because SERVICE §2 makes the daemon a reader and never a writer. Pinned here rather than in
+# `crates/service` because the Designer's backend and the CLI will read the same files, and
+# what a service file *means* must not vary by which crate read it.
+#
+# It is also why `eio-service` is not a ★ crate: measured on rustc 1.97.1, this fails to
+# compile for `riscv32imc-unknown-none-elf` — `alloc::sync` is gated behind
+# `target_has_atomic = "ptr"` and rv32imc has no A extension. It builds fine for
+# `thumbv7em-none-eabihf`, so the constraint is atomics rather than `std`.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
 
 # Module fixtures are checked in as `.wat` so a reviewer can see what each one is testing,
 # and assembled at read time. Version-matched to wasmparser because both come from the
@@ -180,6 +192,7 @@ eio-expr = { path = "crates/expr", version = "0.1.0" }
 eio-host-core = { path = "crates/host-core", version = "0.1.0" }
 eio-manifest = { path = "crates/manifest", version = "0.1.0" }
 eio-sdk = { path = "crates/block-sdk", version = "0.1.0" }
+eio-service = { path = "crates/service", version = "0.1.0" }
 eio-signal = { path = "crates/signal", version = "0.1.0" }
 eio-test-host = { path = "crates/test-host", version = "0.1.0" }
 

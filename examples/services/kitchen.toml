@@ -1,0 +1,67 @@
+# A kitchen: read a temperature, alarm when it drops, log everything that went wrong.
+#
+# The shape SERVICE-SPEC §1 specifies, as a file somebody would actually deploy. Every
+# top-level key comes before the first table header, because TOML reads a key after one as
+# belonging to that table (§5).
+
+name = "kitchen"
+autostart = true
+
+connections = [
+  "b7k2.out -> f3m9.in",
+  # Fan-out: one output, two destinations. Each gets the whole batch.
+  "f3m9.above -> k1p8.in",
+  "f3m9.above -> q4tv.in",
+  # ABI §6.4's error port, addressable as a source and never as a destination. Wiring it is
+  # a choice: left unconnected, a failed signal is logged and counted instead.
+  "f3m9.err -> q4tv.in",
+]
+
+[blocks.b7k2]
+name = "Thermometer"
+block = "ghcr.io/tlugger/temp-sensor:1.0.0"
+
+[blocks.b7k2.props]
+# Every property is an expression, and a literal is a trivial one (ABI §11).
+interval_ms = "5000"
+
+[blocks.f3m9]
+name = "Too cold?"
+block = "filter:1.2.0"
+
+[blocks.f3m9.props]
+# Signal-dependent: evaluated per signal, and it fails per signal if `temp` is missing.
+reading = "(float $temp)"
+threshold = "18.0"
+
+[blocks.k1p8]
+name = "Alarm"
+block = "publisher:1.0.0"
+
+[blocks.k1p8.props]
+# A string property's value is a *quoted* expression: the outer quotes are TOML's, the inner
+# ones are the expression's.
+topic = "\"kitchen.cold\""
+
+[blocks.q4tv]
+name = "Log"
+block = "logger:0.3.1"
+
+[ui]
+viewport = { x = 0, y = 0, zoom = 1.0 }
+
+[ui.blocks.b7k2]
+x = 148
+y = 234
+
+[ui.blocks.f3m9]
+x = 384
+y = 235
+
+[ui.blocks.k1p8]
+x = 613
+y = 180
+
+[ui.blocks.q4tv]
+x = 613
+y = 348

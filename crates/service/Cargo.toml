@@ -1,0 +1,50 @@
+[package]
+name = "eio-service"
+description = "The eieio service file: schema, parsing and validation (SERVICE-SPEC)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A `std` crate, and NOT ★ (DAEMON §1). Two independent reasons, both measured:
+# nothing on a leaf tier parses a service file — SCOPE §3.7 deploys leaf targets by a
+# firmware build rather than a config push — and `toml` cannot compile for a target
+# without atomics at all (`alloc::sync` is gated behind `target_has_atomic`, which
+# `riscv32imc-unknown-none-elf` does not have).
+[dependencies]
+# The format (SERVICE §1). `parse` and `serde` only: nothing here writes TOML, because
+# SERVICE §2 says the daemon never writes a service file. When the management API does
+# (SERVICE §9), it will want `toml_edit` for round-trip preservation, which is a
+# different crate for a different job.
+toml = { workspace = true }
+
+# The schema types, deserialized from that.
+serde.workspace = true
+
+# Property values are expressions, and SERVICE §7's stage 1 parses and statically
+# analyses every one of them (EXPR §10). The real interpreter's front end, not an
+# approximation of it: a service file that validates here must configure on a node.
+eio-expr.workspace = true
+
+# Stage 2's input. Ports and property names come from the block's manifest (ABI §11),
+# and this crate checks a connection against it rather than restating what a port is.
+eio-manifest.workspace = true
+
+[dev-dependencies]
+# The published JSON Schema is checked against the same fixtures the parser accepts and
+# rejects, so the two cannot drift — the pattern `manifest` established.
+boon.workspace = true
+serde_json.workspace = true
+
+# SERVICE §2.1 states the id rule as a regex so every surface enforces the same one, and this
+# crate's hand-written validator has to be provably equivalent to it. The proof needs a regex
+# engine; nothing at run time does.
+regex.workspace = true
+
+# The error type carries EXPR §8's code and span, so a test that asserts on them names the
+# crate they come from. A dev-dependency alongside the real one is how cargo spells that.
+eio-expr.workspace = true
+
+[lints]
+workspace = true

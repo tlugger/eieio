@@ -1,0 +1,6 @@
+# The smallest valid service: a name, and nothing else.
+#
+# It runs nothing, which is what it says (SERVICE §3). Worth having as a fixture because
+# "empty is valid" is the kind of thing a parser gets wrong by requiring a field it defaults.
+
+name = "empty"

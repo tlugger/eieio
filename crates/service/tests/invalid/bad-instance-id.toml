@@ -1,0 +1,4 @@
+name = "shouty"
+
+[blocks.Thermometer]
+block = "temp-sensor:1.0.0"
