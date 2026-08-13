@@ -27,3 +27,6 @@ designer/build/
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Working plans from the /implement skill
+*.eio-plan.md
