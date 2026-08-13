@@ -367,6 +367,12 @@ impl Service {
     /// destination already exists, and a cycle has none — and ABI §5.1 step 3 lets
     /// `eio_start` emit, so a destination has to be postable to from the moment the first
     /// instance runs.
+    /// Each instance's event stream goes to the executor's bus, if it has one (DAEMON §11).
+    ///
+    /// Exactly one consumer may own that receiver, and who it is depends on who is running the
+    /// instance — the bus in a node, `dev run-block` in a `dev` command, the test in a test.
+    /// The executor is where that is decided because the executor is what hands the receiver
+    /// out; a service does not have an opinion about who watches it.
     pub async fn spawn(
         executor: &Executor,
         specs: Vec<InstanceSpec>,
@@ -405,13 +411,28 @@ impl Service {
             mailboxes: Arc::new(Mailboxes::new(mailboxes)),
         };
         for (index, (prepared, inbox)) in prepared.into_iter().zip(inboxes).enumerate() {
+            let outputs = prepared.descriptor().outputs.clone();
+            let instance_id = prepared.descriptor().instance_id.clone();
+            let service_name = prepared.service().to_string();
             let outlet = service.outlet_for(index as u32);
             let mailbox = service.mailboxes.get(index as u32);
             let spawned = executor.spawn_wired(prepared, mailbox, inbox, outlet).await;
             match spawned {
                 Ok((instance, events)) => {
+                    match executor.bus() {
+                        Some(bus) => {
+                            crate::observe::drain(
+                                Arc::clone(bus),
+                                service_name,
+                                instance_id,
+                                outputs,
+                                events,
+                            );
+                            service.events.push(None);
+                        }
+                        None => service.events.push(Some(events)),
+                    }
                     service.instances.push(Some(instance));
-                    service.events.push(Some(events));
                 }
                 // Whatever already started is stopped before the error is reported: a service
                 // that failed to come up must not leave half of itself running.

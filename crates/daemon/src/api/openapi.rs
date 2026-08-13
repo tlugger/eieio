@@ -34,11 +34,18 @@ use utoipa::OpenApi;
         super::services::start,
         super::services::stop,
         super::services::reload,
+        super::taps::create,
+        super::taps::list,
+        super::taps::delete,
+        super::taps::stream,
+        super::logs::stream,
     ),
     tags(
         (name = "node", description = "What this node is"),
         (name = "blocks", description = "The block cache, and pulling into it"),
         (name = "services", description = "Service definitions and their lifecycle"),
+        (name = "taps", description = "Watching one connection while it runs"),
+        (name = "logs", description = "This node's log, live and filtered"),
     ),
 )]
 pub struct Document;

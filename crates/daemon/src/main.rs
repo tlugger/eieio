@@ -28,6 +28,7 @@ mod executor;
 mod instance;
 mod json_batch;
 mod node;
+mod observe;
 mod registry;
 mod router;
 mod run;
@@ -181,17 +182,25 @@ fn property(argument: &str) -> Result<(String, String), String> {
 /// The runtime DAEMON §5's executor and §9's API will share. See the module docs.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // The bus is built before the subscriber, because `tracing`'s is global and set once: the
+    // layer has to be handed the bus it will publish to, and there is no second chance. `dev`
+    // commands get one too and simply have nothing subscribed to it (DAEMON §11).
+    let bus = std::sync::Arc::new(observe::Bus::default());
+    {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::util::SubscriberInitExt as _;
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(tracing_subscriber::fmt::layer())
+            .with(observe::LogLayer::new(std::sync::Arc::clone(&bus)))
+            .init();
+    }
 
     let cli = Cli::parse();
     tracing::debug!(data_dir = %cli.data_dir.display(), "starting");
 
     match cli.command {
-        Command::Run => run_node(&cli.data_dir).await,
+        Command::Run => run_node(&cli.data_dir, bus).await,
 
         Command::Dev {
             command: DevCommand::RunBlock(args),
@@ -236,7 +245,10 @@ async fn main() -> anyhow::Result<()> {
 /// created, a `node.toml` that will not parse. A *service* never produces one: §3 makes one
 /// service's failure that service's, so a node with nothing but broken services still comes
 /// up and still says so.
-async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
+async fn run_node(
+    data_dir: &std::path::Path,
+    bus: std::sync::Arc<observe::Bus>,
+) -> anyhow::Result<()> {
     let node = node::Node::open(data_dir)?;
 
     // Bound before boot, deliberately (DAEMON §9): a node whose port is already taken should
@@ -257,7 +269,8 @@ async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
     );
 
     let executor =
-        executor::Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())?;
+        executor::Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())?
+            .observing(std::sync::Arc::clone(&bus));
     let services = boot::boot(&node, &executor).await;
     let counts = services.counts();
     tracing::info!(
@@ -268,6 +281,7 @@ async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
     );
 
     let shared = std::sync::Arc::new(api::Shared {
+        bus,
         registry: registry::Registry::new(node.signing.clone()),
         services: tokio::sync::Mutex::new(services),
         executor,

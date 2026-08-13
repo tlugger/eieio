@@ -252,6 +252,8 @@ pub type Events = mpsc::UnboundedReceiver<Event>;
 pub struct Executor {
     runtime: Arc<Runtime>,
     mailbox: usize,
+    /// Where every instance's events go, in a node (DAEMON §11). See [`Executor::observing`].
+    bus: Option<Arc<crate::observe::Bus>>,
 }
 
 impl Executor {
@@ -276,6 +278,21 @@ impl Executor {
         Executor::build(mailbox, Runtime::caching(budgets, precompiled)?)
     }
 
+    /// Sends every instance's events to `bus` from here on (DAEMON §11).
+    ///
+    /// A node's executor has one; `dev run-block`'s and the tests' do not, and they drain the
+    /// receivers themselves. Set once at construction rather than per spawn, because it is a
+    /// property of the process and not of a service.
+    pub fn observing(mut self, bus: Arc<crate::observe::Bus>) -> Executor {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// The bus every instance's events are drained into, if this executor has one.
+    pub fn bus(&self) -> Option<&Arc<crate::observe::Bus>> {
+        self.bus.as_ref()
+    }
+
     /// See [`new`](Executor::new).
     fn build(mailbox: usize, runtime: Runtime) -> anyhow::Result<Executor> {
         anyhow::ensure!(
@@ -285,6 +302,7 @@ impl Executor {
         Ok(Executor {
             runtime: Arc::new(runtime),
             mailbox,
+            bus: None,
         })
     }
 

@@ -28,8 +28,11 @@ pub mod openapi;
 
 mod auth;
 mod blocks;
+mod logs;
 mod node;
 mod services;
+mod sse;
+mod taps;
 
 use std::sync::Arc;
 
@@ -53,6 +56,11 @@ pub struct Shared {
     pub registry: Registry,
     /// The executor every instance is spawned on (DAEMON §5).
     pub executor: Executor,
+    /// The observation bus every instance's events are drained into (DAEMON §11).
+    ///
+    /// Not behind the services lock: a tap subscribes and a drain publishes without either
+    /// touching the graph, which is what keeps opening a tap from contending with a reload.
+    pub bus: Arc<crate::observe::Bus>,
     /// The running graph.
     ///
     /// A `tokio` mutex rather than a `std` one because the operations hold it across `await`
@@ -105,6 +113,18 @@ pub fn routes() -> Vec<Route> {
             "/services/{service}/reload",
             post(services::reload),
         ),
+        (
+            &["GET", "POST"],
+            "/taps",
+            get(taps::list).post(taps::create),
+        ),
+        (
+            &["DELETE"],
+            "/taps/{tap}",
+            axum::routing::delete(taps::delete),
+        ),
+        (&["GET"], "/taps/{tap}/stream", get(taps::stream)),
+        (&["GET"], "/logs/stream", get(logs::stream)),
     ]
 }
 

@@ -336,7 +336,11 @@ The two policies are the two answers §5's mailbox offers a sender, and neither 
 
 ### 6.3 Taps and system blocks
 
-- **Taps** (SCOPE §3.12): any connection can be tapped at runtime via API — sampled copies into a per-tap ring buffer, streamed over the API (§9) and/or published to a system topic. Zero cost untapped. Expression evaluation failures (EXPR §8) are injected into taps as annotated events.
+**Taps** (SCOPE §3.12): any connection can be tapped at runtime through the API (§9), which streams what travels along it. Expression evaluation failures (EXPR §8) are injected into the same stream as annotated events, because a property that failed for a signal is the most useful thing a tap can show and it is invisible in the batch.
+
+**A tap observes the source endpoint, not the wire.** A connection is `from.port -> to.port`, and what travels it is exactly what `from` emitted on `port` — fan-out hands every destination an independent copy of one batch (ABI §6.2). So a tap resolves its connection to that endpoint and observes there. Two connections leaving one output port are therefore indistinguishable to a tap, which is correct rather than a limitation: they carry the same batch, and a tap that claimed otherwise would be inventing a difference. What *is* per-connection is a discard (§6.2), and that carries its own destination.
+
+**Zero cost untapped, and precisely what that means.** An instance already reports what it emitted, what a callback returned and which expressions failed, on the event stream §11 drains; a tap subscribes to that stream rather than instrumenting the router. So a connection nobody is watching costs one atomic load — the check for whether anything is subscribed at all — and no copy, no allocation and no lock. Nothing in the emit or delivery path is conditional on a tap existing, which is the property worth having: tapping cannot change what a service does, only what an operator can see.
 - **System blocks (PROPOSED):** `publisher` and `subscriber` blocks are **host-native**, not WASM — they appear in the palette/manifest system like any block but their implementation is the router's pub/sub bridge (§7). Rationale: they need transport internals and credentials no sandboxed block should hold; and every node class must have them even when it can't load WASM dynamically. The precedent is deliberate and narrow: system blocks are limited to transport endpoints (logger stays an ordinary WASM block).
 
 ## 7. Pub/sub bridge
@@ -367,9 +371,14 @@ GET    /services/{s}/errors           why a service is errored, structured
 POST   /services/{s}/start            load from file and start
 POST   /services/{s}/stop             stop, keep the definition
 POST   /services/{s}/reload           re-read the file and apply it (§9.4)
+POST   /taps                          {service, connection} -> tap_id (§9.6)
+GET    /taps                          the taps this node is holding
+GET    /taps/{id}/stream              SSE: signals and expr failures (§9.6)
+DELETE /taps/{id}                     stop tapping, release the ring
+GET    /logs/stream                   SSE: log lines, filterable (§9.6, §11)
 ```
 
-`/taps`, `/taps/{id}/stream` and `/logs/stream` are eieio-8yq.6's and are sketched in §11 until then. **`GET /state/{instance}` is deliberately absent**: it inspects `eio:state`, which §10 does not yet back with a store, and a node refuses to load a block declaring the capability at all (SCOPE §3.3). It arrives with the store, because an endpoint published in the tool surface that cannot succeed is worse for an agent than one that is not there — the document is what an agent plans against, and a plan built on an endpoint that always answers empty fails later and less legibly than one that never saw it.
+**`GET /state/{instance}` is deliberately absent**: it inspects `eio:state`, which §10 does not yet back with a store, and a node refuses to load a block declaring the capability at all (SCOPE §3.3). It arrives with the store, because an endpoint published in the tool surface that cannot succeed is worse for an agent than one that is not there — the document is what an agent plans against, and a plan built on an endpoint that always answers empty fails later and less legibly than one that never saw it.
 
 ### 9.1 Auth
 
@@ -409,15 +418,29 @@ This is the one place the API and the GitOps path (§2) deliberately differ, and
 
 A conforming implementation MUST test that every route it serves is described in `/openapi.json` and that every path in the document is served. Enumerated from the router, not from a hand-maintained list: a list is a third place to forget an endpoint, and the failure this rule exists to prevent — a tool surface that promises what the daemon does not do, or hides what it does — is invisible in every other test.
 
+### 9.6 Streaming: SSE, and what a stream promises
+
+**Server-sent events, not WebSocket.** A tap and a log stream are one-way, which is the whole of what SSE does; it is curl-able, it is `EventSource` in a browser with no library, and reconnection with an event id is in the protocol rather than in every client. A bidirectional socket would buy adjusting a live tap's filter without re-creating it, which is not worth a protocol the Designer has to hand-roll reconnection for. Streams answer `text/event-stream` and are authenticated like every other endpoint (§9.1).
+
+**Event names are the contract**, and a client dispatches on them: `signals` for a batch that travelled the tapped connection, `expr_failure` for a property expression that failed for a signal (EXPR §8: code, span and message), `discarded` for a batch that was routed and not delivered (§6.2), `lagged` for the paragraph below, and `log` on `/logs/stream`. A name not in that list is a name a client MAY ignore; adding one is not a breaking change, and changing what one means is.
+
+**The ring buffer is bounded, and a slow reader is told exactly what it missed.** A tap holds a fixed number of observations for a client that is not keeping up, and the oldest go first — an operator watching a firehose through a browser should see recent signals, not a stalled node. What a tap MUST NOT do is skip silently: a debugging tool that quietly shows a subset is worse than one that shows less and says so. So a client that falls behind receives a `lagged` event carrying the exact number of observations it did not see, before the stream resumes. **That count is the sampling report**, and it is why "sampled" here needs no rate knob: the stream is complete until a reader cannot keep up, and precisely quantified from then on.
+
+**Teardown is either explicit or a disconnect.** `DELETE /taps/{id}` removes a tap; so does the client going away, detected when the stream's send fails. A tap holds a subscription and a ring and nothing else, so releasing it releases everything — there is no separate reclaim, and a tap that outlived its reader would be a leak of exactly the kind §11's drain exists to prevent.
+
 ## 10. State store
 
 Backs `eio:state` (ABI §7.2), namespaced `service/instance/key`. **PROPOSED: redb** (pure-Rust embedded KV, single file, no compaction daemon). Leaf hosts implement the same host functions against flash with `ERR_THROTTLED` budgets — another host-core trait boundary.
 
 ## 11. Observability
 
-- Structured logs (tracing): daemon subsystems + guest `log` calls tagged (service, instance).
-- Taps per §6.
-- Metrics OPEN (SCOPE §3.12); reserve `/metrics` (Prometheus text) — **PROPOSED** counters: delivered/emitted batches per connection, callback duration, instance restarts, expr failures.
+Structured logs through `tracing`: the daemon's own subsystems, and guest `log` calls (ABI §7.0) tagged with `(service, instance)` from the span the lifecycle driver has entered — so a block's line and the daemon's carry the same identity without the guest knowing either. `/logs/stream` (§9) is that stream, filtered.
+
+**The observation bus is the one drain, and it has to exist.** Each instance reports what it observed on an unbounded channel (§5) — unbounded because an observer that could stall a guest by reading slowly would be a worse defect than a queue that grows. Unbounded means *something must read it*: a node that held those receivers and never drained them would accumulate every status, emission and expression failure for the life of the process. So a node drains each instance's stream into a per-node bus, and taps and `/logs/stream` subscribe to that. A node with no subscribers still drains; it just drops.
+
+The bus is where the raw stream's one owner lives, and which owner that is depends on who is running the instance: the bus in a node, `dev run-block` in a `dev` command, the test in a test. That is why the executor hands the receiver out rather than choosing.
+
+Metrics stay OPEN (SCOPE §3.12). `/metrics` is **reserved** and deliberately **not served** — the same rule §9 applies to `/state`: an endpoint published in the tool surface that cannot succeed is worse for an agent than one that is absent. The counters worth having when it lands are delivered and emitted batches per connection, callback duration, instance restarts and expression failures.
 
 ## 12. `dev` commands
 
@@ -450,4 +473,4 @@ NaN and infinity need no rule here: a literal that overflows `binary64` is refus
 
 ## 13. Expansion list (for the in-depth pass)
 
-Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), OCI auth for private registries (§4.1 states the anonymous-only v1 posture this replaces), tap sampling strategy, mailbox sizing defaults, multi-arch AOT artifact selection.
+Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), OCI auth for private registries (§4.1 states the anonymous-only v1 posture this replaces), mailbox sizing defaults, multi-arch AOT artifact selection.

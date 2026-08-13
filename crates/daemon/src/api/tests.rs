@@ -30,8 +30,9 @@ pub struct Harness {
     /// The token a request has to carry (DAEMON §9.1).
     pub token: String,
     base: String,
-    shared: State,
-    agent: ureq::Agent,
+    /// The state the server was built on, for a test asserting on the bus.
+    pub shared: State,
+    pub(super) agent: ureq::Agent,
 }
 
 impl Harness {
@@ -65,10 +66,13 @@ impl Harness {
             listener.local_addr().expect("the bound address")
         );
 
+        let bus = Arc::new(crate::observe::Bus::default());
         let executor = Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())
-            .expect("an executor");
+            .expect("an executor")
+            .observing(Arc::clone(&bus));
         let services = boot::boot(&node, &executor).await;
         let shared = Arc::new(Shared {
+            bus,
             registry: Registry::new(node.signing.clone()),
             services: tokio::sync::Mutex::new(services),
             executor,
@@ -126,6 +130,20 @@ impl Harness {
             .await
     }
 
+    /// A `DELETE` carrying this node's token.
+    pub async fn delete(&self, path: &str) -> Response {
+        let agent = self.agent.clone();
+        let url = self.url(path);
+        let token = self.token.clone();
+        self.run(move || {
+            agent
+                .delete(&url)
+                .header("authorization", format!("Bearer {token}"))
+                .call()
+        })
+        .await
+    }
+
     /// A `PUT` carrying a service definition (DAEMON §9.3).
     pub async fn put_definition(&self, path: &str, definition: &str) -> Response {
         self.with_body(
@@ -143,6 +161,13 @@ impl Harness {
         let url = self.url(path);
         self.run(move || agent.post(&url).send(String::from("{}")))
             .await
+    }
+
+    /// A `DELETE` carrying no token, for the guard probe.
+    pub async fn unauthenticated_delete(&self, path: &str) -> Response {
+        let agent = self.agent.clone();
+        let url = self.url(path);
+        self.run(move || agent.delete(&url).call()).await
     }
 
     /// A `PUT` carrying no token, for the guard probe.
@@ -183,7 +208,7 @@ impl Harness {
         .await
     }
 
-    fn url(&self, path: &str) -> String {
+    pub(super) fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base)
     }
 
@@ -280,6 +305,7 @@ async fn every_route_is_documented_and_every_documented_path_is_served() {
                 "GET" => harness.get_with(&probe, None).await,
                 "POST" => harness.unauthenticated_post(&probe).await,
                 "PUT" => harness.unauthenticated_put(&probe).await,
+                "DELETE" => harness.unauthenticated_delete(&probe).await,
                 other => panic!("no probe for {other}"),
             };
             assert_eq!(
@@ -583,4 +609,283 @@ async fn a_pull_of_an_unreachable_reference_answers_in_the_envelope() {
         .await;
     assert_eq!(cached.status, 200, "{}", cached.body);
     assert_eq!(cached.json()["version"], "1.0.0");
+}
+
+/// Reads an SSE stream until `wanted` events have arrived or the deadline passes.
+///
+/// Blocking, like every other request here, and on the blocking pool for the reason the module
+/// docs give. Returns the raw text so a test can assert on event names as well as payloads.
+async fn sse_until(harness: &Harness, path: &str, wanted: usize, seconds: u64) -> String {
+    let agent = harness.agent.clone();
+    let url = harness.url(path);
+    let token = harness.token.clone();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read as _;
+
+        let mut response = agent
+            .get(&url)
+            .header("authorization", format!("Bearer {token}"))
+            .call()
+            .expect("the stream opened");
+        assert_eq!(response.status().as_u16(), 200);
+
+        // Read incrementally: an SSE stream never ends, so `read_to_string` would block until
+        // the deadline every time rather than returning as soon as the test has what it needs.
+        let mut reader = response.body_mut().as_reader();
+        let mut seen = String::new();
+        let mut buffer = [0u8; 512];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        while std::time::Instant::now() < deadline {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    seen.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                    if seen.matches("event:").count() >= wanted {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        seen
+    })
+    .await
+    .expect("the stream thread")
+}
+
+/// A two-block service: a transform feeding a second transform, so there is a connection.
+fn wired(name: &str) -> String {
+    format!(
+        "name = \"{name}\"\nautostart = true\n\
+         connections = [\"t1.out -> t2.in\"]\n\n\
+         [blocks.t1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.t1.props]\nval = \"(+ $n 1)\"\n\n\
+         [blocks.t2]\nblock = \"transform:1.0.0\"\n\
+         [blocks.t2.props]\nval = \"(+ $n 1)\"\n"
+    )
+}
+
+#[tokio::test]
+async fn a_tap_names_a_connection_the_service_actually_declares() {
+    // A tap on an edge that does not exist would stream nothing forever, which is
+    // indistinguishable from a quiet service — the worst answer a debugging tool can give.
+    let harness = Harness::start("api-tap-create").await;
+    harness
+        .put_definition("/services/kitchen", &wired("kitchen"))
+        .await;
+
+    let made = harness
+        .post_json(
+            "/taps",
+            serde_json::json!({ "service": "kitchen", "connection": "t1.out -> t2.in" }),
+        )
+        .await;
+    assert_eq!(made.status, 200, "{}", made.body);
+    let tap = made.json();
+    assert_eq!(tap["service"], "kitchen");
+    // §6.3: resolved to the connection's source endpoint, which is where the copies come from.
+    assert_eq!(tap["instance"], "t1");
+    assert_eq!(tap["port"], "out");
+    let id = tap["id"].as_str().expect("an id").to_string();
+
+    // Spacing is `eio_service`'s business, not a second grammar in the API.
+    let spaced = harness
+        .post_json(
+            "/taps",
+            serde_json::json!({ "service": "kitchen", "connection": "t1.out->t2.in" }),
+        )
+        .await;
+    assert_eq!(spaced.status, 200, "{}", spaced.body);
+
+    let absent = harness
+        .post_json(
+            "/taps",
+            serde_json::json!({ "service": "kitchen", "connection": "t1.out -> nope.in" }),
+        )
+        .await;
+    assert_eq!(absent.status, 422, "{}", absent.body);
+    assert_eq!(absent.json()["error"], "invalid");
+    assert_eq!(
+        absent.json()["detail"]["connections"][0],
+        "t1.out -> t2.in",
+        "and it says what there is to tap instead"
+    );
+
+    let missing = harness
+        .post_json(
+            "/taps",
+            serde_json::json!({ "service": "nope", "connection": "a.out -> b.in" }),
+        )
+        .await;
+    assert_eq!(missing.status, 404);
+
+    assert_eq!(
+        harness.get("/taps").await.json().as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(harness.delete(&format!("/taps/{id}")).await.status, 204);
+    assert_eq!(
+        harness.get("/taps").await.json().as_array().map(Vec::len),
+        Some(1),
+        "teardown releases the registration"
+    );
+    assert_eq!(
+        harness.delete(&format!("/taps/{id}")).await.status,
+        404,
+        "and it is gone rather than removable twice"
+    );
+}
+
+#[tokio::test]
+async fn nothing_is_published_while_nothing_is_watching() {
+    // DAEMON §6.3's zero-cost-untapped, counter-based. The service runs and emits; with no
+    // subscriber the bus allocates nothing and clones no batch, and says so.
+    let harness = Harness::start("api-untapped").await;
+    harness
+        .put_definition("/services/kitchen", &wired("kitchen"))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let counts = harness.shared.bus.counts();
+    assert_eq!(
+        counts.published, 0,
+        "nothing was published with nobody listening"
+    );
+    assert!(
+        counts.drained > 0,
+        "and the drain did run — DAEMON §11's unbounded channel is being read, which is what \
+         keeps a long-lived node from accumulating every event it ever saw. Without this the \
+         assertion above would pass on a node that simply did nothing: {counts:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_log_stream_carries_the_service_and_instance_and_filters_by_them() {
+    // DAEMON §11: a guest's line and the daemon's own about that block carry the same pair.
+    let harness = Harness::start("api-logs").await;
+
+    // Published onto the bus directly rather than through `tracing`: the subscriber is
+    // process-global and these tests run in parallel, so one of them would own it and the
+    // rest would see nothing. What that wiring does is `observe::tests`'s, run under its own
+    // subscriber; what is under test here is the stream and its filter.
+    let bus = std::sync::Arc::clone(&harness.shared.bus);
+    tokio::spawn(async move {
+        for _ in 0..40 {
+            bus.log("kitchen", "t1", "info", "the guest said something");
+            bus.log("elsewhere", "x1", "info", "a different service");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    });
+
+    let matching = sse_until(&harness, "/logs/stream?service=kitchen", 1, 3).await;
+    assert!(
+        matching.contains("event: log") || matching.contains("event:log"),
+        "the stream carries log events: {matching}"
+    );
+    assert!(
+        matching.contains("\"service\":\"kitchen\""),
+        "tagged with the service: {matching}"
+    );
+
+    assert!(
+        !matching.contains("\"service\":\"elsewhere\""),
+        "and the filter excluded the other service, which was being logged all along: \
+         {matching}"
+    );
+}
+
+#[tokio::test]
+async fn a_tap_stream_is_guarded_and_refuses_an_unknown_id() {
+    let harness = Harness::start("api-tap-stream").await;
+    assert_eq!(harness.get("/taps/nope/stream").await.status, 404);
+    assert_eq!(
+        harness.get_with("/taps/nope/stream", None).await.status,
+        401,
+        "a stream is authenticated like every other endpoint (§9.1)"
+    );
+}
+
+#[tokio::test]
+async fn a_tap_streams_signals_and_the_expression_failures_that_explain_them() {
+    // The two events a tap exists for (DAEMON §6.3, §9.6). Driven by feeding the *real* drain
+    // rather than by a running guest, and the reason is a limitation worth naming: no
+    // capability is implemented yet (`IMPLEMENTED_CAPABILITIES`), so the one golden block that
+    // emits unprompted — the timer emitter — cannot load here, and DAEMON §9 has no endpoint
+    // that injects a signal into a running service. What is under test is therefore everything
+    // from an instance's event stream to the bytes on the wire: the drain, the port-name
+    // resolution, the filter, the SSE framing. The guest half is `end_to_end`'s.
+    let harness = Harness::start("api-tap-stream-events").await;
+    harness
+        .put_definition("/services/kitchen", &wired("kitchen"))
+        .await;
+
+    let tap = harness
+        .post_json(
+            "/taps",
+            serde_json::json!({ "service": "kitchen", "connection": "t1.out -> t2.in" }),
+        )
+        .await
+        .json();
+    let id = tap["id"].as_str().expect("an id").to_string();
+
+    let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+    crate::observe::drain(
+        std::sync::Arc::clone(&harness.shared.bus),
+        String::from("kitchen"),
+        String::from("t1"),
+        vec![String::from("out")],
+        receiver,
+    );
+
+    tokio::spawn(async move {
+        for _ in 0..40 {
+            let mut batch = eio_signal::Batch::new();
+            let mut signal = eio_signal::Signal::new();
+            signal.set("n", eio_signal::Value::Int(41));
+            batch.push(signal);
+            let _ = events.send(crate::executor::Event::Emitted {
+                callback: "process_signals",
+                emission: crate::core_fns::Emission { port: 0, batch },
+            });
+            let _ = events.send(crate::executor::Event::Failure(
+                eio_host_core::PropFailure {
+                    prop_id: 0,
+                    signal: Some(0),
+                    error: eio_expr::Error {
+                        code: eio_expr::ErrorCode::Missing,
+                        span: eio_expr::Span { start: 3, end: 8 },
+                        message: "no such attribute on this signal",
+                    },
+                },
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    });
+
+    let seen = sse_until(&harness, &format!("/taps/{id}/stream"), 2, 4).await;
+
+    assert!(
+        seen.contains("event: signals") || seen.contains("event:signals"),
+        "the batch that travelled the connection: {seen}"
+    );
+    assert!(
+        seen.contains("\"signals\":[\"{n: 41}\"]") || seen.contains("41"),
+        "rendered as EXPR §7.6 canonical text: {seen}"
+    );
+    assert!(
+        seen.contains("\"port\":\"out\""),
+        "with the port as a name, resolved from the descriptor: {seen}"
+    );
+
+    // EXPR §8's payoff: the code, the span and the message, in-stream and annotated.
+    assert!(
+        seen.contains("event: expr_failure") || seen.contains("event:expr_failure"),
+        "the expression failure: {seen}"
+    );
+    assert!(seen.contains("Missing"), "carrying its code: {seen}");
+    assert!(seen.contains("\"span\":\"3..8\""), "and its span: {seen}");
+    assert!(
+        seen.contains("no such attribute on this signal"),
+        "and its message: {seen}"
+    );
 }

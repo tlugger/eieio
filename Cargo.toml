@@ -213,6 +213,13 @@ axum = { version = "0.8", default-features = false, features = [
 # is documentation that drifts from it.
 utoipa = { version = "5", features = ["axum_extras"] }
 
+# The SSE streams of DAEMON §9.6. `async-stream` is the generator syntax that turns a
+# bus subscription into a `Stream` without hand-writing a poll loop and a state machine
+# per endpoint; `futures-core` is the `Stream` trait itself, which axum takes and which
+# neither of them re-exports. Both are tiny and pure Rust.
+async-stream = "0.3"
+futures-core = "0.3"
+
 # ── the guest's own dependencies (compiled into every block) ─────────────────
 #
 # Both are the guest's alone: nothing on the host side may reach for either, and
