@@ -31,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use eio_host_core::{Connection, Port};
+use eio_host_core::{Connection, Limits, Port};
 use eio_manifest::Manifest;
 
 use crate::blocks::{Cache, Unresolvable};
@@ -212,9 +212,26 @@ impl Services {
     }
 
     /// The state of one service, by name.
-    #[cfg(test)]
     pub fn get(&self, name: &str) -> Option<&State> {
         self.services.get(name)
+    }
+
+    /// Every service and its state, in name order (DAEMON §9).
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &State)> {
+        self.services.iter()
+    }
+
+    /// Puts `state` in `name`'s place, retiring whatever was there.
+    ///
+    /// Retiring and not dropping: a running service's instances are threads holding guests
+    /// mid-life, and ABI §5.1 step 5 says they are told to stop rather than having their
+    /// mailboxes closed underneath them. Every lifecycle operation goes through here, which
+    /// is what makes "a service is replaced, never doubled" true by construction.
+    pub async fn set(&mut self, name: &str, state: State) {
+        if let Some(previous) = self.services.remove(name) {
+            retire(previous).await;
+        }
+        self.services.insert(String::from(name), state);
     }
 
     /// One running instance's event stream (DAEMON §5), for a test that watches one.
@@ -254,7 +271,15 @@ pub async fn boot(node: &Node, executor: &Executor) -> Services {
     let registry = Registry::new(node.signing.clone());
     let mut services = Services::default();
     for (stem, path) in service_files(&directory) {
-        let state = load(node, &registry, executor, &path, &stem).await;
+        let state = load(
+            node,
+            &registry,
+            executor,
+            &path,
+            &stem,
+            Start::AsTheFileSays,
+        )
+        .await;
         match &state {
             State::Errored(failure) => {
                 tracing::error!(service = %stem, %failure, "this service is not running")
@@ -296,40 +321,138 @@ fn service_files(directory: &Path) -> Vec<(String, std::path::PathBuf)> {
     files
 }
 
+/// Stops a service and waits for its threads, if it was running (ABI §5.1 step 5).
+///
+/// The join is on the blocking pool because it is OS threads being waited on, and the caller
+/// is an axum handler on the daemon's one reactor thread: joining inline would stop every
+/// other request, and every other instance's mailbox with it (DAEMON §5).
+async fn retire(state: State) {
+    if let State::Running(service) = state {
+        service.stop().await;
+        if let Err(error) = tokio::task::spawn_blocking(move || service.join()).await {
+            tracing::warn!(%error, "a stopped service's threads were not joined");
+        }
+    }
+}
+
+/// Where `name`'s definition lives, if `name` is one a service may have (SERVICE §1).
+///
+/// `None` for anything else, and that check is load-bearing rather than tidy: the name comes
+/// from a URL path, and it is about to be joined onto a directory. SERVICE §1 gives a service
+/// the id pattern, which admits no `/`, no `.` and no `..`, so a name that passes cannot leave
+/// `services/`.
+pub fn service_path(node: &Node, name: &str) -> Option<std::path::PathBuf> {
+    match eio_service::id::is_id(name) {
+        true => Some(node.layout().services().join(format!("{name}.toml"))),
+        false => None,
+    }
+}
+
+/// Re-reads `name`'s file and applies it (DAEMON §9.4).
+///
+/// `start` is what separates the two callers: `POST /start` overrides the file's `autostart`,
+/// and `reload` does not, because the file is the source of truth and a reload that preserved
+/// a runtime override would mean it was not.
+pub async fn reload(
+    node: &Node,
+    registry: &Registry,
+    executor: &Executor,
+    services: &mut Services,
+    name: &str,
+    start: Start,
+) -> Option<()> {
+    let path = service_path(node, name)?;
+    if !path.exists() {
+        return None;
+    }
+    let state = load(node, registry, executor, &path, name, start).await;
+    services.set(name, state).await;
+    Some(())
+}
+
+/// Whether a validated service is started, or asked to say what the file wants.
+///
+/// The difference between `POST /services/{s}/start` and everything else (DAEMON §9.4): a
+/// caller who named the operation has said what they want more recently than the file has,
+/// where boot and reload are the file speaking for itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start {
+    /// Start it if the file says `autostart`, and otherwise leave it stopped.
+    AsTheFileSays,
+    /// Start it whatever the file says.
+    Always,
+}
+
 /// One service file, from bytes on disk to a [`State`] (DAEMON §3 step 2).
-async fn load(
+pub async fn load(
     node: &Node,
     registry: &Registry,
     executor: &Executor,
     path: &Path,
     stem: &str,
+    start: Start,
 ) -> State {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => return State::Errored(Failure::Unreadable(error.to_string())),
     };
-    let parsed = match eio_service::parse(&text) {
-        Ok(parsed) => parsed,
-        Err(error) => return State::Errored(Failure::Invalid(error)),
-    };
+    match validate(node, registry, &text, stem) {
+        Ok(valid) => apply(executor, valid, start).await,
+        Err(failure) => State::Errored(failure),
+    }
+}
+
+/// A definition that has passed everything checkable without starting it (DAEMON §9.3).
+///
+/// The seam `PUT` needs: validation says yes or no about *text*, and writing the file is what
+/// happens in between saying yes and starting anything.
+pub struct Valid {
+    parsed: eio_service::Parsed,
+    blocks: Resolved,
+    /// The node's per-instance limits, captured here rather than passed to [`apply`] so that
+    /// what a definition was validated against is what it runs under (ABI §5.2, §9.7).
+    limits: Limits,
+}
+
+/// Everything checkable about a definition's text (DAEMON §3 step 2, §9.3).
+///
+/// SERVICE §7 stage 1, then block resolution — which MAY pull (§4.1) — then stage 2, which
+/// takes the resolved manifests as its input. Shared by boot, `PUT`, `start` and `reload`
+/// precisely so that a definition cannot be judged one way by the API and another at boot.
+pub fn validate(
+    node: &Node,
+    registry: &Registry,
+    text: &str,
+    stem: &str,
+) -> Result<Valid, Failure> {
+    let parsed = eio_service::parse(text).map_err(Failure::Invalid)?;
     if parsed.service.name != stem {
-        return State::Errored(Failure::Misnamed {
+        return Err(Failure::Misnamed {
             stem: String::from(stem),
             name: parsed.service.name.clone(),
         });
     }
 
-    let blocks = match resolve(node, registry, &parsed) {
-        Ok(blocks) => blocks,
-        Err(failure) => return State::Errored(failure),
-    };
-
+    let blocks = resolve(node, registry, &parsed)?;
     let errors = eio_service::validate(&parsed, |id| Some(blocks.of(id)?.1.clone()));
-    if !errors.is_empty() {
-        return State::Errored(Failure::Unwireable(errors));
+    match errors.is_empty() {
+        true => Ok(Valid {
+            parsed,
+            blocks,
+            limits: node.limits,
+        }),
+        false => Err(Failure::Unwireable(errors)),
     }
+}
 
-    if !parsed.service.autostart {
+/// Starts a validated service, or reports that the file did not ask for it to be (DAEMON §3).
+pub async fn apply(executor: &Executor, valid: Valid, start: Start) -> State {
+    let Valid {
+        parsed,
+        blocks,
+        limits,
+    } = valid;
+    if start == Start::AsTheFileSays && !parsed.service.autostart {
         return State::Stopped;
     }
 
@@ -351,7 +474,7 @@ async fn load(
             props: instance.props.clone(),
             instance: Some(id.clone()),
             service: service.clone(),
-            limits: node.limits,
+            limits,
         })
         .collect();
 
@@ -698,6 +821,36 @@ mod tests {
             failure(&services, "unwireable"),
             Failure::Unwireable(_)
         ));
+    }
+
+    #[test]
+    fn a_name_that_is_no_service_name_names_no_path() {
+        // The check that keeps a URL path parameter from becoming a filesystem path. Asserted
+        // here rather than only through the API, because over HTTP every hostile name answers
+        // `404` whether or not this check exists — the file it would have reached usually is
+        // not there. This is the only test that fails when the check is removed.
+        let node = Node::open(&scratch("service-path")).expect("a node");
+        let services = node.layout().services();
+
+        assert_eq!(
+            service_path(&node, "kitchen"),
+            Some(services.join("kitchen.toml"))
+        );
+        for hostile in [
+            "../node",
+            "..",
+            ".",
+            "../../etc/passwd",
+            "kitchen/../../node",
+            "a/b",
+            "",
+        ] {
+            assert_eq!(
+                service_path(&node, hostile),
+                None,
+                "{hostile:?} was turned into a path"
+            );
+        }
     }
 
     #[tokio::test]

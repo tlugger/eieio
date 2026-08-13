@@ -50,6 +50,11 @@ sha2.workspace = true
 p256.workspace = true
 base64.workspace = true
 
+# The management API (DAEMON §9). The OpenAPI document is derived from the handlers,
+# because SCOPE §4 makes it an agent's tool surface and not a by-product.
+axum.workspace = true
+utoipa.workspace = true
+
 wasmtime.workspace = true
 tokio.workspace = true
 tracing.workspace = true

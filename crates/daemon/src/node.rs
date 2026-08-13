@@ -63,6 +63,13 @@ pub const DEFAULT_MAILBOX: usize = 64;
 /// How many random bytes a node id is minted from. Hex-encoded, so the id is twice this long.
 const ID_BYTES: usize = 8;
 
+/// How many random bytes the API token is minted from (DAEMON §9.1).
+///
+/// Four times the node id's, and for a different job: an id is an opaque label anyone may
+/// know, and this is the only thing between a caller and deploying arbitrary WASM to this node
+/// while transport security is still OPEN (SCOPE §3.11).
+const TOKEN_BYTES: usize = 32;
+
 /// Where a node looks for the key it verifies signatures with (DAEMON §2.1, §4.2).
 ///
 /// Inside `auth/`, which is created owner-only, though a public key is not secret: what makes
@@ -153,6 +160,8 @@ pub struct Node {
     pub mailbox: usize,
     /// What this node will accept a block on the strength of (DAEMON §4.2).
     pub signing: Signing,
+    /// The management API's bearer token (DAEMON §9.1).
+    pub token: String,
     /// The data directory this node was opened on.
     root: PathBuf,
 }
@@ -177,6 +186,7 @@ impl Node {
                 .with_context(|| format!("creating {}", path.display()))?;
         }
         provision_auth(&layout.auth())?;
+        let token = provision_token(&layout.token())?;
 
         let path = layout.node_toml();
         if !path.exists() {
@@ -190,7 +200,7 @@ impl Node {
             .with_context(|| format!("reading {}", path.display()))?;
         let file: File = toml::from_str(&text)
             .with_context(|| format!("{} is not a valid node configuration", path.display()))?;
-        file.into_node(root.to_path_buf())
+        file.into_node(root.to_path_buf(), token)
     }
 
     /// Where this node's files are (DAEMON §2).
@@ -243,10 +253,14 @@ impl Layout<'_> {
 
     /// `auth/`: token material (SCOPE §3.11).
     ///
-    /// Created owner-only at boot; generating the token into it is the management API's
-    /// (eieio-8yq.4), which is where the token is first needed and first printed.
+    /// Created owner-only at boot, because it is where the API's token lands (§9.1).
     pub fn auth(&self) -> PathBuf {
         self.root.join("auth")
+    }
+
+    /// `auth/token`: the management API's bearer token (DAEMON §9.1).
+    pub fn token(&self) -> PathBuf {
+        self.auth().join("token")
     }
 }
 
@@ -265,6 +279,40 @@ fn provision_auth(path: &Path) -> anyhow::Result<()> {
             .with_context(|| format!("restricting {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Reads the API token, minting one if this node has none yet (DAEMON §9.1).
+///
+/// Minted once and then read, for the same reason the id is: a token that changed per boot
+/// would log every client out whenever the node restarted. Printed only by the boot that mints
+/// it — a daemon that logged it on every boot would put the credential in every log shipper
+/// that ever reads this node, which is the opposite of what a `0600` file is for.
+fn provision_token(path: &Path) -> anyhow::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(token) => Ok(String::from(token.trim())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut bytes = [0u8; TOKEN_BYTES];
+            getrandom::fill(&mut bytes)
+                .context("the system has no randomness to mint an API token from")?;
+            let token = crate::blocks::hex(&bytes);
+
+            std::fs::write(path, format!("{token}\n"))
+                .with_context(|| format!("writing {}", path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("restricting {}", path.display()))?;
+            }
+            tracing::info!(
+                token = %token,
+                path = %path.display(),
+                "minted this node's API token; it is printed once and readable from that file"
+            );
+            Ok(token)
+        }
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// Mints a node id (DAEMON §2.1).
@@ -300,7 +348,7 @@ struct File {
 
 impl File {
     /// Turns the file into the node it describes, checking what the types could not.
-    fn into_node(self, root: PathBuf) -> anyhow::Result<Node> {
+    fn into_node(self, root: PathBuf, token: String) -> anyhow::Result<Node> {
         anyhow::ensure!(!self.id.is_empty(), "`id` must not be empty");
         anyhow::ensure!(
             self.executor.mailbox > 0,
@@ -333,6 +381,7 @@ impl File {
             },
             mailbox: self.executor.mailbox,
             signing: self.blocks.signing(&root)?,
+            token,
             root,
         })
     }
@@ -504,7 +553,7 @@ mod tests {
     fn node(text: &str) -> anyhow::Result<Node> {
         toml::from_str::<File>(text)
             .map_err(anyhow::Error::from)
-            .and_then(|file| file.into_node(PathBuf::from("/nonexistent")))
+            .and_then(|file| file.into_node(PathBuf::from("/nonexistent"), String::from("t")))
     }
 
     #[test]

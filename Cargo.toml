@@ -123,12 +123,16 @@ wasmtime = { version = "47.0", default-features = false, features = [
 
 # One task per block instance (DAEMON §5): `rt` for the per-instance current-thread
 # runtime, `sync` for the bounded mailbox that feeds it, `macros` for `#[tokio::main]`.
-# Nothing further: the management API arrives with its own epic, and a feature enabled
-# early is a feature nobody remembers to justify.
+# Each feature earns its place at the point something needs it, so that a feature nobody
+# can name a caller for is a feature to remove.
 tokio = { version = "1.53", default-features = false, features = [
     "rt",
     "sync",
     "macros",
+    # The management API's listener (DAEMON §9). `net` is the socket; `time` is what
+    # axum's graceful shutdown waits on.
+    "net",
+    "time",
     # `run` stops on SIGTERM and SIGINT rather than being killed by them, so that ABI §5.1
     # step 5's `eio_stop` runs on the way out (DAEMON §3).
     "signal",
@@ -183,6 +187,31 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem"]
 # the strict decoder: a signature that round-trips through a lenient decoder is a
 # signature two implementations could disagree about.
 base64 = "0.22"
+
+# ── the management API's dependencies (DAEMON §9) ────────────────────────────
+#
+# Measured the same way the block manager's were: 28 crates onto the daemon's
+# tree, none of them needing a C toolchain, so the arm release build is unaffected.
+# What is bought is not just routing — axum's SSE and WebSocket support is what
+# DAEMON §11's taps and log streams will be built on, so the alternative was
+# paying this later and writing a router in the meantime.
+
+# The server. `default-features = false` drops multipart, the default tracing
+# layer, tokio's `macros` re-export and HTTP/2: the API is JSON over HTTP/1 on
+# loopback (§2.1), and h2 is a second protocol to be conformant in for nothing.
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+    "query",
+] }
+
+# `/openapi.json`, derived from the handlers and the DTOs rather than written
+# beside them (DAEMON §9). The derive is the point: SCOPE §4 makes this document
+# an agent's tool surface, so an operation's description is user-facing
+# documentation, and documentation that lives anywhere but next to the handler
+# is documentation that drifts from it.
+utoipa = { version = "5", features = ["axum_extras"] }
 
 # ── the guest's own dependencies (compiled into every block) ─────────────────
 #

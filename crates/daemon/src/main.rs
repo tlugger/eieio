@@ -4,12 +4,12 @@
 //! services in its data directory and stays up (DAEMON §2, §3). `dev run-block` is the other
 //! half — one block, no node around it, for whoever is writing the block (§12).
 //!
-//! What is missing is the management plane. The API is parsed out of `node.toml` and bound by
-//! nothing (§9), and there is no supervision, so an instance that dies stays dead (§8). Each
-//! arrives with its own issue. The block manager is here in both halves — a service resolves
-//! against the cache and pulls what is not in it (§4, `blocks` and `registry`). What is already load-bearing is the
-//! split this crate sits on top of — every ABI rule it obeys is obeyed inside
-//! `eio_host_core`, so the leaf runtime will obey the same one (DAEMON §1).
+//! The block manager is here in both halves — a service resolves against the cache and pulls
+//! what is not in it (§4, `blocks` and `registry`) — and so is the management plane, which
+//! binds a listener and serves DAEMON §9 (`api`). What is still missing is supervision, so an
+//! instance that dies stays dead (§8), and the streaming half of §9. What is already
+//! load-bearing is the split this crate sits on top of: every ABI rule it obeys is obeyed
+//! inside `eio_host_core`, so the leaf runtime will obey the same one (DAEMON §1).
 //!
 //! # Why this runtime has almost nothing on it
 //!
@@ -17,8 +17,9 @@
 //! the ABI showing through (§1.2: one instance, one caller at a time) — so every block
 //! instance lives on a thread of its own, with its own current-thread runtime (DAEMON §5,
 //! `executor`). What runs *here* is whatever talks to those instances through their
-//! mailboxes: `run`'s boot and shutdown, `dev run-block`, and later the management API (§9).
+//! mailboxes: `run`'s boot and shutdown, `dev run-block`, and the management API (§9).
 
+mod api;
 mod blocks;
 mod boot;
 mod core_fns;
@@ -237,11 +238,20 @@ async fn main() -> anyhow::Result<()> {
 /// up and still says so.
 async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
     let node = node::Node::open(data_dir)?;
+
+    // Bound before boot, deliberately (DAEMON §9): a node whose port is already taken should
+    // say so in a second, rather than compiling and starting every service and then failing on
+    // the last step with a graph running that it is about to tear down again.
+    let listener = tokio::net::TcpListener::bind(node.listen)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("binding the management API to {}: {error}", node.listen)
+        })?;
+
     tracing::info!(
         node = %node.id,
         name = node.name.as_deref().unwrap_or("-"),
         data_dir = %node.layout().root().display(),
-        // Parsed, and not bound: nothing serves it yet (DAEMON §2.1, eieio-8yq.4).
         listen = %node.listen,
         "node"
     );
@@ -257,10 +267,22 @@ async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
         "services"
     );
 
-    shutdown().await;
+    let shared = std::sync::Arc::new(api::Shared {
+        registry: registry::Registry::new(node.signing.clone()),
+        services: tokio::sync::Mutex::new(services),
+        executor,
+        node,
+    });
+
+    // The API owns the wait: `axum::serve` runs until the shutdown future completes, so the
+    // signal that stops the node is the same one that stops accepting requests, and there is
+    // no window where the listener is up and the services are already going down.
+    api::serve(listener, std::sync::Arc::clone(&shared), shutdown()).await?;
+
     tracing::info!("stopping");
+    let mut services = shared.services.lock().await;
     services.stop().await;
-    services.join();
+    std::mem::take(&mut *services).join();
     Ok(())
 }
 

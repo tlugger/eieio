@@ -568,18 +568,22 @@ impl Live {
 /// check among a service's *validations*: a block wanting `gpio` on a node with no GPIO is a
 /// deployment aimed at the wrong node, which an operator answers by moving it — not by
 /// looking at why a service would not start.
+pub const IMPLEMENTED_CAPABILITIES: &[&str] = &[];
+
+/// See [`IMPLEMENTED_CAPABILITIES`].
 pub fn refuse_unimplemented_capabilities(manifest: &Manifest) -> anyhow::Result<()> {
-    if manifest.capabilities.is_empty() {
-        return Ok(());
-    }
-    let needed: Vec<&str> = manifest
+    let missing: Vec<&str> = manifest
         .capabilities
         .iter()
         .map(|capability| capability.as_str())
+        .filter(|capability| !IMPLEMENTED_CAPABILITIES.contains(capability))
         .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
     anyhow::bail!(
         "the block needs capabilities this host does not implement yet: {}",
-        needed.join(", ")
+        missing.join(", ")
     )
 }
 

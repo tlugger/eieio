@@ -86,9 +86,11 @@ impl std::fmt::Display for Unresolvable {
 
 /// One name-and-version pair, as a reference resolves to (DAEMON §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Entry {
-    name: String,
-    version: String,
+pub struct Entry {
+    /// The block's name: the reference's last component before the tag.
+    pub name: String,
+    /// The version: the reference's tag.
+    pub version: String,
 }
 
 /// The node's block cache (DAEMON §2, §4).
@@ -142,6 +144,14 @@ impl Cache {
         std::fs::write(&staging, &wasm).map_err(unstorable)?;
         std::fs::rename(&staging, path).map_err(unstorable)?;
         Ok(wasm)
+    }
+
+    /// Which cache entry `reference` names, without touching the filesystem.
+    ///
+    /// The same parse [`path`](Cache::path) does, for a caller that wants the name and version
+    /// rather than the path — `GET /blocks` reports them separately (DAEMON §9).
+    pub fn entry(&self, reference: &str) -> Result<Entry, Unresolvable> {
+        parse(reference)
     }
 
     /// Where `reference`'s module sits, whether or not it is there.
