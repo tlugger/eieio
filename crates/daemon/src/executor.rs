@@ -50,6 +50,7 @@
 //! emissions are deliberately *not* this stream: they travel through the destination's
 //! bounded mailbox ([`crate::router`]), which is where a slow consumer should be felt.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use eio_host_core::{Descriptor, PropFailure, Status, Trap};
@@ -260,12 +261,29 @@ impl Executor {
     /// budgets, and like them it has no ABI floor — a depth of one is legal and means every
     /// sender waits for the previous item to be taken.
     pub fn new(budgets: Budgets, mailbox: usize) -> anyhow::Result<Executor> {
+        Executor::build(mailbox, Runtime::new(budgets)?)
+    }
+
+    /// An executor whose compiled blocks survive a restart (DAEMON §4.3).
+    ///
+    /// A node's, as against [`new`](Executor::new)'s: `precompiled` is the node's directory
+    /// for them, and a process with no node around it has no second boot to speed up.
+    pub fn caching(
+        budgets: Budgets,
+        mailbox: usize,
+        precompiled: PathBuf,
+    ) -> anyhow::Result<Executor> {
+        Executor::build(mailbox, Runtime::caching(budgets, precompiled)?)
+    }
+
+    /// See [`new`](Executor::new).
+    fn build(mailbox: usize, runtime: Runtime) -> anyhow::Result<Executor> {
         anyhow::ensure!(
             mailbox > 0,
             "a mailbox must have room for at least one item"
         );
         Ok(Executor {
-            runtime: Arc::new(Runtime::new(budgets)?),
+            runtime: Arc::new(runtime),
             mailbox,
         })
     }

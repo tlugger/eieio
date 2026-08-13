@@ -57,6 +57,8 @@
 //! post-MVP proposal and a leaf runtime that will refuse it at flash time.
 
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use eio_host_core::exports::{core_fn, namespace};
@@ -242,6 +244,48 @@ impl Default for Budgets {
     }
 }
 
+/// Writes `module`'s compiled form to `path`, atomically (DAEMON §4.3).
+///
+/// Temporary-then-rename so that a daemon killed mid-write leaves either the previous artifact
+/// or none — never a half of one, which the loader would have to be able to tell apart from a
+/// whole one. The temporary is named for the process, so two daemons on one data directory do
+/// not overwrite each other's partial writes.
+fn store_artifact(path: &Path, module: &Module) -> anyhow::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let staging = dir.join(format!(".{}.{}.tmp", std::process::id(), file_name(path)));
+    std::fs::write(&staging, module.serialize()?)?;
+    std::fs::rename(&staging, path)?;
+    Ok(())
+}
+
+/// A path's file name, for building a sibling temporary out of.
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Feeds a [`Hash`] into sha256, so that a hash of one is stable across processes.
+struct Sha256Hasher(sha2::Sha256);
+
+impl Hasher for Sha256Hasher {
+    fn write(&mut self, bytes: &[u8]) {
+        sha2::Digest::update(&mut self.0, bytes);
+    }
+
+    /// The first eight bytes of the digest so far.
+    ///
+    /// Nothing here calls it — [`engine_key`](Runtime::engine_key) wants the whole digest in
+    /// hex — but a trait method that panicked would be a trap for whoever hashes something
+    /// else with this later, and answering honestly costs a clone of the digest state.
+    fn finish(&self) -> u64 {
+        let digest = sha2::Digest::finalize(self.0.clone());
+        u64::from_be_bytes(digest[..8].try_into().expect("sha256 is 32 bytes"))
+    }
+}
+
 /// The wasmtime engine, shared by every instance this daemon runs.
 ///
 /// Compilation artifacts are cached per engine, so there is one of these per process rather
@@ -250,6 +294,9 @@ impl Default for Budgets {
 pub struct Runtime {
     engine: wasmtime::Engine,
     budgets: Budgets,
+    /// Where compiled modules are kept between boots, if this runtime has a node around it
+    /// (DAEMON §4.3). `None` for `dev run-block` and the tests, which compile once and exit.
+    precompiled: Option<PathBuf>,
 }
 
 impl Runtime {
@@ -259,6 +306,19 @@ impl Runtime {
     /// §10. Narrower still is the *feature* set (workspace `Cargo.toml`): threads, the
     /// component model and GC are compiled out, so no configuration can turn them back on.
     pub fn new(budgets: Budgets) -> anyhow::Result<Runtime> {
+        Runtime::build(budgets, None)
+    }
+
+    /// A runtime that keeps its compiled modules in `precompiled` (DAEMON §4.3).
+    ///
+    /// A node's, as against [`new`](Runtime::new)'s: cold start is what the directory buys,
+    /// and a process that compiles one block and exits has no cold start to improve.
+    pub fn caching(budgets: Budgets, precompiled: PathBuf) -> anyhow::Result<Runtime> {
+        Runtime::build(budgets, Some(precompiled))
+    }
+
+    /// See [`new`](Runtime::new).
+    fn build(budgets: Budgets, precompiled: Option<PathBuf>) -> anyhow::Result<Runtime> {
         let mut config = Config::new();
         // Every proposal off, then exactly [`MVP`] back on — not a list of `wasm_*(false)`
         // calls. The difference is what happens to the proposal wasmtime enables by default
@@ -272,7 +332,11 @@ impl Runtime {
         config.epoch_interruption(true);
         let engine = wasmtime::Engine::new(&config)?;
         spawn_epoch_ticker(&engine)?;
-        Ok(Runtime { engine, budgets })
+        Ok(Runtime {
+            engine,
+            budgets,
+            precompiled,
+        })
     }
 
     /// What one property expression may consume on this node (EXPR §9, DAEMON §2.1).
@@ -296,8 +360,71 @@ impl Runtime {
     /// No guest code runs here. ABI §5.1 step 1 is *instantiation*, which is where module
     /// initialisation executes and where a budget therefore has to be armed; compilation is
     /// the host reading a file.
+    /// A cache hit skips cranelift entirely, which is what DAEMON §4.3 is for: on a Pi,
+    /// compiling a block costs more than everything else about starting it put together.
     pub fn compile(&self, wasm: &[u8]) -> anyhow::Result<Module> {
-        Ok(Module::new(&self.engine, wasm)?)
+        let Some(path) = self.artifact(wasm) else {
+            return Ok(Module::new(&self.engine, wasm)?);
+        };
+        if let Some(module) = self.load_artifact(&path) {
+            return Ok(module);
+        }
+
+        let module = Module::new(&self.engine, wasm)?;
+        // A cache that cannot be written is a slow node, not a broken one, so this is logged
+        // and not propagated — the module in hand is the same module either way (§4.3).
+        if let Err(error) = store_artifact(&path, &module) {
+            tracing::debug!(path = %path.display(), %error, "the compiled block was not cached");
+        }
+        Ok(module)
+    }
+
+    /// Where this engine keeps `wasm` compiled, if it keeps it anywhere (DAEMON §4.3).
+    fn artifact(&self, wasm: &[u8]) -> Option<PathBuf> {
+        let dir = self.precompiled.as_ref()?;
+        Some(dir.join(format!(
+            "{}.{}.cwasm",
+            crate::blocks::sha256_hex(wasm),
+            self.engine_key()
+        )))
+    }
+
+    /// A short hash of everything about this engine that changes what it compiles to.
+    ///
+    /// wasmtime's own compatibility hash, run through sha256 rather than through
+    /// [`DefaultHasher`](std::collections::hash_map::DefaultHasher): that one is explicitly
+    /// not stable between Rust releases, and a key that changed on a toolchain upgrade would
+    /// silently orphan every artifact on the node.
+    fn engine_key(&self) -> String {
+        let mut hasher = Sha256Hasher(<sha2::Sha256 as sha2::Digest>::new());
+        self.engine
+            .precompile_compatibility_hash()
+            .hash(&mut hasher);
+        String::from(&crate::blocks::hex(&sha2::Digest::finalize(hasher.0))[..16])
+    }
+
+    /// Loads a cached artifact, or answers `None` for every way that can fail.
+    ///
+    /// A `.cwasm` that will not load is a **miss**, never an error: it is derived, and a node
+    /// that refused to boot over a truncated cache file is a node any interrupted write can
+    /// take down (DAEMON §4.3).
+    fn load_artifact(&self, path: &Path) -> Option<Module> {
+        // SAFETY: DAEMON §4.3. The file is inside the node's own data directory and was
+        // written there by this daemon from bytes it had already verified (§4.1); wasmtime
+        // independently refuses an artifact produced by an incompatible engine build, and the
+        // filename pins the compilation configuration besides. A node whose data directory an
+        // untrusted party can write to has already lost — that directory holds the service
+        // files saying what to run.
+        let loaded = unsafe { Module::deserialize_file(&self.engine, path) };
+        match loaded {
+            Ok(module) => Some(module),
+            Err(error) => {
+                if path.exists() {
+                    tracing::debug!(path = %path.display(), %error, "recompiling: the cached artifact did not load");
+                }
+                None
+            }
+        }
     }
 
     /// Instantiates `module`, with `eio:core` linked but not yet implemented.
@@ -678,6 +805,8 @@ fn trap_of(error: wasmtime::Error) -> Trap {
 mod tests {
     use super::*;
 
+    use crate::scratch::scratch;
+
     #[test]
     fn core_fn_names_match_the_shared_tables() {
         let names: Vec<&str> = CoreFn::ALL.into_iter().map(CoreFn::name).collect();
@@ -708,6 +837,136 @@ mod tests {
     fn compile(runtime: &Runtime, wat: &str) -> anyhow::Result<()> {
         let wasm = wat::parse_str(wat).expect("the snippet assembles");
         runtime.compile(&wasm).map(drop)
+    }
+
+    /// The smallest module that compiles, for the artifact tests.
+    fn a_module() -> Vec<u8> {
+        wat::parse_str(r#"(module (func (export "f")))"#).expect("the snippet assembles")
+    }
+
+    #[test]
+    fn a_compiled_block_is_kept_under_its_content_and_engine() {
+        // DAEMON §4.3's key, both halves of it, read off the filename the compile wrote.
+        let dir = scratch("precompiled-key");
+        let runtime = Runtime::caching(Budgets::default(), dir.clone()).expect("an engine");
+        let wasm = a_module();
+
+        runtime.compile(&wasm).expect("a first compile");
+        let artifacts: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("the directory")
+            .map(|entry| entry.expect("an entry").path())
+            .collect();
+        assert_eq!(
+            artifacts.len(),
+            1,
+            "one artifact for one block: {artifacts:?}"
+        );
+        assert_eq!(
+            artifacts[0],
+            runtime.artifact(&wasm).expect("a caching runtime"),
+            "and it is where the next boot will look for it"
+        );
+        assert_eq!(
+            file_name(&artifacts[0]),
+            format!(
+                "{}.{}.cwasm",
+                crate::blocks::sha256_hex(&wasm),
+                runtime.engine_key()
+            )
+        );
+    }
+
+    #[test]
+    fn a_cached_artifact_is_read_rather_than_recompiled() {
+        // The hit itself, and it needs proving rather than asserting: a cache that was
+        // written and then silently ignored passes every "it still compiles" test there is.
+        // So one block's artifact is filed under *another* block's key, and the compile is
+        // asked for the second — if the answer has the first one's exports, the file was
+        // read, and nothing else explains it.
+        let dir = scratch("precompiled-hit");
+        let runtime = Runtime::caching(Budgets::default(), dir).expect("an engine");
+        let cached = wat::parse_str(r#"(module (func (export "cached")))"#).expect("assembles");
+        let asked = wat::parse_str(r#"(module (func (export "asked")))"#).expect("assembles");
+
+        runtime.compile(&cached).expect("a first compile");
+        std::fs::rename(
+            runtime.artifact(&cached).expect("a caching runtime"),
+            runtime.artifact(&asked).expect("a caching runtime"),
+        )
+        .expect("filing it under the other key");
+
+        let module = runtime.compile(&asked).expect("a compile");
+        let exports: Vec<String> = module
+            .exports()
+            .map(|export| String::from(export.name()))
+            .collect();
+        assert_eq!(exports, ["cached"], "the artifact was read, not the bytes");
+    }
+
+    #[test]
+    fn a_corrupt_artifact_is_a_miss_and_never_a_failure() {
+        // §4.3: the cache is derived, and a node that refused to boot over a truncated file
+        // is a node any interrupted write can take down.
+        let dir = scratch("precompiled-corrupt");
+        let runtime = Runtime::caching(Budgets::default(), dir).expect("an engine");
+        let wasm = a_module();
+        let artifact = runtime.artifact(&wasm).expect("a caching runtime");
+
+        std::fs::create_dir_all(artifact.parent().expect("the directory")).expect("the directory");
+        std::fs::write(&artifact, b"not a compiled module").expect("poisoning the artifact");
+        runtime.compile(&wasm).expect("a miss, not an error");
+        assert_ne!(
+            std::fs::read(&artifact).expect("the artifact"),
+            b"not a compiled module",
+            "and the miss rewrote it"
+        );
+    }
+
+    #[test]
+    fn an_engine_configured_differently_does_not_reuse_the_artifact() {
+        // The other half of §4.3's key. Two runtimes over one directory: the compiled form is
+        // not portable between engine configurations, so the filenames must differ before
+        // wasmtime is asked to tell them apart.
+        let dir = scratch("precompiled-engine-key");
+        let same = Runtime::caching(Budgets::default(), dir.clone()).expect("an engine");
+        assert_eq!(
+            same.engine_key(),
+            Runtime::caching(Budgets::default(), dir.clone())
+                .expect("an engine")
+                .engine_key(),
+            "the same configuration keys the same artifacts across processes"
+        );
+
+        let mut config = Config::new();
+        config.wasm_features(WasmFeatures::all(), false);
+        config.wasm_features(ACCEPTED, true);
+        config.consume_fuel(true);
+        config.epoch_interruption(true);
+        // One knob, and one that changes generated code rather than a name.
+        config.cranelift_opt_level(wasmtime::OptLevel::None);
+        let other = Runtime {
+            engine: wasmtime::Engine::new(&config).expect("an engine"),
+            budgets: Budgets::default(),
+            precompiled: Some(dir.clone()),
+        };
+        assert_ne!(same.engine_key(), other.engine_key());
+
+        let wasm = a_module();
+        same.compile(&wasm).expect("a compile");
+        other.compile(&wasm).expect("a compile");
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("the directory").count(),
+            2,
+            "one artifact each, not one overwritten twice"
+        );
+    }
+
+    #[test]
+    fn a_runtime_with_no_directory_writes_nothing() {
+        // `dev run-block` and every test above: no node, no second boot, nothing to cache.
+        let runtime = Runtime::new(Budgets::default()).expect("an engine");
+        assert_eq!(runtime.artifact(&a_module()), None);
+        runtime.compile(&a_module()).expect("a compile");
     }
 
     #[test]

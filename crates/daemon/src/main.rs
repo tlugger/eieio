@@ -4,10 +4,10 @@
 //! services in its data directory and stays up (DAEMON §2, §3). `dev run-block` is the other
 //! half — one block, no node around it, for whoever is writing the block (§12).
 //!
-//! What is missing is the management plane. The block manager pulls nothing yet, so a service
-//! resolves against a cache somebody else filled (§4, `blocks`); the API is parsed out of
-//! `node.toml` and bound by nothing (§9); and there is no supervision, so an instance that
-//! dies stays dead (§8). Each arrives with its own issue. What is already load-bearing is the
+//! What is missing is the management plane. The API is parsed out of `node.toml` and bound by
+//! nothing (§9), and there is no supervision, so an instance that dies stays dead (§8). Each
+//! arrives with its own issue. The block manager is here in both halves — a service resolves
+//! against the cache and pulls what is not in it (§4, `blocks` and `registry`). What is already load-bearing is the
 //! split this crate sits on top of — every ABI rule it obeys is obeyed inside
 //! `eio_host_core`, so the leaf runtime will obey the same one (DAEMON §1).
 //!
@@ -27,6 +27,7 @@ mod executor;
 mod instance;
 mod json_batch;
 mod node;
+mod registry;
 mod router;
 mod run;
 
@@ -245,7 +246,8 @@ async fn run_node(data_dir: &std::path::Path) -> anyhow::Result<()> {
         "node"
     );
 
-    let executor = executor::Executor::new(node.budgets, node.mailbox)?;
+    let executor =
+        executor::Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())?;
     let services = boot::boot(&node, &executor).await;
     let counts = services.counts();
     tracing::info!(

@@ -98,7 +98,9 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
   services/
     <name>.toml                one service definition per file
   blocks/                      OCI pull cache: <name>/<version>/block.wasm
-                               (+ precompiled wasmtime artifact, keyed by engine hash)
+  precompiled/                 <sha256>.<engine>.cwasm — a compiled block, for
+                               those bytes on this engine (§4.3). Derived; safe
+                               to delete
   state/                       eio:state backing store
 ```
 
@@ -136,6 +138,10 @@ max_value_bytes = 262144
 
 [executor]
 mailbox = 64                     # Work items one instance's mailbox holds (§5)
+
+[blocks]                         # Pull policy (§4)
+require_signed = false           # Refuse an artifact this node cannot verify a signature for
+key = "auth/cosign.pub"          # The public key it is verified against; relative to the data dir
 ```
 
 **Unknown fields MUST be rejected**, at every level, for the reason ABI §11.1 and SERVICE §3 both give: a typo'd knob that silently meant nothing is a node running on a default the operator believes they changed.
@@ -149,6 +155,8 @@ mailbox = 64                     # Work items one instance's mailbox holds (§5)
 **Budgets configured here are the ones that run**, both of them: ABI §10's fuel and deadline bound a guest entry, and EXPR §9's bound each property expression the host evaluates for that guest (ABI §7.1). Neither has an ABI floor (SCOPE §3.4), which is why they are stated in a file rather than compiled in — and why a host with no `node.toml` still has to state them, which is what the defaults above are.
 
 A budget below one of EXPR §9's floors is **raised** to it rather than refused, because a floor is what a conforming expression is entitled to rely on and a host that would not boot over a number the spec is willing to choose for it helps nobody. An operator who writes `max_fuel = 1` gets the floor, and a block written against §9 keeps working.
+
+**`require_signed` defaults to false, and the default is not a recommendation.** It is what a node that has never been given a key can do: signature verification here is key-based (§4), so a node with `require_signed = true` and no key at `[blocks] key` refuses every pull, and defaulting a fresh node into that would make a first boot a configuration error. An operator who puts a key in `auth/` flips one line. The key is a *path* rather than the key itself for the same reason `listen` is an address and not a socket — it is material, it belongs in `auth/`, and a relative path is resolved against the data directory so a node's configuration stays movable with it.
 
 The CBOR decode bound that travels with them is deliberately **not** a knob. EXPR §9 rule 9 makes it a constraint rather than a preference — the decode depth MUST be at least the expression depth, or an expression could construct a value the boundary then refuses to encode — so it is derived from `[budgets.expr] max_depth` and raised to meet it. An operator who could set the two independently could set them into that contradiction, and a file that can express an invalid host is a file a host has to validate rather than read.
 
@@ -166,7 +174,7 @@ A service that parses and validates but is not marked `autostart` is **loaded an
 
 ## 4. Block manager
 
-- Pulls OCI artifacts (SCOPE §3.6) by reference; verifies digest; **PROPOSED:** verifies cosign signature when the registry entry carries one, policy knob in `node.toml` (`require_signed = true|false`).
+- Pulls OCI artifacts (SCOPE §3.6) by reference; verifies digest; verifies a cosign signature when the registry entry carries one, policy knob in `node.toml` (`require_signed = true|false`, §2.1).
 - Load-time validation is exactly ABI §4: exports present, imports ⊆ `eio:*`, imports ⊆ manifest capabilities, ABI version accepted, embedded manifest (if present) matches registry manifest.
 - Caches wasmtime-precompiled modules keyed by (digest, engine config hash) — cold-start matters on a Pi.
 - Airgap/offline: cache is authoritative when the registry is unreachable; a service whose blocks are cached starts fine offline.
@@ -179,9 +187,43 @@ reference = [ registry "/" ] [ namespace "/" ]... name ":" version
 
 `name` is the last `/`-separated component before the tag and `version` is the tag, so `filter:1.2.0` and `ghcr.io/tlugger/filter:1.2.0` name the same cache entry. The registry and namespace are where a *pull* goes (that half of this section) and say nothing about where a pulled block sits, which is what lets a node resolve a service offline against a cache filled from anywhere.
 
-**The tag is REQUIRED.** A reference without one is refused rather than defaulted to `latest`: the cache is keyed by version, and a service pinned to a moving tag would resolve to whatever was pulled last — reproducibility being the thing SCOPE §3.6 versions blocks for. **Digest-pinned references** (`name@sha256:…`) are refused with a distinct error today; resolving one is this section's pull half, since a digest names an artifact and not a cache path.
+**The tag is REQUIRED.** A reference without one is refused rather than defaulted to `latest`: the cache is keyed by version, and a service pinned to a moving tag would resolve to whatever was pulled last — reproducibility being the thing SCOPE §3.6 versions blocks for. **Digest-pinned references** (`name@sha256:…`) are refused with a distinct error, and remain refused after the pull half below: a digest names an artifact and not a version, so admitting one means deciding what directory it caches into, which is a change to §2's layout rather than an addition to this client.
 
 Resolution is therefore two halves with one seam. The **read** half — reference to cache entry to bytes, and every way that fails — is what boot (§3) needs and is what makes the airgap claim above true. The **pull** half — the registry client, digest verification, signature policy and the precompiled artifact — fills the cache and is where a reference's registry and namespace are finally used.
+
+### 4.1 The pull
+
+**The cache is consulted first, always.** A pull happens on a cache *miss* and never on a hit, which is the whole of the airgap claim: a node whose blocks are cached makes no request, so it cannot be delayed or refused by a registry that is not there. The consequence is that a tag is immutable to a node once pulled — re-pulling one is an explicit operation (§9), not something a boot does behind an operator's back.
+
+**A reference without a registry component cannot be pulled.** `filter:1.2.0` names a cache entry (above) and no host; on a miss it is an error naming the entry, not a request to a guessed registry. There is no implicit `docker.io`, for the reason there is no implicit `latest`. The first `/`-separated component of a reference is its registry when it contains a `.` or a `:`, or is exactly `localhost` — OCI's rule, and the one that makes `tlugger/filter:1.2.0` a namespace rather than a host. The repository is everything between the registry and the tag.
+
+**Scheme: HTTPS, except a loopback registry.** `localhost`, `127.0.0.1` and `[::1]` are reached over HTTP; every other host is HTTPS and a node MUST NOT downgrade. The exception is not a convenience knob — it is the case where there is no network to be on, and it is what lets a registry that exists only for a test be one.
+
+**What is fetched, in order.** `GET /v2/<repository>/manifests/<tag>`; on `401`, the `WWW-Authenticate: Bearer realm=…,service=…,scope=…` challenge is answered at `realm` and the request retried once with the token it returns. The **manifest** MUST be an OCI image manifest (`application/vnd.oci.image.manifest.v1+json`) or its Docker v2 equivalent; an image *index* is refused rather than resolved, because a WASM block is architecture-independent and an index would mean choosing between artifacts that should not differ. Exactly one layer MUST carry the media type `application/wasm`, and that layer's blob is the block. `GET /v2/<repository>/blobs/<digest>` fetches it.
+
+**Digest verification is unconditional.** The layer's `digest` is recomputed over the received bytes and MUST match; the layer's `size` MUST match too, and is also what bounds the read, so a registry cannot answer a small blob with an unbounded stream. Only `sha256` is accepted. This is the verification that makes the rest of the section meaningful: everything below is about *which* artifact, and this is about whether these are its bytes.
+
+**Anonymous pull only.** v1 talks to registries that serve a public repository — including those that answer `401` and mint an anonymous token for one, which is what `ghcr.io` and `docker.io` do. A registry that demands credentials is refused with an error that says so rather than one that says "not found", because the two are different things for an operator to do about. Credentialed access to private registries is §13's expansion item and is tracked as its own work; when it lands, where the credentials live is a decision about the data directory (SCOPE §3.8) and not about this client.
+
+### 4.2 Signatures
+
+Verification is **key-based**: the node holds a public key (`[blocks] key`, §2.1) and verifies a cosign signature made with the matching private key. Keyless (Fulcio/Rekor) verification is deliberately not the v1 posture, and the reason is this section's own airgap rule — keyless verification consults a transparency log *at verify time*, so a node that required it could not verify what it had already cached on a network that is not there. A key is a file, and a file works offline.
+
+A signature is fetched at the tag cosign writes it to: `sha256-<hex>.sig`, where `<hex>` is the digest of the *image manifest* — so a node that has just pulled a manifest knows where to look without asking. That artifact's layer carries media type `application/vnd.dev.cosign.simplesigning.v1+json`; its blob is the signed payload, and the base64 signature is the layer annotation `dev.cosignproject.cosign/signature`. Verification is three checks, all of which MUST pass: the payload's digest matches the layer's, the signature verifies over the payload bytes under the node's key (ECDSA P-256 over SHA-256), and the payload's `critical.image.docker-manifest-digest` equals the manifest digest actually pulled. The third is the one that makes the other two mean anything — without it a valid signature over *some* artifact would authenticate *this* one.
+
+`require_signed = false` (the default) means an unsigned artifact is accepted and a *present* signature that does not verify is still a refusal: a bad signature is evidence, and ignoring it because the policy did not demand one would make the knob a decision about whether to look rather than about what to accept. `require_signed = true` additionally refuses an artifact with no signature, and refuses a pull outright when the node has no key to check one against.
+
+### 4.3 The precompiled artifact
+
+Compiling a block on a Pi costs more than loading it, so a node keeps wasmtime's compiled form: `precompiled/<sha256>.<engine>.cwasm`, where `<sha256>` is the digest of the module's bytes and `<engine>` is a hash of the engine's compilation configuration.
+
+Both halves of that key are load-bearing, and the digest is the module's *content* hash rather than a digest recorded from the pull. They are the same number for a pulled block — an OCI blob digest is the sha256 of the blob — but the content hash also keys a cache entry a human put there by hand, which a recorded pull digest could not, and it cannot go stale against the bytes it was compiled from. A `.cwasm` is therefore never invalidated: bytes that differ name a different file, and the old one is garbage rather than a hazard.
+
+**Its own directory, and not `blocks/<name>/<version>/`.** Nothing in that key is a name or a version — two references that resolved to identical bytes are one compilation, and filing the artifact under one of them would hide that from the other. `blocks/` stays exactly what §4's read half resolves against, and `precompiled/` holds only derived files, which is what makes "delete it and lose nothing but a cold start" a true statement about a directory rather than about scattered files somebody has to identify first.
+
+An artifact that fails to load is **not** an error. It is treated as a miss, the module is compiled, and the artifact is rewritten — the cache is an optimisation and a node that refused to boot over one is a node a corrupt file can take down. Writes are atomic (write a temporary, rename into place) so that a daemon killed mid-write leaves either the old artifact or none.
+
+Loading one is the daemon's only `unsafe`, and the trust boundary is what justifies it: the file lives inside the node's own data directory, was written by this daemon from bytes it had already verified, and wasmtime independently refuses an artifact produced by an incompatible engine build. A node whose data directory is writable by an untrusted party has already lost — that directory holds the service files that say what to run.
 
 ## 5. Executor
 
@@ -370,4 +412,4 @@ NaN and infinity need no rule here: a literal that overflows `binary64` is refus
 
 ## 13. Expansion list (for the in-depth pass)
 
-Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), OCI auth for private registries, tap sampling strategy, mailbox sizing defaults, API error model, multi-arch AOT artifact selection.
+Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), OCI auth for private registries (§4.1 states the anonymous-only v1 posture this replaces), tap sampling strategy, mailbox sizing defaults, API error model, multi-arch AOT artifact selection.

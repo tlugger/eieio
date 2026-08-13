@@ -38,6 +38,7 @@ use crate::blocks::{Cache, Unresolvable};
 use crate::executor::Executor;
 use crate::instance::{InstanceSpec, refuse_unimplemented_capabilities};
 use crate::node::Node;
+use crate::registry::{PullError, Registry};
 use crate::router::Service;
 
 /// Why a service is not running (DAEMON §3).
@@ -68,6 +69,20 @@ pub enum Failure {
         reference: String,
         /// Which way it failed.
         reason: Unresolvable,
+    },
+    /// A block was not cached, and pulling it did not work either (DAEMON §4.1).
+    ///
+    /// Its own class rather than a kind of [`Unresolvable`](Failure::Unresolvable), because
+    /// the two are opposite instructions: an unresolved reference says put a block here, and
+    /// this says why the node could not fetch one — a network, a policy, or a digest that did
+    /// not match.
+    Unpullable {
+        /// The instance whose `block` it was.
+        id: String,
+        /// The reference, as the file wrote it.
+        reference: String,
+        /// Which way the pull failed.
+        reason: PullError,
     },
     /// A cached block is not loadable (ABI §4).
     Unloadable {
@@ -102,6 +117,11 @@ impl std::fmt::Display for Failure {
                  stem must equal its name"
             ),
             Failure::Unresolvable {
+                id,
+                reference,
+                reason,
+            } => write!(f, "block `{reference}` of instance {id}: {reason}"),
+            Failure::Unpullable {
                 id,
                 reference,
                 reason,
@@ -229,9 +249,12 @@ pub struct Counts {
 /// management API is how something gets deployed to it.
 pub async fn boot(node: &Node, executor: &Executor) -> Services {
     let directory = node.layout().services();
+    // One client for the whole boot, not one per service: a registry is a connection pool and
+    // a TLS configuration, and a node whose blocks are all cached builds it and never uses it.
+    let registry = Registry::new(node.signing.clone());
     let mut services = Services::default();
     for (stem, path) in service_files(&directory) {
-        let state = load(node, executor, &path, &stem).await;
+        let state = load(node, &registry, executor, &path, &stem).await;
         match &state {
             State::Errored(failure) => {
                 tracing::error!(service = %stem, %failure, "this service is not running")
@@ -274,7 +297,13 @@ fn service_files(directory: &Path) -> Vec<(String, std::path::PathBuf)> {
 }
 
 /// One service file, from bytes on disk to a [`State`] (DAEMON §3 step 2).
-async fn load(node: &Node, executor: &Executor, path: &Path, stem: &str) -> State {
+async fn load(
+    node: &Node,
+    registry: &Registry,
+    executor: &Executor,
+    path: &Path,
+    stem: &str,
+) -> State {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => return State::Errored(Failure::Unreadable(error.to_string())),
@@ -290,7 +319,7 @@ async fn load(node: &Node, executor: &Executor, path: &Path, stem: &str) -> Stat
         });
     }
 
-    let blocks = match resolve(node, &parsed) {
+    let blocks = match resolve(node, registry, &parsed) {
         Ok(blocks) => blocks,
         Err(failure) => return State::Errored(failure),
     };
@@ -366,11 +395,52 @@ impl Resolved {
     }
 }
 
+/// The block at `path`, from the cache if it is there and from the registry if it is not.
+///
+/// The order is the airgap rule (DAEMON §4.1): the cache is consulted first, always, so a node
+/// whose blocks are cached issues no request and cannot be delayed or refused by a registry
+/// that is not there. Only a miss reaches the network, and a miss that cannot be filled — no
+/// registry in the reference, no network, a digest that did not match — is the same refusal a
+/// miss has always been, said more precisely.
+fn fetch(
+    cache: &Cache,
+    registry: &Registry,
+    path: &std::path::Path,
+    id: &str,
+    reference: &str,
+) -> Result<Vec<u8>, Failure> {
+    let unresolvable = |reason| Failure::Unresolvable {
+        id: String::from(id),
+        reference: String::from(reference),
+        reason,
+    };
+    match cache.read_at(path) {
+        Ok(wasm) => Ok(wasm),
+        Err(missing @ Unresolvable::Missing { .. }) => match registry.pull(reference) {
+            Ok(wasm) => cache.store(path, wasm).map_err(unresolvable),
+            // A reference that names no registry is not a failed pull, it is the miss it
+            // always was: §4.1 answers one with the entry it looked in, so that the operator
+            // is told where to put a block rather than which host was not consulted.
+            Err(PullError::Unregistered) => Err(unresolvable(missing)),
+            Err(reason) => Err(Failure::Unpullable {
+                id: String::from(id),
+                reference: String::from(reference),
+                reason,
+            }),
+        },
+        Err(other) => Err(unresolvable(other)),
+    }
+}
+
 /// Resolves and validates every block a service names, or says which one stopped it.
 ///
 /// Runs before SERVICE §7 stage 2 because stage 2 takes the manifests as its input: what a
 /// port or a property is called is the *block's* answer, not the file's.
-fn resolve(node: &Node, parsed: &eio_service::Parsed) -> Result<Resolved, Failure> {
+fn resolve(
+    node: &Node,
+    registry: &Registry,
+    parsed: &eio_service::Parsed,
+) -> Result<Resolved, Failure> {
     let cache = Cache::new(node.layout().blocks());
     let mut resolved = Resolved::default();
     let mut entries: BTreeMap<std::path::PathBuf, usize> = BTreeMap::new();
@@ -388,7 +458,7 @@ fn resolve(node: &Node, parsed: &eio_service::Parsed) -> Result<Resolved, Failur
         let index = match entries.get(&path) {
             Some(index) => *index,
             None => {
-                let wasm = cache.read_at(&path).map_err(unresolvable)?;
+                let wasm = fetch(&cache, registry, &path, id, &instance.block)?;
                 let manifest =
                     eio_manifest::validate(&wasm, None).map_err(|error| Failure::Unloadable {
                         id: id.clone(),
@@ -422,6 +492,7 @@ mod tests {
 
     use std::path::PathBuf;
 
+    use crate::registry::fake::Fake;
     use crate::scratch::scratch;
 
     /// A provisioned data directory with ABI §13.2's golden transform in its block cache.
@@ -522,7 +593,8 @@ mod tests {
             &std::fs::read_to_string(root.join("services/alpha.toml")).expect("readable"),
         )
         .expect("valid");
-        let resolved = resolve(&node, &parsed).expect("both references resolve");
+        let resolved = resolve(&node, &Registry::new(node.signing.clone()), &parsed)
+            .expect("both references resolve");
         assert_eq!(
             resolved.entries.len(),
             1,
@@ -626,6 +698,83 @@ mod tests {
             failure(&services, "unwireable"),
             Failure::Unwireable(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_warm_cache_boots_with_no_registry_in_sight() {
+        // DAEMON §4.1's airgap rule, stated as the thing it protects: the reference names a
+        // registry that is not listening, and the service comes up anyway, because a hit
+        // never reaches the network. Everything else in this module already relies on this;
+        // this is the one test that makes the registry's absence *deliberate*.
+        let root = data_dir("boot-warm-offline");
+        let dead = format!("127.0.0.1:{}/transform:1.0.0", Fake::dead_port());
+        service(
+            &root,
+            "alpha.toml",
+            &one_transform("alpha").replace("transform:1.0.0", &dead),
+        );
+
+        let services = boot_dir(&root).await;
+        assert_eq!(services.counts().running, 1, "{:?}", services.get("alpha"));
+    }
+
+    #[tokio::test]
+    async fn a_cold_cache_and_no_registry_is_a_structured_error() {
+        // The other side of the same rule. Not a sentence: DAEMON §3 requires a caller to
+        // tell boot's failure classes apart without matching on a message, and "the network
+        // did not answer" is what the Designer paints on the block (DESIGNER §5).
+        let root = data_dir("boot-cold-offline");
+        let dead = format!("127.0.0.1:{}/absent:1.0.0", Fake::dead_port());
+        service(
+            &root,
+            "alpha.toml",
+            &one_transform("alpha").replace("transform:1.0.0", &dead),
+        );
+
+        let services = boot_dir(&root).await;
+        assert!(
+            matches!(
+                failure(&services, "alpha"),
+                Failure::Unpullable {
+                    reason: PullError::Unreachable { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            failure(&services, "alpha")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_miss_is_pulled_and_the_cache_keeps_it() {
+        // The seam of DAEMON §4: a miss is a pull, and what the pull leaves behind is what
+        // the *next* boot resolves offline. Both halves asserted, because the second is the
+        // airgap claim and a pull that did not write would still pass the first.
+        let root = data_dir("boot-pull");
+        let fake = Fake::start();
+        fake.publish(
+            "golden",
+            "1.0.0",
+            &std::fs::read(eio_conformance::golden::build().join("transform.wasm"))
+                .expect("the golden blocks are built"),
+        );
+        let reference = fake.reference("golden", "1.0.0");
+        service(
+            &root,
+            "alpha.toml",
+            &one_transform("alpha").replace("transform:1.0.0", &reference),
+        );
+
+        let services = boot_dir(&root).await;
+        assert_eq!(services.counts().running, 1, "{:?}", services.get("alpha"));
+        assert!(
+            root.join("blocks")
+                .join("golden")
+                .join("1.0.0")
+                .join("block.wasm")
+                .exists(),
+            "the pull filled the cache entry the reference names"
+        );
     }
 
     #[tokio::test]

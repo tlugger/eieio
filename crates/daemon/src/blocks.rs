@@ -9,10 +9,10 @@
 //! §4 is one section describing two things that fail differently. **Reading** the cache is
 //! what boot needs (§3) and is what makes the airgap claim true: a node whose blocks are
 //! cached starts offline, because nothing in resolving a cached block consults a registry.
-//! **Pulling** — the registry client, digest verification, signature policy, and the
-//! precompiled artifact keyed by engine hash — fills the cache and is eieio-8yq.3's. The seam
-//! is [`Cache::read_at`]: a miss is an error today and a pull tomorrow, and nothing above this
-//! module learns which it was.
+//! **Pulling** — the registry client, digest verification and signature policy — fills the
+//! cache and is [`registry`](crate::registry)'s. The seam is [`Cache::read_at`]: a miss is a
+//! pull, and a pull that does not happen (no registry in the reference) or does not succeed
+//! is the same refusal a miss always was.
 //!
 //! # A reference is untrusted text
 //!
@@ -36,7 +36,7 @@ const MODULE: &str = "block.wasm";
 pub enum Unresolvable {
     /// The reference carries no tag, so it names no cache entry (DAEMON §4).
     Untagged,
-    /// The reference is digest-pinned. Resolving one is the pull half's (eieio-8yq.3).
+    /// The reference is digest-pinned, which names an artifact and not a version (DAEMON §4).
     Digest,
     /// The reference is empty, or its name or version is not a single path component.
     Malformed,
@@ -48,6 +48,13 @@ pub enum Unresolvable {
     /// Something is cached there and could not be read.
     Unreadable {
         /// Where it is.
+        path: PathBuf,
+        /// What the filesystem said.
+        error: String,
+    },
+    /// The block was pulled and could not be written to the cache.
+    Unstorable {
+        /// Where it was going.
         path: PathBuf,
         /// What the filesystem said.
         error: String,
@@ -69,6 +76,9 @@ impl std::fmt::Display for Unresolvable {
             }
             Unresolvable::Unreadable { path, error } => {
                 write!(f, "reading {}: {error}", path.display())
+            }
+            Unresolvable::Unstorable { path, error } => {
+                write!(f, "writing {}: {error}", path.display())
             }
         }
     }
@@ -115,6 +125,25 @@ impl Cache {
         }
     }
 
+    /// Fills the entry at `path` with `wasm`, and answers it back.
+    ///
+    /// Written temporary-then-rename so that a boot interrupted mid-write leaves no entry
+    /// rather than a truncated one — a half-written `block.wasm` would be a cache hit, and
+    /// the airgap claim is that a hit needs no registry to check it against.
+    pub fn store(&self, path: &Path, wasm: Vec<u8>) -> Result<Vec<u8>, Unresolvable> {
+        let unstorable = |error: std::io::Error| Unresolvable::Unstorable {
+            path: path.to_path_buf(),
+            error: error.to_string(),
+        };
+        let dir = path.parent().unwrap_or(&self.root);
+        std::fs::create_dir_all(dir).map_err(unstorable)?;
+
+        let staging = dir.join(format!(".{}.block.wasm.tmp", std::process::id()));
+        std::fs::write(&staging, &wasm).map_err(unstorable)?;
+        std::fs::rename(&staging, path).map_err(unstorable)?;
+        Ok(wasm)
+    }
+
     /// Where `reference`'s module sits, whether or not it is there.
     ///
     /// Two references naming one entry — `filter:1.2.0` and `ghcr.io/anyone/filter:1.2.0` —
@@ -124,6 +153,26 @@ impl Cache {
         let entry = parse(reference)?;
         Ok(self.root.join(entry.name).join(entry.version).join(MODULE))
     }
+}
+
+/// The sha256 of `bytes`, in hex.
+///
+/// What identifies block content everywhere it is identified by content: an OCI blob digest
+/// (DAEMON §4.1) and a precompiled artifact's key (§4.3) are this same number, which is why
+/// the pull does not have to record one for the compiler to use.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&<sha2::Sha256 as sha2::Digest>::digest(bytes))
+}
+
+/// Lowercase hex, as a digest is written.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut text = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(text, "{byte:02x}");
+    }
+    text
 }
 
 /// Splits a reference into the name and version that key its cache entry (DAEMON §4).
@@ -139,16 +188,13 @@ fn parse(reference: &str) -> Result<Entry, Unresolvable> {
         return Err(Unresolvable::Digest);
     }
 
-    // The last `:`, but only if it is in the last path component — `localhost:5000/filter`
-    // has a colon in its *registry*, and reading that as a tag would name a block called
-    // `localhost` at version `5000/filter`. OCI's rule, for OCI's reason.
-    let path_start = reference.rfind('/').map_or(0, |slash| slash + 1);
-    let Some(colon) = reference[path_start..].rfind(':').map(|at| path_start + at) else {
+    let Some((path, version)) = split_tag(reference) else {
         return Err(Unresolvable::Untagged);
     };
 
-    let name = &reference[path_start..colon];
-    let version = &reference[colon + 1..];
+    // The name is the last component of what is left; everything before it is the registry
+    // and namespace, which say where a *pull* goes and nothing about where a block sits.
+    let name = path.rsplit('/').next().unwrap_or(path);
     if !is_component(name) || !is_component(version) {
         return Err(Unresolvable::Malformed);
     }
@@ -156,6 +202,28 @@ fn parse(reference: &str) -> Result<Entry, Unresolvable> {
         name: String::from(name),
         version: String::from(version),
     })
+}
+
+/// Splits a reference at its tag: everything before the `:`, and the tag itself.
+///
+/// The last `:`, but only if it is in the last path component — `localhost:5000/filter` has a
+/// colon in its *registry*, and reading that as a tag would name a block called `localhost` at
+/// version `5000/filter`. OCI's rule, for OCI's reason.
+///
+/// Shared with [`registry`](crate::registry), which needs the same split read the other way
+/// round — the part before the tag is a repository to it and a name to this module (DAEMON
+/// §4). One rule, stated once, because a reference that split differently on the two sides
+/// would pull one block and cache it as another.
+pub fn split_tag(reference: &str) -> Option<(&str, &str)> {
+    let path_start = reference.rfind('/').map_or(0, |slash| slash + 1);
+    let colon = reference[path_start..]
+        .rfind(':')
+        .map(|at| path_start + at)?;
+    let tag = &reference[colon + 1..];
+    match tag.is_empty() {
+        true => None,
+        false => Some((&reference[..colon], tag)),
+    }
 }
 
 /// Whether `text` is one ordinary path component, safe to join onto the cache root.

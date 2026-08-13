@@ -37,6 +37,7 @@ use eio_host_core::{ExprBudgets, Limits};
 use serde::Deserialize;
 
 use crate::engine::Budgets;
+use crate::registry::Signing;
 
 /// The default management API address (DAEMON §2.1, §9).
 ///
@@ -61,6 +62,13 @@ pub const DEFAULT_MAILBOX: usize = 64;
 
 /// How many random bytes a node id is minted from. Hex-encoded, so the id is twice this long.
 const ID_BYTES: usize = 8;
+
+/// Where a node looks for the key it verifies signatures with (DAEMON §2.1, §4.2).
+///
+/// Inside `auth/`, which is created owner-only, though a public key is not secret: what makes
+/// it the right directory is that it is the node's key material, and an operator restoring a
+/// node from a backup should not have to be told it lives somewhere else.
+const DEFAULT_KEY: &str = "auth/cosign.pub";
 
 /// The `node.toml` a fresh node is provisioned with (DAEMON §2.1).
 ///
@@ -113,6 +121,15 @@ max_value_bytes = 262144
 # How many work items one block instance's mailbox holds before its senders feel it
 # (DAEMON §5). A depth of one is legal and means every sender waits for the previous item.
 mailbox = 64
+
+[blocks]
+# Whether a block this node cannot verify a signature for may run (DAEMON §4.2). A
+# present signature is checked either way -- this decides what is acceptable, not
+# whether to look. Turning it on without a key at the path below refuses every pull.
+require_signed = false
+# The public key signatures are verified against: PEM, as `cosign public-key` writes
+# it. Relative paths are resolved against this data directory.
+key = \"auth/cosign.pub\"
 ";
 
 /// A node: its identity, its budgets, and where its files are (DAEMON §2).
@@ -134,6 +151,8 @@ pub struct Node {
     pub budgets: Budgets,
     /// The depth of every instance's mailbox (DAEMON §5).
     pub mailbox: usize,
+    /// What this node will accept a block on the strength of (DAEMON §4.2).
+    pub signing: Signing,
     /// The data directory this node was opened on.
     root: PathBuf,
 }
@@ -148,7 +167,12 @@ impl Node {
         std::fs::create_dir_all(root)
             .with_context(|| format!("creating the data directory {}", root.display()))?;
         let layout = Layout { root };
-        for path in [layout.services(), layout.blocks(), layout.state()] {
+        for path in [
+            layout.services(),
+            layout.blocks(),
+            layout.precompiled(),
+            layout.state(),
+        ] {
             std::fs::create_dir_all(&path)
                 .with_context(|| format!("creating {}", path.display()))?;
         }
@@ -200,6 +224,14 @@ impl Layout<'_> {
     /// `blocks/`: the pull cache, `<name>/<version>/block.wasm` (DAEMON §4).
     pub fn blocks(&self) -> PathBuf {
         self.root.join("blocks")
+    }
+
+    /// `precompiled/`: compiled blocks, keyed by content and engine (DAEMON §4.3).
+    ///
+    /// Derived, and deleting it costs nothing but a cold start — which is why it is a
+    /// directory of its own rather than files scattered through `blocks/`.
+    pub fn precompiled(&self) -> PathBuf {
+        self.root.join("precompiled")
     }
 
     /// `state/`: what backs `eio:state` (DAEMON §10, ABI §7.2).
@@ -262,6 +294,8 @@ struct File {
     budgets: BudgetsSection,
     #[serde(default)]
     executor: ExecutorSection,
+    #[serde(default)]
+    blocks: BlocksSection,
 }
 
 impl File {
@@ -298,6 +332,7 @@ impl File {
                 expr: ExprBudgets::new(eval, eio_signal::MAX_DEPTH),
             },
             mailbox: self.executor.mailbox,
+            signing: self.blocks.signing(&root)?,
             root,
         })
     }
@@ -406,6 +441,59 @@ impl Default for ExecutorSection {
     }
 }
 
+/// `[blocks]` (DAEMON §4.2).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct BlocksSection {
+    require_signed: bool,
+    key: String,
+}
+
+impl Default for BlocksSection {
+    fn default() -> BlocksSection {
+        BlocksSection {
+            // Not a recommendation — what a node that has never been given a key can do.
+            // Defaulting a fresh node into refusing every pull would make a first boot a
+            // configuration error (DAEMON §2.1).
+            require_signed: false,
+            key: String::from(DEFAULT_KEY),
+        }
+    }
+}
+
+impl BlocksSection {
+    /// Reads the key, if there is one where this says (DAEMON §2.1, §4.2).
+    ///
+    /// An absent key is not an error even under `require_signed`: the refusal belongs to the
+    /// pull, which is where an operator finds out what it was they could not verify. A key
+    /// that is *there* and is not a key is an error at load, because it is a file the
+    /// configuration deliberately points at and there is nothing else it could have meant.
+    fn signing(self, root: &Path) -> anyhow::Result<Signing> {
+        use p256::pkcs8::DecodePublicKey as _;
+
+        let path = root.join(&self.key);
+        let key = match std::fs::read_to_string(&path) {
+            Ok(pem) => Some(
+                p256::ecdsa::VerifyingKey::from_public_key_pem(&pem).map_err(|error| {
+                    anyhow::anyhow!(
+                        "`[blocks] key` points at {}, which is not a PEM public key: {error}",
+                        path.display()
+                    )
+                })?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", path.display()));
+            }
+        };
+        Ok(Signing {
+            require_signed: self.require_signed,
+            key,
+            key_path: path.display().to_string(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +573,46 @@ mod tests {
         assert_eq!(node.budgets.expr.eval().max_range, 1300);
         assert_eq!(node.budgets.expr.eval().max_value_bytes, 14000);
         assert_eq!(node.mailbox, 3);
+    }
+
+    #[test]
+    fn the_signing_policy_is_the_files_and_the_key_is_a_file() {
+        // DAEMON §2.1, §4.2. Three states, and all three are reachable from a `node.toml`:
+        // no key, a key, and a key that is not one.
+        let root = scratch("node-signing");
+        let key = root.join("auth").join("cosign.pub");
+        std::fs::create_dir_all(key.parent().expect("auth/")).expect("auth/");
+
+        let opened = |text: &str| {
+            std::fs::write(root.join("node.toml"), text).expect("a node.toml");
+            Node::open(&root)
+        };
+
+        let node = opened("id = \"n1\"").expect("a node with no key").signing;
+        assert!(!node.require_signed, "the default is not to require one");
+        assert!(node.key.is_none(), "and there is no key to require it with");
+        assert!(
+            node.key_path.ends_with("auth/cosign.pub"),
+            "the default path is still reported, so a refusal can name it: {}",
+            node.key_path
+        );
+
+        std::fs::write(&key, crate::registry::fake::KEY.pem()).expect("a public key");
+        let node = opened("id = \"n1\"\n[blocks]\nrequire_signed = true")
+            .expect("a node with a key")
+            .signing;
+        assert!(node.require_signed);
+        assert_eq!(node.key, Some(crate::registry::fake::KEY.verifying()));
+
+        std::fs::write(
+            &key,
+            "-----BEGIN PUBLIC KEY-----\nnope\n-----END PUBLIC KEY-----\n",
+        )
+        .expect("something that is not one");
+        assert!(
+            opened("id = \"n1\"").is_err(),
+            "a file the configuration points at and that is not a key is an error at load"
+        );
     }
 
     #[test]

@@ -150,6 +150,40 @@ getrandom = "0.4"
 # well be too rather than converting at every boundary.
 anyhow = "1.0"
 
+# ── the block manager's dependencies (DAEMON §4) ─────────────────────────────
+#
+# The registry client is written here rather than taken from `oci-client`, and the
+# measurement is the reason: against the daemon's 118-crate tree, `oci-client` with
+# `rustls-tls` adds 107 crates including `aws-lc-sys` and `cmake`, and the daemon
+# cross-compiles for arm in a release pipeline (`just release-daemon`) that has no C
+# toolchain to build either with. The four below add 35, all pure Rust over `ring`.
+# What they buy is four requests and a signature check (§4.1, §4.2) — a small enough
+# surface that owning it costs less than the tree does.
+
+# HTTP for the pull. Blocking on purpose: it is called from boot, which is sequential
+# and runs before any service does, and a blocking client is one that cannot be
+# accidentally awaited on the reactor by the management API later (§4.1).
+#
+# `default-features = false` drops the cookie jar, gzip, charset transcoding and
+# `native-tls`; what is left is `rustls` over `ring`, which is the only reason this
+# is 35 crates and not 107.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+
+# Digest verification (§4.1) and the precompiled artifact's key (§4.3). `sha256` and
+# nothing else: an OCI digest algorithm this node does not accept is refused, not
+# computed.
+sha2 = "0.10"
+
+# Cosign signatures are ECDSA P-256 over SHA-256 (§4.2). `pem` reads the SPKI public
+# key cosign writes; `ecdsa` verifies. No `arithmetic`-heavy extras and no signing —
+# a node verifies, it never signs.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem"] }
+
+# The cosign signature travels as a base64 annotation (§4.2). Standard alphabet, and
+# the strict decoder: a signature that round-trips through a lenient decoder is a
+# signature two implementations could disagree about.
+base64 = "0.22"
+
 # ── the guest's own dependencies (compiled into every block) ─────────────────
 #
 # Both are the guest's alone: nothing on the host side may reach for either, and

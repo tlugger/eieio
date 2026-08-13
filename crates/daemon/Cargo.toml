@@ -43,6 +43,13 @@ eio-signal.workspace = true
 # like, and the conformance vectors pin only this one.
 eio-expr.workspace = true
 
+# The block manager (DAEMON §4): the registry client is four requests and a signature
+# check, written here rather than vendored. The root manifest carries the measurement.
+ureq.workspace = true
+sha2.workspace = true
+p256.workspace = true
+base64.workspace = true
+
 wasmtime.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -44,3 +44,12 @@ max_value_bytes = 262144
 # How many work items one block instance's mailbox holds before its senders feel it
 # (DAEMON §5). A depth of one is legal and means every sender waits for the previous item.
 mailbox = 64
+
+[blocks]
+# Whether a block this node cannot verify a signature for may run (DAEMON §4.2). A
+# present signature is checked either way -- this decides what is acceptable, not
+# whether to look. Turning it on without a key at the path below refuses every pull.
+require_signed = false
+# The public key signatures are verified against: PEM, as `cosign public-key` writes
+# it. Relative paths are resolved against this data directory.
+key = "auth/cosign.pub"
