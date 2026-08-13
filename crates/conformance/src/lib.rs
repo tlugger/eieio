@@ -62,5 +62,6 @@ pub use report::{Outcome, Report, Summary, Violation};
 pub use run::{Loaded, hex, run, unhex};
 pub use scenario::{
     Action, BudgetSpec, ClockSpec, Code, DeathKind, EmissionExpect, ErrorExpect, Expect,
-    LimitsSpec, LogExpect, PropFailureExpect, RefusalKind, RunExpect, Scenario, Scripted, Step,
+    LimitsSpec, LogExpect, PropFailureExpect, RefusalKind, RefusalSpec, RunExpect, Scenario,
+    Scripted, Step,
 };

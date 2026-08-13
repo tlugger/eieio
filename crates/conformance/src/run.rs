@@ -31,7 +31,7 @@ use crate::host::{Budget, Host, HostError};
 use crate::record::{Ledger, Recording};
 use crate::report::{Outcome, Report, Violation};
 use crate::scenario::{
-    Action, DeathKind, Expect, RefusalKind, RunExpect, Scenario, Scripted, Step,
+    Action, DeathKind, Expect, RefusalKind, RefusalSpec, RunExpect, Scenario, Scripted, Step,
 };
 
 /// A scenario with its module read and assembled — what [`run`] consumes.
@@ -73,7 +73,21 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
         Err(error) => return failed(report, None, format!("the module is not loadable: {error}")),
     };
 
-    let limits = Limits::new(scenario.limits.max_payload, scenario.limits.max_batch);
+    // A refusal scenario ends here, and reaching here is half of what it asserts: the fixture
+    // got through §4 validation, so whatever the host says next is about the engine and not
+    // about a module that was broken in some other way (§13.1).
+    if let Some(refusal) = &scenario.refuses {
+        return refused(report, loaded, host, refusal);
+    }
+
+    let Some(spec) = scenario.limits else {
+        return failed(
+            report,
+            None,
+            "a scenario that instantiates must publish limits (ABI §9.7)".to_string(),
+        );
+    };
+    let limits = Limits::new(spec.max_payload, spec.max_batch);
     let descriptor = Descriptor::from_manifest(&manifest, scenario.instance_id.clone(), limits);
 
     let sources = match resolve(&manifest, &scenario.properties) {
@@ -129,10 +143,7 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
         );
     }
 
-    let budget = Budget {
-        fuel: scenario.budget.fuel,
-        deadline: std::time::Duration::from_millis(scenario.budget.deadline_ms),
-    };
+    let budget = Budget::from(&scenario.budget);
     let guest = match host.instantiate(&loaded.wasm, budget) {
         Ok(guest) => guest,
         Err(HostError::Unsupported(reason)) => {
@@ -262,6 +273,82 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
         report.outcome = Outcome::Failed;
     }
     report
+}
+
+/// Runs a load-time refusal scenario: the module must not instantiate (ABI §4.3, §13.1).
+///
+/// The interesting outcome is the one that looks like success. A host that *accepts* a
+/// post-MVP module has not merely missed an assertion — it will deploy a block the leaf tier
+/// cannot flash, which is the divergence §13 exists to catch, so it is a failure stated in
+/// those words rather than a bare "expected Err".
+fn refused<H: Host>(
+    report: Report,
+    loaded: &Loaded,
+    host: &mut H,
+    refusal: &RefusalSpec,
+) -> Report {
+    let scenario = &loaded.scenario;
+    let proposal = &refusal.proposal;
+
+    // §13.1: a refusal scenario "carries `refuses` and no steps", and publishes no limits.
+    // Enforced rather than assumed, for the reason this module's own strictness exists — a
+    // scenario whose steps are silently ignored is one that passes forever while checking
+    // nothing, and it would look exactly like a scenario that ran.
+    if !scenario.steps.is_empty() || scenario.limits.is_some() {
+        return failed(
+            report,
+            None,
+            "a scenario asserting a refusal has no steps and no limits: the module never \
+             loads, so there is nothing to run and no descriptor to publish (ABI §13.1)"
+                .to_string(),
+        );
+    }
+
+    // A host that does not refuse this proposal at all. Skipped with the proposal named, the
+    // same answer §13.1 gives an unimplemented capability, and for the same reason: a suite
+    // that scored an unreachable scenario as a pass would claim coverage the platform has
+    // not got. The gap is a conformance bug; this is what keeps it visible while it is open.
+    if !host.refuses_proposal(proposal) {
+        return Report::skipped(
+            &scenario.name,
+            host.name(),
+            format!("this host does not refuse {proposal}, so the refusal cannot be observed"),
+        );
+    }
+
+    let budget = Budget::from(&scenario.budget);
+    let detail = match host.instantiate(&loaded.wasm, budget) {
+        Ok(_) => {
+            return failed(
+                report,
+                None,
+                format!(
+                    "the host loaded a module using {proposal}, which ABI §4.3 refuses — \
+                     a block it accepts here is one the leaf tier will not flash"
+                ),
+            );
+        }
+        Err(HostError::Unsupported(reason)) => {
+            return Report::skipped(&scenario.name, host.name(), reason);
+        }
+        Err(HostError::Refused(detail)) => detail,
+    };
+
+    // §4.3 makes naming the proposal a MUST only where the engine reports which one it
+    // objected to. Both halves of that are declarations about an engine: `names` is absent
+    // for a proposal no engine names, and `names_refusals` is false for a host whose
+    // rejections are all `unknown opcode`.
+    let Some(needle) = &refusal.names else {
+        return report;
+    };
+    if !host.names_refusals() || detail.to_lowercase().contains(&needle.to_lowercase()) {
+        return report;
+    }
+    failed(
+        report,
+        None,
+        format!("refusing {proposal} has to name it, and the host said: {detail}"),
+    )
 }
 
 /// A report with one violation, already failed.

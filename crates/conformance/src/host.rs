@@ -92,6 +92,35 @@ pub trait Host {
         true
     }
 
+    /// Whether this host refuses a module using `proposal` (ABI §4.3, §13.1).
+    ///
+    /// `true` by default, because §4.3 requires it: a host accepts the six accepted proposals
+    /// and nothing more. Answering `false` is a host declaring a gap in its *engine*, not an
+    /// opinion about the specification, and the scenario is then reported skipped with the
+    /// proposal named rather than passed over.
+    ///
+    /// wasm3 answers `false` for three of them — it loads, compiles and runs tail-call,
+    /// memory64 and shared-memory modules that wasmtime refuses by name. That is the two-host
+    /// divergence §13 calls a conformance bug by definition, and it is tracked as one; what
+    /// this method buys is that the suite *says so on every run* instead of going red on a
+    /// known gap until someone mutes it.
+    fn refuses_proposal(&self, _proposal: &str) -> bool {
+        true
+    }
+
+    /// Whether this host's rejections name the proposal they objected to (ABI §4.3).
+    ///
+    /// `true` by default: §4.3 makes naming it a MUST wherever the engine reports which
+    /// feature it objected to, and wasmtime reports eight of the nine.
+    ///
+    /// A host answering `false` still has the refusal itself asserted — only the name is left
+    /// unchecked. wasm3 is that host: every one of its rejections is `unknown opcode`,
+    /// `restricted opcode`, `out of order Wasm section` or `malformed Wasm binary`, and a host
+    /// cannot invent a name its engine does not give it.
+    fn names_refusals(&self) -> bool {
+        true
+    }
+
     /// Compiles and instantiates `wasm` under `budget` (ABI §5.1 step 1).
     ///
     /// No guest code beyond module initialisation runs here, but that is guest code all the

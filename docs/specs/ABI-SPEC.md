@@ -85,7 +85,11 @@ Import *signatures* are checked when the host links the module, by the engine. T
 
 **Whole-proposal conformance (§1) is enforced by the engine, not by manifest validation.** A host configures its engine to accept the proposals below and nothing more; a module reaching for a seventh proposal is refused at instantiation. This is deliberate placement: WASM feature gating is a moving target that engines already track, and duplicating it in the loader would create a second, slower-moving definition of what is accepted.
 
-The rejection MUST name the offending proposal. A host that refuses a module without saying which feature it objected to leaves a deployer with a working block, a passing manifest, and nothing to act on.
+A host MUST refuse such a module. The rejection SHOULD name the offending proposal, and MUST name it where the host's engine reports which one it objected to — because a host that refuses a module without saying which feature it objected to leaves a deployer with a working block, a passing manifest, and nothing to act on.
+
+**Why that is a SHOULD and not the MUST it was.** Because measured against real engines it was unsatisfiable, and a MUST no conformant host can meet is not a requirement but a bug in this document. Of the nine refused proposals, wasmtime names eight and does not name **extended const** — a module whose global initialiser is `i32.add` is refused with `constant expression required: non-constant operator: i32.add`, which describes the instruction and never the proposal. wasm3 names **none** of the nine: its refusals are `unknown opcode`, `restricted opcode`, `out of order Wasm section`, `malformed Wasm binary`. A host cannot invent a name its engine does not give it, and a loader that recomputed one would be the second definition of the accepted set this section spends its length refusing.
+
+So the obligation is placed where it can be met: name it when you know it, and the conformance vectors assert the name only for the proposals an engine actually reports (§13.1). Widening this back to a MUST means giving the shared loader a proposal scan — the same shape as the portable-subset carve-out above, and a much larger claim.
 
 **The accepted set.** Core WASM 1.0, plus exactly these six:
 
@@ -524,6 +528,23 @@ A scenario fixes:
 - `instance_id`, the `limits` the descriptor publishes (§5.2, §9.7), and the property values a service would supply. **Ports and `prop_id`s come from the manifest**, resolved by §11.1's `required`/`default` rule; a scenario restating them would be a second numbering free to disagree with the first.
 - The execution budget (§10) — fuel and wall-clock deadline — because exhaustion is a fault a scenario injects rather than a property of the machine it runs on.
 - A sequence of **steps**: one lifecycle call each, walking §5.1 from `eio_configure` to `eio_stop`.
+
+#### Load-time refusal
+
+A scenario may instead assert that the module is **never loaded at all**. It then carries `refuses` and no steps, and publishes no `limits` — a module that never instantiates has no descriptor to read them from, and §9.7's rule that a host may not choose those numbers is untouched by a scenario that has none.
+
+```json
+{ "refuses": { "proposal": "tail call", "names": "tail call" } }
+```
+
+`proposal` is the feature §4.3 refuses, and is what the report and any skip say. `names` is optional: when present, the host's rejection MUST contain it, matched case-insensitively as a substring so an engine stays free to rephrase the sentence around it. It is omitted for a proposal no engine names — **extended const** today — because a vector asserting a name nothing produces would fail every conformant host, and the scenario's `note` is where that is recorded.
+
+Two host answers shape the run, both of them declarations a host makes about its engine rather than about this specification:
+
+- **A host that does not refuse the proposal at all** reports the scenario **skipped, with the proposal named**, exactly as an unimplemented capability is. This is not an excuse and it is not a pass: it is a divergence made visible, and §13's "divergence between the two hosts is a conformance bug by definition" applies to it in full. It is recorded here because the alternative — a suite that goes red on a known, tracked gap — gets muted, and a muted suite pins nothing.
+- **A host whose engine names no proposal** has `names` skipped for it while the refusal itself is still asserted. wasm3 is that host for all nine.
+
+What a refusal scenario must not be is a module that is broken in some *other* way, or the vector would pass for the wrong reason. Every refusal fixture is therefore a block valid under §4.1 and §11 — every export present with the right signature, an `eio:manifest` section that agrees — so that `validate` accepts it and only the engine objects. The suite asserts that of each fixture rather than trusting it.
 
 **Batches are canonical CBOR, written as hex.** §6.3.1 admits exactly one encoding of any batch, and pinning bytes is half of what this suite is for. A JSON spelling of a batch would be a second, lossier data model — it has no byte string, and it resolves duplicate keys before rule 7 can reject them.
 

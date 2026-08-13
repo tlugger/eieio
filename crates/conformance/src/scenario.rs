@@ -49,9 +49,13 @@ pub struct Scenario {
     pub instance_id: Option<String>,
     /// The limits the descriptor publishes (ABI §5.2, §9.7).
     ///
-    /// Required, and deliberately without a default: §9.7 gives them no floor, so a host
-    /// that defaulted them would be choosing the numbers a block reads.
-    pub limits: LimitsSpec,
+    /// Required for a scenario that instantiates, and deliberately without a default: §9.7
+    /// gives them no floor, so a host that defaulted them would be choosing the numbers a
+    /// block reads. `None` is legal only alongside [`refuses`](Scenario::refuses), where the
+    /// module never loads and there is no descriptor to publish them in — which weakens
+    /// nothing, since a host still never picks them.
+    #[serde(default)]
+    pub limits: Option<LimitsSpec>,
     /// The execution budget (ABI §10).
     #[serde(default)]
     pub budget: BudgetSpec,
@@ -71,10 +75,36 @@ pub struct Scenario {
     #[serde(default)]
     pub state: BTreeMap<String, String>,
     /// The lifecycle, one call per step (ABI §5.1).
+    #[serde(default)]
     pub steps: Vec<Step>,
     /// What must hold once every step has run.
     #[serde(default)]
     pub expect: RunExpect,
+    /// This module must be refused at load, for the proposal named (ABI §4.3, §13.1).
+    ///
+    /// A scenario carrying this has no steps and no [`limits`](Scenario::limits): it asserts
+    /// that the lifecycle never begins.
+    #[serde(default)]
+    pub refuses: Option<RefusalSpec>,
+}
+
+/// A load-time refusal a scenario asserts (ABI §4.3, §13.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefusalSpec {
+    /// The proposal §4.3 refuses, as the report and any skip name it.
+    pub proposal: String,
+    /// What the rejection must contain, matched case-insensitively as a substring.
+    ///
+    /// Optional because no engine names every proposal — wasmtime does not name extended
+    /// const, and wasm3 names none of them (§4.3). A vector asserting a name nothing
+    /// produces would fail every conformant host, so where the name is unavailable this is
+    /// omitted and the scenario's `note` records which engine failed to give one.
+    ///
+    /// A substring rather than the whole message, so an engine stays free to rephrase the
+    /// sentence around the noun without failing the suite.
+    #[serde(default)]
+    pub names: Option<String>,
 }
 
 /// The limits a scenario publishes to the instance (ABI §5.2, §9.7).
@@ -95,6 +125,17 @@ pub struct BudgetSpec {
     pub fuel: u64,
     /// Wall-clock milliseconds per guest entry.
     pub deadline_ms: u64,
+}
+
+impl From<&BudgetSpec> for crate::Budget {
+    /// The document's numbers as the host trait's type. Milliseconds are the scenario's unit
+    /// because a JSON document should not carry a `Duration`'s shape.
+    fn from(spec: &BudgetSpec) -> crate::Budget {
+        crate::Budget {
+            fuel: spec.fuel,
+            deadline: core::time::Duration::from_millis(spec.deadline_ms),
+        }
+    }
 }
 
 impl Default for BudgetSpec {
