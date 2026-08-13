@@ -1,0 +1,10 @@
+{
+  "name": "a-tail-call-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "wasm3 does not refuse this one — it loads, compiles and RUNS it, returning 1 (eieio-7d8.26). So this scenario skips there, by name, and pins the daemon alone until that is closed.",
+  "module": "blocks/post_mvp_tail_call.wat",
+  "refuses": {
+    "proposal": "tail call",
+    "names": "tail call"
+  }
+}

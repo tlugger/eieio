@@ -1,0 +1,9 @@
+{
+  "name": "a-extended-const-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "No `names` on the scenario, and this is the case ABI 4.3's SHOULD exists for: *no* engine names this proposal. wasmtime answers \"constant expression required: non-constant operator: i32.add\", which describes the instruction and never the feature; wasm3 answers \"restricted opcode\". A vector asserting a name here would fail every conformant host.",
+  "module": "blocks/post_mvp_extended_const.wat",
+  "refuses": {
+    "proposal": "extended const"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "a-relaxed-simd-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "No `names` on the scenario, and the reason is worth stating: relaxed SIMD is v128-typed, so wasmtime's SIMD gate catches it first and answers \"SIMD support is not enabled\" — it never gets as far as naming the relaxed proposal. Refusal is what this pins.",
+  "module": "blocks/post_mvp_relaxed_simd.wat",
+  "refuses": {
+    "proposal": "relaxed SIMD"
+  }
+}

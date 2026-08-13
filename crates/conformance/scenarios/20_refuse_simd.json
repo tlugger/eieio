@@ -1,0 +1,10 @@
+{
+  "name": "a-simd-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "The v128 in `probe` is the only thing wrong with it. SIMD runs perfectly well under wasmtime at its defaults, so without the accepted-set configuration this block would deploy on a daemon-class node and be refused by wasm3 at flash time.",
+  "module": "blocks/post_mvp_simd.wat",
+  "refuses": {
+    "proposal": "SIMD",
+    "names": "SIMD"
+  }
+}

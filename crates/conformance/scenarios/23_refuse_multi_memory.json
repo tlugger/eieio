@@ -1,0 +1,10 @@
+{
+  "name": "a-multi-memory-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "A second linear memory needs no instruction to be past the accepted set: declaring it is already the proposal. The first memory is the ABI 4.1 export; this one is the flaw.",
+  "module": "blocks/post_mvp_multi_memory.wat",
+  "refuses": {
+    "proposal": "multi-memory",
+    "names": "memories"
+  }
+}

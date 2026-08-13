@@ -1,0 +1,10 @@
+{
+  "name": "a-exceptions-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "Exception handling. ABI 8 gives the boundary two outcomes, a status code or a trap, and a third unwinding mechanism crossing it is not one this ABI can express.",
+  "module": "blocks/post_mvp_exceptions.wat",
+  "refuses": {
+    "proposal": "exceptions",
+    "names": "exceptions"
+  }
+}

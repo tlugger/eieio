@@ -81,6 +81,31 @@ impl Host for Wasm3 {
         false
     }
 
+    /// None of them. Every wasm3 rejection is `unknown opcode`, `restricted opcode`, `out of
+    /// order Wasm section` or `malformed Wasm binary` — measured across all nine refused
+    /// proposals, none of which it names. ABI §4.3's naming obligation is a MUST only where
+    /// the engine reports which feature it objected to, and this one never does; a binding
+    /// that answered `true` here would be claiming to know something it was not told.
+    fn names_refusals(&self) -> bool {
+        false
+    }
+
+    /// Three it does not refuse at all (eieio-7d8.26).
+    ///
+    /// Measured, and the worst kind of result: wasm3 loads, compiles and *runs* a tail-call
+    /// module, a memory64 module and a shared-memory one, all of which wasmtime refuses by
+    /// name. For the latter two it is almost certainly ignoring the flag rather than
+    /// implementing the proposal, which is a silent misinterpretation rather than an honest
+    /// refusal.
+    ///
+    /// Answering `false` skips those scenarios *with the proposal named*, so every run says
+    /// out loud that the leaf tier is not holding a line the daemon holds. It does not make
+    /// the divergence acceptable — ABI §13 calls it a conformance bug by definition, and it
+    /// is filed as one. When it is closed these three lines go, and the scenarios run.
+    fn refuses_proposal(&self, proposal: &str) -> bool {
+        !matches!(proposal, "tail call" | "memory64" | "threads")
+    }
+
     fn instantiate(&mut self, wasm: &[u8], _budget: Budget) -> Result<Guest, HostError> {
         let mut config = Config::new();
         // Compilation errors up front, not on first call: a host that "accepted" a module and

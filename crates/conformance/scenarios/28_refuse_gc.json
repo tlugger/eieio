@@ -1,0 +1,10 @@
+{
+  "name": "a-gc-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "Garbage-collected types. Refused twice over on a daemon: the cargo feature is compiled out, so no `Config` call could admit it even if this configuration tried.",
+  "module": "blocks/post_mvp_gc.wat",
+  "refuses": {
+    "proposal": "GC",
+    "names": "gc"
+  }
+}

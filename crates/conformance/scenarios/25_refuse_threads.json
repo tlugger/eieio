@@ -1,0 +1,10 @@
+{
+  "name": "a-threads-module-is-refused",
+  "spec": "§4.3, §13.1",
+  "note": "A shared memory is the threads proposal, and ABI 1.2 gives an instance one caller at a time — so this is refused for the design invariant and not only for the feature flag. wasm3 accepts and runs it (eieio-7d8.26).",
+  "module": "blocks/post_mvp_threads.wat",
+  "refuses": {
+    "proposal": "threads",
+    "names": "threads"
+  }
+}
