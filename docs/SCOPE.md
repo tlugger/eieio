@@ -76,6 +76,8 @@ Blocks compile to **core WASM modules** (`wasm32-unknown-unknown`) with a **hand
 
 So the accepted set is what the guest toolchain emits *and* the leaf engine runs, and it is pinned by `crates/conformance/tests/wasm3.rs` rather than by prose here: the suite runs each instruction on wasm3 and checks the value it produces. Anything further — SIMD, tail calls, threads, exceptions, GC, the component model — stays refused, because wasm3 does not implement it. Widening the set again means measuring again.
 
+**And the measurement is per instruction, not per proposal.** Measured again in full, wasm3 runs sign extension, non-trapping float-to-int and multi-value whole, but only `memory.copy`/`memory.fill` of bulk memory and only the `call_indirect` encoding of reference types — `memory.init`, `table.copy`, `table.get`, `ref.func` and the rest are refused. The remainder of those two proposals is therefore carved out of the accepted set (ABI §4.3), and because no engine's feature configuration can express a partial proposal, that carve-out is the one piece of feature conformance a host enforces in its loader rather than its engine. It costs a block author nothing: stock-built Rust blocks contain none of the carved-out instructions.
+
 Consequences:
 
 - Hot-install without recompiling the daemon (restores nio's "add a block, restart, go" magic).

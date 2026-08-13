@@ -1,7 +1,10 @@
 //! Load-time validation of a module against its manifest (ABI-SPEC §4, §12).
 //!
-//! Six checks, in the order a rejection is most useful in:
+//! Seven checks, in the order a rejection is most useful in:
 //!
+//! 0. the module stays inside the portable subset of §4.3's six accepted proposals
+//!    (`portable`) — first, because it is the only check that does not need the manifest,
+//!    and a module the leaf tier cannot run is not made loadable by a correct one;
 //! 1. every import is from an `eio:*` namespace, and names a function that namespace
 //!    actually has (§4.3, §7);
 //! 2. every imported namespace is covered by a declared capability (§4.3);
@@ -15,9 +18,12 @@
 //!
 //! # What is deliberately *not* checked here
 //!
-//! **WASM validity and MVP conformance.** The engine settles both, and a host
-//! configures its engine to MVP (§4.3). Duplicating feature gating here would create a
-//! second definition of MVP that drifts from the one that actually runs the code.
+//! **WASM validity, and which *proposals* are accepted.** The engine settles both, and a
+//! host configures its engine to §4.3's six. Duplicating proposal gating here would
+//! create a second definition of the accepted set that drifts from the one that actually
+//! runs the code. Check 0 is not that: it refuses instructions *within* two of the six
+//! that the leaf interpreter does not implement, which no engine's per-proposal
+//! configuration can express (§4.3, `portable`).
 //!
 //! **Import signatures.** The engine checks them when it links imports, with the same
 //! information and better placement. This module checks namespaces and names, which is
@@ -33,6 +39,7 @@ use crate::abi::{CORE_FUNCTIONS, CORE_NAMESPACE, MEMORY_EXPORT, REQUIRED_EXPORTS
 use crate::error::ModuleError;
 use crate::module::{ExportKind, Module};
 use crate::parse;
+use crate::portable;
 use crate::schema::{Abi, Capability, Manifest};
 
 /// Validates a module for loading on a host implementing [`Abi::CURRENT`].
@@ -77,6 +84,7 @@ pub fn validate_against(
     registry: Option<&Manifest>,
     host: Abi,
 ) -> Result<Manifest, ModuleError> {
+    portable::check(wasm)?;
     let module = Module::read(wasm)?;
     let manifest = effective_manifest(&module, registry)?;
 

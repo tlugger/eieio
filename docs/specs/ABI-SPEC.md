@@ -12,7 +12,7 @@ The key words MUST, MUST NOT, SHOULD, and MAY are used as in RFC 2119.
 
 These follow from SCOPE §3.2–3.5 and are restated here because every rule below derives from one of them:
 
-1. **Core WASM modules only.** Target `wasm32-unknown-unknown`. No WASI, no component model, no threads. A module MUST validate against **core WASM 1.0 plus exactly the six proposals §4.3 lists** — the ones the guest toolchain emits by default and the leaf interpreter executes — so that wasmtime, WAMR and wasm3 are all viable hosts. Nothing beyond that set: SIMD, tail calls, exceptions, GC, multi-memory and memory64 are all refused.
+1. **Core WASM modules only.** Target `wasm32-unknown-unknown`. No WASI, no component model, no threads. A module MUST validate against **core WASM 1.0 plus the portable subset of the six proposals §4.3 lists** — what the guest toolchain emits by default *and* the leaf interpreter executes, which for two of the six is less than the whole proposal — so that wasmtime, WAMR and wasm3 are all viable hosts. Nothing beyond that set: SIMD, tail calls, exceptions, GC, multi-memory and memory64 are all refused.
 2. **Single-threaded actor model.** One WASM instance per block-instance-in-a-service. The host serializes all calls into an instance. The host MUST NOT call into a guest that is mid-call. Guest→host calls MUST NOT re-enter the guest.
 3. **Copies, not shared references.** Every boundary crossing copies bytes between host memory and guest linear memory. No pointers outlive the call that carries them unless this spec says otherwise.
 4. **CBOR everywhere.** All structured payloads crossing the boundary are CBOR (SCOPE §3.4). Same encoding on the wire and across the ABI.
@@ -83,26 +83,48 @@ All imports MUST be from `eio:*` namespaces (§7). Anything else fails validatio
 
 Import *signatures* are checked when the host links the module, by the engine. The load-time check above is a superset in namespaces and names only.
 
-**Feature conformance (§1) is enforced by the engine, not by manifest validation.** A host configures its engine to accept the set below and nothing more; a module using anything else is refused at instantiation. This is deliberate placement: WASM feature gating is a moving target that engines already track, and duplicating it in the loader would create a second, slower-moving definition of what is accepted.
+**Whole-proposal conformance (§1) is enforced by the engine, not by manifest validation.** A host configures its engine to accept the proposals below and nothing more; a module reaching for a seventh proposal is refused at instantiation. This is deliberate placement: WASM feature gating is a moving target that engines already track, and duplicating it in the loader would create a second, slower-moving definition of what is accepted.
 
 The rejection MUST name the offending proposal. A host that refuses a module without saying which feature it objected to leaves a deployer with a working block, a passing manifest, and nothing to act on.
 
 **The accepted set.** Core WASM 1.0, plus exactly these six:
 
-|Proposal|Why it is in|
-|---|---|
-|bulk memory|`memory.copy`/`memory.fill`; rustc emits them for any sizeable move|
-|sign extension|`i32.extend8_s` and friends|
-|reference types|the `call_indirect` table-index *encoding*, not `externref` in a guest|
-|multi-value|multiple block and function results|
-|non-trapping float-to-int|saturating casts, which Rust's `as` requires|
-|mutable globals|imported and exported mutable globals|
+|Proposal|Why it is in|Accepted|
+|---|---|---|
+|bulk memory|`memory.copy`/`memory.fill`; rustc emits them for any sizeable move|in part|
+|sign extension|`i32.extend8_s` and friends|whole|
+|reference types|the `call_indirect` table-index *encoding*, not `externref` in a guest|in part|
+|multi-value|multiple block and function results|whole|
+|non-trapping float-to-int|saturating casts, which Rust's `as` requires|whole|
+|mutable globals|exported mutable globals|whole|
 
-Every one is enabled by default by rustc for `wasm32-unknown-unknown`, and every one is executed correctly by wasm3. Both halves are pinned by tests, not by this table: `crates/daemon/src/engine.rs` asserts a conformant host accepts each, and `crates/conformance/tests/wasm3.rs` runs each on wasm3 and checks the value it produces.
+Every one is enabled by default by rustc for `wasm32-unknown-unknown`. **Two are accepted only in part**, because the leaf interpreter implements only part of them — and it is the leaf interpreter, not the proposal document, that decides what a block may contain.
+
+#### The portable subset
+
+Measured on wasm3 (`crates/conformance/tests/wasm3.rs`), instruction by instruction, with each case returning a value only correct execution produces. Of the six proposals, four run whole. The other two do not, and their remainder is **carved out of the accepted set**: a module using anything in the right-hand column below is non-conformant and MUST be refused, with a rejection naming both the instruction and its proposal.
+
+|Proposal|Accepted|Carved out — wasm3 refuses|
+|---|---|---|
+|bulk memory|`memory.copy`, `memory.fill`|`memory.init`, `data.drop`, `table.init`, `table.copy`, `elem.drop`|
+|reference types|`call_indirect` with table index `0`|`ref.null`, `ref.is_null`, `ref.func`, `table.get`, `table.set`, `table.size`, `table.grow`, `table.fill`, the `externref`/`funcref` value type outside a table, and any module declaring more than one table|
+|sign extension|all five `extend*_s`|—|
+|non-trapping float-to-int|all eight `trunc_sat`|—|
+|multi-value|multi-result functions, `block`/`loop`/`if` parameters and multiple results|—|
+|mutable globals|exported|imported globals are already unreachable: every import MUST be an `eio:*` *function* (§7), so the import rules above refuse one first|
+
+**The carve-out is enforced by the loader, and this is the one exception to the paragraph above.** It is not a second definition of the accepted set — it is the only place the real one can be stated. An engine's feature configuration is per *proposal*: neither wasmtime's `Config` nor any other engine's can express "bulk memory minus `memory.init`", so a host that admits `memory.copy` admits `table.copy` with it, and would run a block the leaf tier cannot flash. The loader scan narrows what the engine already gates; it never restates it. Hosts therefore enforce the accepted set in two layers, and both are mandatory:
+
+1. the engine refuses the seventh proposal (`crates/daemon/src/engine.rs`);
+2. the loader refuses the carved-out instructions within the six (`eio_manifest::validate`).
+
+**The carve-out costs a block author nothing**, which is why it is affordable. ABI §13.2's five golden blocks, built by stock rustc with no flags, contain `memory.copy`, `memory.fill`, one table and numeric locals only — not one carved-out instruction between them. Rust reaches for the rest only under `-Z build-std` with shared memory, or through `externref`, neither of which a block does.
+
+Both halves are pinned by tests, not by these tables: `crates/daemon/src/engine.rs` asserts a conformant host accepts each proposal and that the loader refuses the carve-out the engine would have run, and `crates/conformance/tests/wasm3.rs` runs every accepted instruction on wasm3 checking the value it produces, and asserts wasm3 refuses every carved-out one.
 
 **Producers need no feature flags**, and this is a correction. Earlier drafts of this section required `-C target-feature=-bulk-memory` and called it "the only flag needed". Measured on rustc 1.97.1, that flag changes nothing: the offending `memory.copy` lives in `alloc::string::String::clone` inside the precompiled `rust-std`, which no `RUSTFLAGS` rebuilds — nor does `-Z build-std`. Strict MVP was therefore not merely unnecessary, it was unreachable, and the rule made every Rust block unloadable while protecting a constraint wasm3 does not have. An ordinary `cargo build --release --target wasm32-unknown-unknown` produces a conformant module; `crates/conformance/tests/wasm3.rs` builds one with no flags at all and drives it through §5.1 on both engines.
 
-Widening this set further is a measurement, not a judgement call: a proposal belongs here when the toolchain emits it *and* the leaf tier runs it, and the suite is where that is established.
+Widening this set further is a measurement, not a judgement call: a proposal — or an instruction within one — belongs here when the toolchain emits it *and* the leaf tier runs it, and the suite is where that is established. A carved-out instruction moves into the accepted set the day wasm3 executes it correctly and the negative test above starts failing; that failure is the notification.
 
 ### 4.4 Custom section
 

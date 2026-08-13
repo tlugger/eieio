@@ -285,6 +285,20 @@ pub enum ModuleError {
     /// this crate does not duplicate that judgement.
     Unreadable(wasmparser::BinaryReaderError),
 
+    /// The module uses something ABI §4.3 carves out of the six accepted proposals.
+    ///
+    /// Two of the six are accepted only in part, because the leaf interpreter implements
+    /// only part of them. A feature configuration has one switch per proposal, so this
+    /// is the one piece of feature conformance an engine cannot express and a loader
+    /// must — see `portable.rs` for why that is a narrowing rather than a second
+    /// definition.
+    Unportable {
+        /// The instruction or construct, spelled as WASM text.
+        feature: &'static str,
+        /// The proposal it belongs to. §4.3 requires the rejection to name it.
+        proposal: &'static str,
+    },
+
     /// An import came from outside the `eio:*` namespaces (§4.3).
     ///
     /// The import section is the capability system (§1), so an import the host cannot
@@ -413,6 +427,10 @@ impl fmt::Display for ModuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ModuleError::Unreadable(error) => write!(f, "not a readable WASM module: {error}"),
+            ModuleError::Unportable { feature, proposal } => write!(
+                f,
+                "{feature} is outside the portable subset of the {proposal} proposal — the leaf interpreter does not run it (§4.3)",
+            ),
             ModuleError::ForeignImport { namespace, name } => write!(
                 f,
                 "import {namespace:?} {name:?} is outside the eio:* namespaces — every import is a capability (§4.3)",

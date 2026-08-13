@@ -332,7 +332,11 @@ manifest's, so a block cannot ship with `panic = "unwind"` by editing a file. §
 one a block author may opt out of on their own machine.
 
 **No feature flags of any kind are passed.** ABI §4.3's accepted set is exactly what rustc
-emits by default; the flag earlier drafts required here was measured to do nothing.
+emits by default; the flag earlier drafts required here was measured to do nothing. Note
+*emits*, not *enables*: rustc turns on six whole proposals and §4.3 accepts two of them only
+in part, but the instructions in the carved-out remainder are ones rustc never reaches for —
+measured across the five golden blocks, which contain none of them. So there is still no flag
+to pass, and a block that trips the carve-out is one that went looking for it.
 
 **`wasm-opt` is not invoked, and that is a decision rather than a gap.** Binaryen is a C++
 toolchain, not a Rust dependency: requiring it would make `cargo eio build` fail on a machine

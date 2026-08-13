@@ -32,9 +32,16 @@
 //! when their capability is — that §4.1's exports exist with the right signatures, and
 //! that the embedded and registry manifests agree.
 //!
-//! It deliberately does not validate the WASM itself. MVP conformance (§1) is enforced
-//! by engine configuration, which is complete and which engines already track; a second
-//! partial gate in the loader would only invite the belief that it was checked here.
+//! It deliberately does not validate the WASM itself, and it does not decide which
+//! *proposals* are accepted: that is engine configuration (§4.3), which engines already
+//! track and which a second partial gate here would only invite the belief about.
+//!
+//! One exception, and §4.3 names it as one. Two of the six accepted proposals are
+//! accepted only in part, because the leaf interpreter runs only part of them, and a
+//! feature configuration has one switch per proposal — so "bulk memory minus
+//! `memory.init`" is a set no engine can be asked for. [`validate`] refuses that
+//! remainder itself (`portable`), which narrows what the engine gates rather than
+//! restating it.
 //!
 //! # Strict on purpose
 //!
@@ -94,6 +101,7 @@ mod error;
 mod module;
 mod name;
 mod parse;
+mod portable;
 mod schema;
 mod validate;
 
