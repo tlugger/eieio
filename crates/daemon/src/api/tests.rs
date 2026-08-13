@@ -67,9 +67,12 @@ impl Harness {
         );
 
         let bus = Arc::new(crate::observe::Bus::default());
+        let store =
+            crate::state::Store::open(&node.layout().state_store()).expect("the state store opens");
         let executor = Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())
             .expect("an executor")
-            .observing(Arc::clone(&bus));
+            .observing(Arc::clone(&bus))
+            .storing(store);
         let services = boot::boot(&node, &executor).await;
         let shared = Arc::new(Shared {
             bus,
@@ -365,8 +368,9 @@ async fn a_node_reports_what_a_service_can_be_built_against() {
     assert_eq!(node["require_signed"], false);
     assert_eq!(
         node["capabilities"],
-        serde_json::json!([]),
-        "no capability is implemented yet, and the node says so rather than implying it"
+        serde_json::json!(["state"]),
+        "the node publishes what a block deployed here may declare (SCOPE §3.3): `eio:state` \
+         is backed by a store (DAEMON §10) and the three device namespaces are nobody's yet"
     );
 
     let blocks = harness.get("/blocks").await.json();
@@ -888,4 +892,90 @@ async fn a_tap_streams_signals_and_the_expression_failures_that_explain_them() {
         seen.contains("no such attribute on this signal"),
         "and its message: {seen}"
     );
+}
+
+#[tokio::test]
+async fn an_instances_state_is_readable_through_the_api() {
+    // DAEMON §9's inspection endpoint, and §10's store behind it. The values are written
+    // through a `Namespace` — the *same* handle an instance's `state_put` writes through
+    // (DAEMON §10) — rather than by running a block, because no endpoint injects a signal into a
+    // running service (§9) and a counter nobody delivers to writes nothing. That a real block's
+    // writes land in this store is `boot`'s restart test; what is under test here is the
+    // endpoint.
+    let harness = Harness::start("api-state").await;
+    // Three instances, two of which have written: so the endpoint can be shown to answer for
+    // one without leaking another's keys, and to answer *nothing* for the third rather than
+    // pretending it does not exist.
+    write_service(
+        &harness.root,
+        "tally",
+        "name = \"tally\"\nautostart = false\n\n\
+         [blocks.t1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.t1.props]\nval = \"(+ $n 1)\"\n\n\
+         [blocks.t2]\nblock = \"transform:1.0.0\"\n\
+         [blocks.t2.props]\nval = \"(+ $n 1)\"\n\n\
+         [blocks.t3]\nblock = \"transform:1.0.0\"\n\
+         [blocks.t3.props]\nval = \"(+ $n 1)\"\n",
+    );
+
+    let value = eio_signal::Value::Int(41).to_cbor();
+    {
+        use eio_host_core::StateStore as _;
+        let store = harness.shared.executor.state();
+        store
+            .namespace("tally", "t1")
+            .put(b"count", &value)
+            .expect("the write commits");
+        store
+            .namespace("tally", "t2")
+            .put(b"count", &eio_signal::Value::Int(99).to_cbor())
+            .expect("the write commits");
+    }
+
+    let state = harness.get("/services/tally/state/t1").await.json();
+    assert_eq!(state["service"], "tally");
+    assert_eq!(state["instance"], "t1");
+    let entries = state["entries"].as_array().expect("an array");
+    assert_eq!(entries.len(), 1, "one key, and not t2's: {state}");
+    assert_eq!(entries[0]["key"], "count", "the key as UTF-8");
+    assert_eq!(
+        entries[0]["value"], "41",
+        "and the value in EXPR §7.6's canonical rendering"
+    );
+    assert_eq!(
+        entries[0]["size"],
+        value.len(),
+        "with the byte count of what was stored"
+    );
+    // ABI §7.2's keys and values are opaque, so the exact bytes are always there too.
+    use base64::Engine as _;
+    assert_eq!(
+        entries[0]["value_base64"],
+        base64::engine::general_purpose::STANDARD.encode(&value)
+    );
+
+    // The same key on the neighbouring instance is a different value, which is the namespacing
+    // of DAEMON §10 seen from the endpoint that would otherwise hide it.
+    let neighbour = harness.get("/services/tally/state/t2").await.json();
+    assert_eq!(neighbour["entries"][0]["value"], "99");
+
+    // An instance the service declares and that has written nothing has no entries — not a
+    // 404, because it exists and "nothing yet" is the answer (ABI §7.2 says the same of a key).
+    let untouched = harness.get("/services/tally/state/t3").await.json();
+    assert_eq!(untouched["entries"], serde_json::json!([]));
+
+    let unknown = harness.get("/services/tally/state/t99").await;
+    assert_eq!(
+        unknown.status, 404,
+        "an id the service does not declare is not found: {}",
+        unknown.body
+    );
+    assert_eq!(unknown.json()["error"], "not_found");
+
+    let no_service = harness.get("/services/nope/state/t1").await;
+    assert_eq!(no_service.status, 404, "{}", no_service.body);
+
+    // And it is guarded like everything else (§9.1).
+    let unauthorized = harness.get_with("/services/tally/state/t1", None).await;
+    assert_eq!(unauthorized.status, 401);
 }

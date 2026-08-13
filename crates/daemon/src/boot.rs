@@ -625,14 +625,19 @@ mod tests {
     /// stand on: a node with a warm cache boots its services with no registry in sight.
     fn data_dir(test: &str) -> PathBuf {
         let root = scratch(test);
-        let entry = root.join("blocks").join("transform").join("1.0.0");
+        cache_golden(&root, "transform", "transform.wasm");
+        root
+    }
+
+    /// Puts one golden block in `root`'s cache as `<name>:1.0.0`.
+    fn cache_golden(root: &Path, name: &str, wasm: &str) {
+        let entry = root.join("blocks").join(name).join("1.0.0");
         std::fs::create_dir_all(&entry).expect("the cache entry");
         std::fs::copy(
-            eio_conformance::golden::build().join("transform.wasm"),
+            eio_conformance::golden::build().join(wasm),
             entry.join("block.wasm"),
         )
         .expect("the golden blocks are built");
-        root
     }
 
     /// Writes `<root>/services/<file>`.
@@ -1093,6 +1098,87 @@ mod tests {
         );
         services.stop().await;
         services.join();
+    }
+
+    #[tokio::test]
+    async fn a_stateful_block_continues_its_count_across_a_node_restart() {
+        // ABI §13.2's stateful counter against the real store (DAEMON §10), which is the
+        // acceptance the whole state store exists for: "restart = new instance" (ABI §5.1)
+        // gives a block a fresh linear memory every life, so a count that survives one is a
+        // count that went through `eio:state` and reached the disk.
+        //
+        // A node restart and not an instance restart, deliberately: the second boot opens the
+        // file again from nothing, so nothing in memory can be what carried the value.
+        let root = scratch("boot-stateful-restart");
+        cache_golden(&root, "counter", "counter.wasm");
+        service(
+            &root,
+            "tally.toml",
+            "name = \"tally\"\nautostart = true\n\n\
+             [blocks.c1]\nblock = \"counter:1.0.0\"\n",
+        );
+
+        assert_eq!(
+            count_one_signal(&root).await,
+            1,
+            "the first life counts one"
+        );
+        assert_eq!(
+            count_one_signal(&root).await,
+            2,
+            "and the second life continues from what the first persisted"
+        );
+        assert_eq!(count_one_signal(&root).await, 3, "and so does the third");
+    }
+
+    /// Boots `root`, delivers one signal to `tally`'s counter, and reports the count it emitted.
+    ///
+    /// Everything is torn down before returning — the services are stopped, their threads
+    /// joined and the store dropped — so the next call is a genuinely cold start rather than a
+    /// second delivery to something still running.
+    async fn count_one_signal(root: &Path) -> i64 {
+        let node = Node::open(root).expect("the node comes up");
+        let store =
+            crate::state::Store::open(&node.layout().state_store()).expect("the state store opens");
+        let executor = Executor::new(node.budgets, node.mailbox)
+            .expect("an executor")
+            .storing(store);
+        let mut services = boot(&node, &executor).await;
+        assert_eq!(services.counts().running, 1, "{:?}", services.get("tally"));
+
+        let mut signal = eio_signal::Signal::new();
+        signal.set("n", eio_signal::Value::Int(1));
+        let work = crate::executor::Work::Deliver {
+            input_port: 0,
+            batch: eio_signal::Batch::single(signal),
+        };
+        match services.get("tally") {
+            Some(State::Running(service)) => service
+                .instance("c1")
+                .expect("the counter is running")
+                .mailbox()
+                .send(work)
+                .await
+                .expect("the counter takes the batch"),
+            other => panic!("expected a running service, got {other:?}"),
+        }
+
+        // Stopped first, so the event stream ends and the drain below terminates: the sender
+        // lives on the instance's thread (DAEMON §5).
+        services.stop().await;
+        let events = services.events("tally", "c1").expect("a running instance");
+        let mut count = None;
+        while let Some(event) = events.recv().await {
+            if let crate::executor::Event::Emitted { emission, .. } = event {
+                let signal = emission.batch.get(0).expect("the counter emits one signal");
+                count = match signal.get("n") {
+                    Some(&eio_signal::Value::Int(n)) => Some(n),
+                    other => panic!("the counter emits an int count, got {other:?}"),
+                };
+            }
+        }
+        services.join();
+        count.expect("the counter emitted its count")
     }
 
     /// How many expression failures `alpha`'s instance reported over its life (ABI §7.1).

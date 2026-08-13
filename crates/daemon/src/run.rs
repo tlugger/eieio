@@ -92,6 +92,13 @@ pub async fn run_block(args: &RunBlock) -> anyhow::Result<RunReport> {
         None => None,
     };
 
+    // `eio:state` is backed in memory here, and said so rather than left to be discovered: a
+    // `dev` command has no data directory to keep a store in (DAEMON §12), so a stateful block
+    // round-trips its keys within the run and starts from nothing on the next one. The line
+    // goes out whatever the block declares — a block that turns out not to use state has lost
+    // nothing by being told, and a block that does would otherwise have to infer it.
+    tracing::info!("eio:state is backed in memory for this run and is not persisted (DAEMON §10)");
+
     let executor = Executor::new(args.budgets, args.mailbox)?;
     let (instance, mut events) = executor
         .spawn(InstanceSpec {

@@ -1,9 +1,10 @@
 //! What a run says happened (ABI-SPEC §13.1).
 //!
 //! Three outcomes and not two. A scenario a host cannot express is [`Outcome::Skipped`] with
-//! the reason, never a silent pass: the daemon implements no capability namespaces yet
-//! (DAEMON §5.1), so half the suite is unreachable for it today, and a summary that counted
-//! those as passes would report a coverage this platform does not have.
+//! the reason, never a silent pass: the daemon implements `eio:core` and `eio:state` and none of
+//! the three device namespaces (DAEMON §5.1, §10), so part of the suite is unreachable for it
+//! today, and a summary that counted those as passes would report a coverage this platform does
+//! not have.
 
 use core::fmt;
 

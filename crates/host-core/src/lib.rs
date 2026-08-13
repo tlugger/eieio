@@ -130,6 +130,7 @@ mod prop;
 mod router;
 
 pub mod exports;
+pub mod state;
 
 pub use budget::ExprBudgets;
 pub use descriptor::{Descriptor, Limits};
@@ -148,6 +149,10 @@ pub use router::{
     Connection, Deliveries, End, Endpoint, Overflow, PORT_ERR_NAME, Port, RouteError, Routes,
     Target,
 };
+// `eio:state`'s host side. The trait is re-exported flat like everything else a host
+// implements against; the three call handlers stay behind `state::` because a host reaches
+// for them only when it is answering the imports itself rather than registering them.
+pub use state::{StateError, StateStore};
 // The ABI's shared vocabulary lives in `eio-abi`, below both halves of the boundary, so
 // that a guest can read ABI §8's codes without compiling this crate's expression
 // interpreter and manifest parser (see that crate's module docs). Re-exported rather than

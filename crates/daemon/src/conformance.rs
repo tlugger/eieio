@@ -20,12 +20,20 @@
 //! only shape in which §13's claim is checkable at all today, the leaf runtime not existing
 //! yet.
 //!
-//! It does not prove capability behaviour: the daemon implements no host functions outside
-//! `eio:core` (DAEMON §5.1), so every scenario needing `eio:state` or `eio:timer` is reported
-//! **skipped, by name**. That is the honest report and not a gap being papered over — a suite
-//! counting those as passes would claim coverage this daemon does not have.
+//! It proves capability behaviour as far as the daemon has capabilities. `eio:core` (ABI §7.0)
+//! and `eio:state` (§7.2) are linked here, so the state scenarios — round-trip, grow-and-retry,
+//! `ERR_THROTTLED`, a first life with nothing stored — run against this binding, answered by the
+//! harness's own store. What they check is the half that is *this* crate's: the linker
+//! signatures, the dispatch table, and the store the harness registers reaching the guest at
+//! all. What backs `eio:state` on a real node is `crate::state`, and its own tests are where
+//! redb is checked.
+//!
+//! Scenarios needing `eio:timer`, `eio:gpio`, `eio:i2c` or `eio:http` are reported **skipped, by
+//! name**. That is the honest report and not a gap being papered over — a suite counting those
+//! as passes would claim coverage this daemon does not have.
 
 use eio_conformance::{Budget, Host, HostError, suite};
+use eio_manifest::Capability;
 
 use crate::engine::{Budgets, Guest, Runtime};
 
@@ -45,6 +53,15 @@ impl Host for Daemon {
 
     fn name(&self) -> &str {
         "daemon"
+    }
+
+    /// `state`, and nothing else yet (DAEMON §10).
+    ///
+    /// The same list `crate::instance::IMPLEMENTED_CAPABILITIES` refuses a block against, and
+    /// asserted below to be exactly that: a harness told the daemon can answer a namespace the
+    /// daemon refuses to load a block for would report a pass nothing can reach in production.
+    fn capabilities(&self) -> &[Capability] {
+        &[Capability::State]
     }
 
     fn instantiate(&mut self, wasm: &[u8], budget: Budget) -> Result<Guest, HostError> {
@@ -86,13 +103,50 @@ fn the_daemon_passes_the_conformance_suite() {
         skipped.len()
     );
 
+    // What the host offers the harness and what it accepts a block on are one list, spelled
+    // twice in two shapes — `Capability` here, its manifest name there.
+    let offered: Vec<&str> = host
+        .capabilities()
+        .iter()
+        .map(|capability| capability.as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        crate::instance::IMPLEMENTED_CAPABILITIES,
+        "the capabilities this suite exercises are the ones a deployed block may declare"
+    );
+
     summary.assert_ok();
 
-    // The core-only scenarios are the ones this host is *expected* to run, so the suite
+    // The core and state scenarios are the ones this host is *expected* to run, so the suite
     // silently ceasing to reach the daemon at all would otherwise look like a pass.
     let ran = summary.reports.len() - skipped.len();
     assert!(
-        ran >= 8,
+        ran >= 12,
         "only {ran} scenario(s) reached the daemon's binding"
     );
+    // Named, not counted: the suite reaching the daemon at all is the assertion above, and
+    // this is the one that fails if `eio:state` stops being linked here — which would
+    // otherwise show up as four more skips inside a total that still looked healthy. Every
+    // name is checked to *exist*, so a scenario renamed out from under this list is a failure
+    // rather than a silently vacuous check.
+    for scenario in [
+        "state-read-and-written-back",
+        "state-grow-and-retry",
+        "state-put-is-throttled",
+        "a-fresh-instance-starts-from-nothing",
+        "a-denied-capability-answers-err-capability",
+    ] {
+        assert!(
+            summary
+                .reports
+                .iter()
+                .any(|report| report.scenario == scenario),
+            "no scenario is called {scenario}"
+        );
+        assert!(
+            !skipped.contains(&scenario),
+            "{scenario} was skipped, so the daemon's eio:state linkage is unproven"
+        );
+    }
 }

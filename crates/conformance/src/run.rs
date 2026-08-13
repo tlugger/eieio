@@ -199,9 +199,10 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
         }
     }
     if let Err(error) = capabilities.register(&mut guest, &manifest.capabilities) {
-        // The daemon implements no capability namespaces yet (DAEMON §5.1). Reported by name
-        // rather than passed over: a suite that counted this as a pass would claim coverage
-        // the platform does not have.
+        // A host that does not implement this namespace — the daemon has `eio:state` and none
+        // of the three device ones (DAEMON §5.1, §10). Reported by name rather than passed
+        // over: a suite that counted this as a pass would claim coverage the platform does not
+        // have.
         return Report::skipped(
             &scenario.name,
             host.name(),

@@ -94,5 +94,46 @@ pub mod core_fn {
     pub const ALL: [&str; 7] = [LOG, EMIT, PROP, ERROR, TIME_UNIX_MS, TIME_MONO_MS, RAND];
 }
 
+/// The `eio:state` functions (ABI §7.2).
+///
+/// Named here for the reason [`core_fn`] is: the state store's host side is this crate's
+/// (`crate::state`), and a namespace spelled at its registration site as well as in
+/// `eio_manifest`'s import cross-check would be two tables free to disagree.
+/// `state_fn_names_match_the_capabilitys_table` is what keeps them from it.
+pub mod state_fn {
+    /// `(key, key_len, buf, cap) -> i32` — read a value, size convention (ABI §8).
+    pub const GET: &str = "state_get";
+    /// `(key, key_len, val, val_len) -> i32` — write a value.
+    pub const PUT: &str = "state_put";
+    /// `(key, key_len) -> i32` — remove a value.
+    pub const DEL: &str = "state_del";
+
+    /// All of them.
+    pub const ALL: [&str; 3] = [GET, PUT, DEL];
+}
+
 /// The custom section a self-describing module carries its manifest in (ABI §4.4).
 pub const MANIFEST_SECTION: &str = "eio:manifest";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_fn_names_match_the_shared_table() {
+        assert_eq!(core_fn::ALL, eio_manifest::CORE_FUNCTIONS);
+        assert_eq!(namespace::CORE, eio_manifest::CORE_NAMESPACE);
+    }
+
+    #[test]
+    fn state_fn_names_match_the_capabilitys_table() {
+        // `eio_manifest` validates a module's imports against its own list (ABI §4.3) and
+        // `crate::state` registers against this one. Two spellings of `state_get` would mean
+        // a module that loads and then fails to link.
+        assert_eq!(state_fn::ALL, eio_manifest::Capability::State.functions());
+        assert_eq!(
+            namespace::STATE,
+            eio_manifest::Capability::State.namespace()
+        );
+    }
+}

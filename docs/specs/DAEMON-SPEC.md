@@ -50,7 +50,7 @@ The expression conformance vectors are **not** here: they are data files at the 
 
 Conformance implication: `host-core` driven by wasmtime (daemon) and by WAMR (leaf) MUST pass the same harness — the shared crate is how divergence is prevented structurally, not just tested for.
 
-The daemon's half of that is `crates/daemon/src/conformance.rs`: a `#[cfg(test)]` module taking `eio-conformance` as a **dev-dependency** and running the reference suite's scenario files through §5.1's binding. A dev-dependency and not a lib target on this crate, because the table above gives `eio-daemon` no import path on purpose — the reusable half of the host is `host-core`, and a lib target here would be a second answer to what another crate may link against. Scenarios needing a capability namespace the daemon implements no functions in (§5.1: only `eio:core`, today) are reported skipped by name, which is how that gap stays visible as the daemon grows.
+The daemon's half of that is `crates/daemon/src/conformance.rs`: a `#[cfg(test)]` module taking `eio-conformance` as a **dev-dependency** and running the reference suite's scenario files through §5.1's binding. A dev-dependency and not a lib target on this crate, because the table above gives `eio-daemon` no import path on purpose — the reusable half of the host is `host-core`, and a lib target here would be a second answer to what another crate may link against. Scenarios needing a capability namespace the daemon implements no functions in are reported skipped by name, which is how that gap stays visible as the daemon grows. Today that is `eio:timer`, `eio:gpio`, `eio:i2c` and `eio:http`: `eio:core` (ABI §7.0) and `eio:state` (§7.2, backed by §10's store) are linked, so the state scenarios run here as well as against the reference host.
 
 **Where a rule lives follows from what it is about, not from who happens to call it.** ABI §11.1's `required`/`default` precedence is the worked example, because all three plausible homes were arguable. Not `manifest`: a manifest describes what a *block* says about itself, and a deployment's supplied values are not that. Not `daemon`: the rule is pure ABI semantics with no engine and no configuration *format* in it, and leaving it there would mean the leaf runtime — whose configuration source is shaped differently — reimplementing the precedence from scratch, which is the silent divergence this split exists to prevent. So `host-core`, which is also the only crate that *can* hold it: the rule consumes `manifest`'s `Manifest` and produces `host-core`'s `PropertySource`, and the dependency runs host-core → manifest. The daemon reaches it from `--prop` flags today and from service files later; the leaf reaches it from whatever it reads. One implementation, two hosts.
 
@@ -102,7 +102,7 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
   precompiled/                 <sha256>.<engine>.cwasm — a compiled block, for
                                those bytes on this engine (§4.3). Derived; safe
                                to delete
-  state/                       eio:state backing store
+  state/state.redb             eio:state backing store, one file (§10)
 ```
 
 - **Service definition format: TOML** — human-first, comment-friendly, agents handle it fine; `schemas/service.schema.json` publishes the equivalent structure regardless. One file = one service = the deployable unit. **SERVICE-SPEC.md is the normative document**, and it is a separate one because the Designer and the CLI build against it as much as the daemon does.
@@ -371,6 +371,7 @@ GET    /services/{s}/errors           why a service is errored, structured
 POST   /services/{s}/start            load from file and start
 POST   /services/{s}/stop             stop, keep the definition
 POST   /services/{s}/reload           re-read the file and apply it (§9.4)
+GET    /services/{s}/state/{i}        what instance {i} has in eio:state (§10)
 POST   /taps                          {service, connection} -> tap_id (§9.6)
 GET    /taps                          the taps this node is holding
 GET    /taps/{id}/stream              SSE: signals and expr failures (§9.6)
@@ -378,7 +379,9 @@ DELETE /taps/{id}                     stop tapping, release the ring
 GET    /logs/stream                   SSE: log lines, filterable (§9.6, §11)
 ```
 
-**`GET /state/{instance}` is deliberately absent**: it inspects `eio:state`, which §10 does not yet back with a store, and a node refuses to load a block declaring the capability at all (SCOPE §3.3). It arrives with the store, because an endpoint published in the tool surface that cannot succeed is worse for an agent than one that is not there — the document is what an agent plans against, and a plan built on an endpoint that always answers empty fails later and less legibly than one that never saw it.
+**State inspection is service-scoped, and that is not cosmetic.** This section sketched the endpoint as `GET /state/{instance}` while §10 had no store behind it; the store made the path impossible. SERVICE §2: "ids are unique within a service file and mean nothing outside it. Two services on one node may both contain `b7k2`, and they are not related." A node's store is keyed `(service, instance)` for exactly that reason (§10), so the endpoint carries both — and it joins the service-scoped family the rest of the `/services/{s}/…` operations already form.
+
+It answers what the instance would read back: the same store, the same namespace, no cache in between (§2). Keys and values are opaque to ABI §7.2, so both are reported as bytes, with a UTF-8 key and a canonically rendered value (EXPR §7.6) offered *beside* them where the bytes admit one and omitted where they do not — a block storing something this daemon cannot decode is doing nothing wrong, and hiding such an entry would hide the state of exactly the block worth looking at. An instance the service declares and that has written nothing answers **no entries**, which is the same answer §7.2 gives for an absent key; an id the service does not declare is `404`. The instance need not be running: state outlives an instance, which is the whole of what it is for (ABI §5.1's "restart = new instance").
 
 ### 9.1 Auth
 
@@ -430,7 +433,22 @@ A conforming implementation MUST test that every route it serves is described in
 
 ## 10. State store
 
-Backs `eio:state` (ABI §7.2), namespaced `service/instance/key`. **PROPOSED: redb** (pure-Rust embedded KV, single file, no compaction daemon). Leaf hosts implement the same host functions against flash with `ERR_THROTTLED` budgets — another host-core trait boundary.
+Backs `eio:state` (ABI §7.2), namespaced `service/instance/key`. **redb**: pure-Rust embedded KV, one file at `state/state.redb`, no compaction daemon, and — measured — **no dependencies of its own** (`cargo tree` is a single node). That is what decided it against sled, measured the same way at 17 crates including `libc`, `parking_lot` and `crossbeam`, plus a background flush thread it configures by default; and against anything carrying a C library, which the arm release build would pay for. A node runs on a Pi with an SD card, and a store needing a maintenance daemon to stay healthy is operational burden a stream processor should not add.
+
+**The trait boundary is `host-core`'s, and it is exactly ABI §7.2's three functions.** `StateStore` is `get`/`put`/`del` over opaque bytes, already scoped to one instance; the three host functions that decode `(key, key_len, buf, cap)` and apply §8's size convention are in `host-core` beside it, so the daemon, the reference conformance harness and the leaf runtime answer `state_get` with the *same* code. A leaf host implements the trait against flash and may answer `ERR_THROTTLED` for a wear budget (§7.2); the daemon never does, and the variant is plumbed anyway so that a block's back-off branch is the same code on both hosts.
+
+**Namespacing is `(service, instance)`, and the composition is the store's, not the guest's.** A block writes `count`; the host makes that `(service, instance, "count")`. One table, one composite key, and redb orders tuples element-wise — so one instance's namespace is a contiguous range, which is what makes §9's inspection endpoint a scan. A per-instance handle holds its two components and cannot be talked out of them, so a cross-instance read is unconstructible rather than checked.
+
+ABI §7.2 describes the scoping as `system/service/instance`. A node implements the part of it a node can know: **the system is not a key component**, because a node does not know its System — SCOPE §3.8 keeps Systems in the Designer's database and `node.toml` has no such field, deliberately, since a node must be usable with no Designer anywhere near it. One node belongs to one System, so the component would be a constant prefix on every key, which is padding and not namespacing.
+
+**Durability is durable-on-return.** ABI §7.2 leaves the posture to the host; this host commits before `state_put` answers (redb's `Durability::Immediate`), because the property ABI §13.2's stateful counter exists to prove is that a count survives a restart, and a store that only usually survives one passes every test that does not pull the plug. Two consequences are stated rather than worked around:
+
+- **The fsync is inside the guest's callback.** `state_put` is synchronous (§7.2 gives `eio:state` no completion callback), so the commit spends the callback's ABI §10 wall-clock deadline. A block writing on every signal faster than its deadline can absorb wants a larger deadline or fewer writes. The alternatives are worse: a background flush would make "durable" mean "probably", and an async commit would make `eio:state` a callback-shaped capability the ABI says it is not.
+- **Writers serialize.** redb admits one write transaction at a time, so two instances putting concurrently queue — each on its own thread (§5), never on the reactor.
+
+**Nothing garbage-collects a namespace.** An instance removed from a service file, or a service deleted, leaves its keys where they are. That is the safe default — a deploy that renamed an id would otherwise silently discard state a block is about to want, and state is the one thing on a node that cannot be rebuilt from a file — and reclaiming it deliberately is a management operation this specification does not yet have.
+
+`dev run-block` (§12) gets the same store over an in-memory backend: the same table, the same keys, the same transactions, nothing persisted. One implementation, because a second one would be a second answer to what `eio:state` does — and the fast loop would be exercising it instead of the real one.
 
 ## 11. Observability
 
@@ -470,6 +488,8 @@ NaN and infinity need no rule here: a literal that overflows `binary64` is refus
 **Logging.** Every line a run produces — the daemon's own and the guest's `log` calls alike — is emitted inside a span carrying `(service, instance)` per §11. `run-block` has no service, so `--service` supplies the name, defaulting to `dev`.
 
 **Capabilities.** A block whose manifest declares a capability the host does not implement is refused at load, by name. That is SCOPE §3.3's deploy-time question asked where a deployer can act on it; the engine's own answer would name a missing symbol rather than the capability that asked for it.
+
+`eio:state` is implemented (§10) and backed **in memory** for the run, which the command says on its way in rather than leaving to be discovered: a `dev` command has no data directory to keep a store in, so a stateful block round-trips its keys within one run and starts from nothing on the next. Persistence across runs is what a node is for.
 
 ## 13. Expansion list (for the in-depth pass)
 

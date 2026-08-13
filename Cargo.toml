@@ -220,6 +220,22 @@ utoipa = { version = "5", features = ["axum_extras"] }
 async-stream = "0.3"
 futures-core = "0.3"
 
+# ── the state store's dependency (DAEMON §10) ────────────────────────────────
+#
+# What backs `eio:state` (ABI §7.2). **Zero dependencies of its own** — measured:
+# `cargo tree` for redb 4.1 is a single node. sled, measured the same way, is 17
+# crates including `libc`, `parking_lot` and `crossbeam`, plus a background flush
+# thread it configures by default; anything with a C library in it would be paid
+# for by the arm release build. A node runs on a Pi with an SD card, and a store
+# that needs a compaction daemon to stay healthy is an operational burden a stream
+# processor should not add.
+#
+# One file, one write transaction per `state_put`, fsync on commit (its default
+# `Durability::Immediate`). That is the durability posture ABI §7.2 leaves to the
+# host, stated: the value is on the disk before the guest's call returns, which is
+# what makes a stateful block survive a restart rather than probably survive one.
+redb = "4.1"
+
 # ── the guest's own dependencies (compiled into every block) ─────────────────
 #
 # Both are the guest's alone: nothing on the host side may reach for either, and

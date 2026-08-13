@@ -32,6 +32,7 @@ mod observe;
 mod registry;
 mod router;
 mod run;
+mod state;
 
 #[cfg(test)]
 mod conformance;
@@ -268,9 +269,16 @@ async fn run_node(
         "node"
     );
 
+    // The node's `eio:state` store, opened once for the whole node (DAEMON §10). Before boot,
+    // for the reason the listener is: a `state/` this node cannot open is a node that would
+    // start every stateful block and fail its first `state_put`, which is a worse thing to
+    // find out about than a refusal to start.
+    let store = state::Store::open(&node.layout().state_store())?;
+
     let executor =
         executor::Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())?
-            .observing(std::sync::Arc::clone(&bus));
+            .observing(std::sync::Arc::clone(&bus))
+            .storing(store);
     let services = boot::boot(&node, &executor).await;
     let counts = services.counts();
     tracing::info!(

@@ -245,10 +245,17 @@ impl Layout<'_> {
     }
 
     /// `state/`: what backs `eio:state` (DAEMON §10, ABI §7.2).
-    ///
-    /// Created at boot so the store has somewhere to land; opening one is eieio-8yq.5.
     pub fn state(&self) -> PathBuf {
         self.root.join("state")
+    }
+
+    /// `state/state.redb`: the store itself (DAEMON §10).
+    ///
+    /// Here rather than at each caller because a node's paths are this type's answer, and the
+    /// three places that open the store — `run`, the API's test harness, and boot's — spelling
+    /// the join themselves is three chances to open a different file than the daemon writes.
+    pub fn state_store(&self) -> PathBuf {
+        self.state().join(crate::state::Store::FILE)
     }
 
     /// `auth/`: token material (SCOPE §3.11).

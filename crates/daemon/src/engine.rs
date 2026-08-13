@@ -14,9 +14,9 @@
 //! caller at a time and nothing here needs atomics. The two are reconciled by never putting
 //! a `HostFn` in the linker at all:
 //!
-//! - The linker defines all seven `eio:core` functions once, with ABI §7.0's exact
-//!   signatures. Each definition is a closure capturing a [`CoreFn`] — a plain enum — so it
-//!   is trivially `Send + Sync`.
+//! - The linker defines all seven `eio:core` functions and all three `eio:state` ones once,
+//!   with ABI §7.0's and §7.2's exact signatures. Each definition is a closure capturing an
+//!   [`Import`] — a plain enum — so it is trivially `Send + Sync`.
 //! - The real [`HostFn`]s live in the store's data, and `register` puts them there. The
 //!   store is per-instance and never leaves its thread, so nothing about it needs to be
 //!   `Send`.
@@ -61,7 +61,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use eio_host_core::exports::{core_fn, namespace};
+use eio_host_core::exports::{core_fn, namespace, state_fn};
 use eio_host_core::{
     Arg, Engine, EngineError, ExprBudgets, HostCall, HostFn, Memory, Ret, Trap, TrapKind,
     memory_range,
@@ -69,7 +69,7 @@ use eio_host_core::{
 use eio_manifest::MEMORY_EXPORT;
 use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFeatures};
 
-/// The one `eio:core` function a handler could not answer.
+/// What a host function with no handler answers.
 ///
 /// A missing or wrongly-shaped handler is a *host* bug — registration happens before the
 /// guest runs — so the guest is told the truth about this host rather than being given a
@@ -160,14 +160,87 @@ impl CoreFn {
         }
     }
 
-    /// Its slot in [`State::core`].
-    const fn slot(self) -> usize {
-        self as usize
-    }
-
     /// The function `name` denotes, if `eio:core` has one.
     fn from_name(name: &str) -> Option<CoreFn> {
         CoreFn::ALL.into_iter().find(|f| f.name() == name)
+    }
+}
+
+/// The three `eio:state` functions (ABI §7.2), as slots in the dispatch table.
+///
+/// A second enum beside [`CoreFn`] rather than one flat list, because the two namespaces are
+/// not the same kind of thing: §7.0 is always available and §7.2 is a capability a block has
+/// to declare (§4.3). What they share is the slot table, through [`Import`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateFn {
+    Get,
+    Put,
+    Del,
+}
+
+impl StateFn {
+    /// Every one, in ABI §7.2's table order.
+    const ALL: [StateFn; 3] = [StateFn::Get, StateFn::Put, StateFn::Del];
+
+    /// The name the guest imports it as.
+    const fn name(self) -> &'static str {
+        match self {
+            StateFn::Get => state_fn::GET,
+            StateFn::Put => state_fn::PUT,
+            StateFn::Del => state_fn::DEL,
+        }
+    }
+
+    /// The function `name` denotes, if `eio:state` has one.
+    fn from_name(name: &str) -> Option<StateFn> {
+        StateFn::ALL.into_iter().find(|f| f.name() == name)
+    }
+}
+
+/// One host function this binding can dispatch to (ABI §7.0, §7.2).
+///
+/// The slot table is flat, and this is what indexes it: a linker closure names its import as
+/// a constant, and [`Engine::register`] resolves a `(namespace, name)` pair to the same slot.
+/// A namespace the daemon has no functions in resolves to nothing at all, which is what makes
+/// "this host implements `eio:core` and `eio:state`" a single statement rather than one per
+/// call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Import {
+    Core(CoreFn),
+    State(StateFn),
+}
+
+impl Import {
+    /// How many slots the table has.
+    const COUNT: usize = CoreFn::ALL.len() + StateFn::ALL.len();
+
+    /// Its slot in [`State::slots`].
+    const fn slot(self) -> usize {
+        match self {
+            Import::Core(function) => function as usize,
+            Import::State(function) => CoreFn::ALL.len() + function as usize,
+        }
+    }
+
+    /// The import `namespace`.`name` denotes, if this host implements it.
+    fn from_name(namespace: &str, name: &str) -> Option<Import> {
+        match namespace {
+            namespace::CORE => CoreFn::from_name(name).map(Import::Core),
+            namespace::STATE => StateFn::from_name(name).map(Import::State),
+            _ => None,
+        }
+    }
+}
+
+impl From<CoreFn> for Import {
+    fn from(function: CoreFn) -> Import {
+        Import::Core(function)
+    }
+}
+
+impl From<StateFn> for Import {
+    fn from(function: StateFn) -> Import {
+        Import::State(function)
     }
 }
 
@@ -182,8 +255,8 @@ struct State {
     /// that can reach a host function goes through [`Runtime::instantiate`], which fails
     /// unless the module exports `memory` (ABI §4.1).
     memory: Option<wasmtime::Memory>,
-    /// The registered handlers, indexed by [`CoreFn::slot`].
-    core: [Option<HostFn>; CoreFn::ALL.len()],
+    /// The registered handlers, indexed by [`Import::slot`].
+    slots: [Option<HostFn>; Import::COUNT],
 }
 
 /// What one guest entry is allowed to consume (ABI §10), and what one expression is (EXPR §9).
@@ -439,12 +512,13 @@ impl Runtime {
     pub fn instantiate(&self, module: &Module) -> anyhow::Result<Guest> {
         let mut linker = Linker::new(&self.engine);
         link_core(&mut linker)?;
+        link_state(&mut linker)?;
 
         let mut store = Store::new(
             &self.engine,
             State {
                 memory: None,
-                core: [const { None }; CoreFn::ALL.len()],
+                slots: [const { None }; Import::COUNT],
             },
         );
         // Before instantiation, not just before the callbacks: a store with fuel metering on
@@ -594,21 +668,16 @@ impl Engine for Guest {
     }
 
     fn register(&mut self, ns: &str, name: &str, f: HostFn) -> Result<(), EngineError> {
-        if ns != namespace::CORE {
-            // Only `eio:core` is implemented on this host. A block needing more is refused
-            // at load time with the capability named (DAEMON §12); reaching here means a
-            // caller registered for a namespace the linker never defined, and the guest
-            // could not have imported it.
+        // `eio:core` (ABI §7.0) and `eio:state` (§7.2) are what this host implements. A block
+        // needing anything else is refused at load time with the capability named (DAEMON
+        // §12); reaching here with another namespace means a caller registered for one the
+        // linker never defined, and the guest could not have imported it.
+        let Some(import) = Import::from_name(ns, name) else {
             return Err(EngineError::Engine(format!(
-                "this host implements no host functions in {ns:?}"
-            )));
-        }
-        let Some(function) = CoreFn::from_name(name) else {
-            return Err(EngineError::Engine(format!(
-                "{ns} has no function named {name:?} (ABI §7.0)"
+                "this host implements no host function {ns} {name:?} (ABI §7.0, §7.2)"
             )));
         };
-        let slot = &mut self.store.data_mut().core[function.slot()];
+        let slot = &mut self.store.data_mut().slots[import.slot()];
         if slot.is_some() {
             return Err(EngineError::DuplicateImport {
                 namespace: ns.to_string(),
@@ -704,6 +773,62 @@ fn link_core(linker: &mut Linker<State>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Defines `eio:state`'s three functions on `linker`, with ABI §7.2's signatures.
+///
+/// Defined whatever the module imports, like `eio:core`: a linker definition nothing imports
+/// costs nothing, and choosing which to define from the manifest would put ABI §4.3's
+/// capability question in the engine, where §4.3 explicitly does not want it. What decides
+/// whether a *guest* can use them is the manifest — a module importing `eio:state` without
+/// declaring the capability is refused before it reaches here (ABI §4.3) — and whether a
+/// handler was registered at all, since an unregistered slot answers `ERR_UNSUPPORTED`.
+fn link_state(linker: &mut Linker<State>) -> anyhow::Result<()> {
+    let ns = namespace::STATE;
+    linker.func_wrap(
+        ns,
+        StateFn::Get.name(),
+        |mut caller: Caller<'_, State>, key: i32, key_len: i32, buf: i32, cap: i32| -> i32 {
+            i32_of(dispatch(
+                &mut caller,
+                StateFn::Get,
+                &[
+                    Arg::I32(key),
+                    Arg::I32(key_len),
+                    Arg::I32(buf),
+                    Arg::I32(cap),
+                ],
+            ))
+        },
+    )?;
+    linker.func_wrap(
+        ns,
+        StateFn::Put.name(),
+        |mut caller: Caller<'_, State>, key: i32, key_len: i32, val: i32, val_len: i32| -> i32 {
+            i32_of(dispatch(
+                &mut caller,
+                StateFn::Put,
+                &[
+                    Arg::I32(key),
+                    Arg::I32(key_len),
+                    Arg::I32(val),
+                    Arg::I32(val_len),
+                ],
+            ))
+        },
+    )?;
+    linker.func_wrap(
+        ns,
+        StateFn::Del.name(),
+        |mut caller: Caller<'_, State>, key: i32, key_len: i32| -> i32 {
+            i32_of(dispatch(
+                &mut caller,
+                StateFn::Del,
+                &[Arg::I32(key), Arg::I32(key_len)],
+            ))
+        },
+    )?;
+    Ok(())
+}
+
 /// Runs the handler registered in `function`'s slot.
 ///
 /// The one place a guest→host call crosses into `eio_host_core`, and the reason the
@@ -712,14 +837,14 @@ fn link_core(linker: &mut Linker<State>) -> anyhow::Result<()> {
 /// and its own `&mut HostFn` without either being reconstructed from the other. The memory
 /// borrow ends with this function, which is ABI §9.3 — "host MUST NOT retain guest pointers
 /// past the call" — as a lifetime rather than as a rule.
-fn dispatch(caller: &mut Caller<'_, State>, function: CoreFn, args: &[Arg]) -> Ret {
+fn dispatch(caller: &mut Caller<'_, State>, import: impl Into<Import>, args: &[Arg]) -> Ret {
     let Some(memory) = caller.data().memory else {
         // Unreachable: `Runtime::instantiate` sets this before returning a `Guest`, and
         // there is no other way to reach a host function.
         return Ret::None;
     };
     let (bytes, state) = memory.data_and_store_mut(caller);
-    let Some(handler) = state.core[function.slot()].as_mut() else {
+    let Some(handler) = state.slots[import.into().slot()].as_mut() else {
         return Ret::None;
     };
     let mut view = View(bytes);
@@ -734,7 +859,7 @@ fn i32_of(ret: Ret) -> i32 {
     match ret {
         Ret::I32(value) => value,
         _ => {
-            tracing::error!("an eio:core i32 function is unimplemented on this host");
+            tracing::error!("an eio:* i32 host function is unimplemented on this host");
             UNIMPLEMENTED
         }
     }
@@ -819,12 +944,43 @@ mod tests {
     }
 
     #[test]
-    fn slots_are_the_declaration_order() {
-        for (index, function) in CoreFn::ALL.into_iter().enumerate() {
-            assert_eq!(function.slot(), index);
-            assert_eq!(CoreFn::from_name(function.name()), Some(function));
+    fn state_fn_names_match_the_shared_tables() {
+        let names: Vec<&str> = StateFn::ALL.into_iter().map(StateFn::name).collect();
+        assert_eq!(
+            names,
+            eio_manifest::Capability::State.functions(),
+            "the linker defines exactly the functions ABI §7.2 gives the capability"
+        );
+        assert_eq!(names, eio_host_core::exports::state_fn::ALL);
+    }
+
+    #[test]
+    fn every_import_has_its_own_slot_and_resolves_from_its_name() {
+        // The dispatch table is flat and indexed by these numbers, so two imports sharing a
+        // slot would be one handler answering the other's calls — `state_get` reached through
+        // `log`, and nothing failing to compile.
+        let imports: Vec<Import> = CoreFn::ALL
+            .into_iter()
+            .map(Import::Core)
+            .chain(StateFn::ALL.into_iter().map(Import::State))
+            .collect();
+        assert_eq!(imports.len(), Import::COUNT);
+        for (index, import) in imports.into_iter().enumerate() {
+            assert_eq!(import.slot(), index, "{import:?}");
+            let (namespace, name) = match import {
+                Import::Core(function) => (namespace::CORE, function.name()),
+                Import::State(function) => (namespace::STATE, function.name()),
+            };
+            assert_eq!(Import::from_name(namespace, name), Some(import));
         }
-        assert_eq!(CoreFn::from_name("frobnicate"), None);
+
+        assert_eq!(Import::from_name(namespace::CORE, "frobnicate"), None);
+        // A function of the right name in the wrong namespace is nothing: `eio:state`'s three
+        // are not reachable as `eio:core`'s, and a namespace this host has no functions in has
+        // no slots at all.
+        assert_eq!(Import::from_name(namespace::CORE, state_fn::GET), None);
+        assert_eq!(Import::from_name(namespace::STATE, core_fn::LOG), None);
+        assert_eq!(Import::from_name(namespace::GPIO, "gpio_read"), None);
     }
 
     /// Compiles `wat` on a real [`Runtime`], through the same call production code uses.

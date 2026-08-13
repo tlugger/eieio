@@ -254,6 +254,12 @@ pub struct Executor {
     mailbox: usize,
     /// Where every instance's events go, in a node (DAEMON §11). See [`Executor::observing`].
     bus: Option<Arc<crate::observe::Bus>>,
+    /// What backs `eio:state` for every instance built here (DAEMON §10).
+    ///
+    /// Not an `Option`: a block declaring the capability has to be given a store, and an
+    /// executor that might not have one would make that a runtime question. A node's is the
+    /// file under `state/`; everything else gets an in-memory one — see [`Executor::storing`].
+    state: crate::state::Store,
 }
 
 impl Executor {
@@ -288,9 +294,29 @@ impl Executor {
         self
     }
 
+    /// Backs `eio:state` with `store` from here on (DAEMON §10).
+    ///
+    /// A node's executor is given the file under its `state/` directory; `dev run-block`'s and
+    /// the tests' keep the in-memory store [`build`](Executor::build) gave them, which is what
+    /// DAEMON §12 already promises of a `dev` command — no service, no persistence, no API.
+    /// Set once at construction, like the bus, because it is a property of the process.
+    pub fn storing(mut self, store: crate::state::Store) -> Executor {
+        self.state = store;
+        self
+    }
+
     /// The bus every instance's events are drained into, if this executor has one.
     pub fn bus(&self) -> Option<&Arc<crate::observe::Bus>> {
         self.bus.as_ref()
+    }
+
+    /// What backs `eio:state` for the instances this executor builds (DAEMON §10).
+    ///
+    /// Reached by the management API's inspection endpoint (DAEMON §9) as well as by the
+    /// instances themselves, which is the point: there is one store on a node, and a second
+    /// view of a block's state would be a second answer to what it persisted.
+    pub fn state(&self) -> &crate::state::Store {
+        &self.state
     }
 
     /// See [`new`](Executor::new).
@@ -303,6 +329,10 @@ impl Executor {
             runtime: Arc::new(runtime),
             mailbox,
             bus: None,
+            // An in-memory store until somebody supplies a real one. A default of "no store"
+            // would mean every caller that never thought about state producing instances whose
+            // `state_put` fails, and a stateful block is the normal case for the fast loop.
+            state: crate::state::Store::in_memory()?,
         })
     }
 
@@ -366,6 +396,13 @@ impl Executor {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = oneshot::channel();
 
+        // This instance's slice of the node's store, resolved here rather than on the thread:
+        // the namespace is `(service, instance)` (DAEMON §10) and both are known already, so
+        // the thread receives something that cannot address anyone else's keys.
+        let state = self
+            .state
+            .namespace(prepared.service(), &descriptor.instance_id);
+
         let runtime = Arc::clone(&self.runtime);
         let thread = std::thread::Builder::new()
             // Visible in `top`, in a core file, and in a profiler — which is where an
@@ -376,7 +413,9 @@ impl Executor {
                 descriptor.instance_id
             ))
             .spawn(move || {
-                run_instance(runtime, prepared, inbox.rx, event_tx, started_tx, outlet)
+                run_instance(
+                    runtime, prepared, inbox.rx, event_tx, started_tx, outlet, state,
+                )
             })?;
 
         match started_rx.await {

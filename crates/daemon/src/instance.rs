@@ -13,8 +13,8 @@
 //! deployer as a return value rather than as a log line from somewhere else.
 //!
 //! What is left needs an engine and an `Rc`, so it happens on the thread: compile, link,
-//! register `eio:core`, check the module's ABI version (§12), compile the property
-//! expressions (§7.1), configure, start.
+//! register `eio:core` and — for a block that declared the capability — `eio:state`, check the
+//! module's ABI version (§12), compile the property expressions (§7.1), configure, start.
 //!
 //! # The loop is the serialization
 //!
@@ -31,7 +31,7 @@ use eio_host_core::{
     Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext, Running,
     Starting, Status, Trap, exports::optional, resolve,
 };
-use eio_manifest::{Abi, Manifest};
+use eio_manifest::{Abi, Capability, Manifest};
 use eio_signal::Batch;
 use tokio::sync::{mpsc, oneshot};
 
@@ -39,6 +39,7 @@ use crate::core_fns::{Core, Emission};
 use crate::engine::{Guest, Runtime};
 use crate::executor::{Event, Work};
 use crate::router::{Discard, Outlet};
+use crate::state::Namespace;
 use wasmtime::Module;
 
 /// Everything needed to build one instance, as a caller supplies it.
@@ -161,6 +162,7 @@ pub fn run_instance(
     events: mpsc::UnboundedSender<Event>,
     started: oneshot::Sender<anyhow::Result<()>>,
     outlet: Outlet,
+    state: Namespace,
 ) {
     let local = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -171,7 +173,7 @@ pub fn run_instance(
         // `LocalSet` (DAEMON §5) — the place ABI §7.3's and §7.6's completions will be
         // awaited alongside the mailbox when those capabilities exist.
         let task = tokio::task::spawn_local(instance_task(
-            runtime, prepared, work, events, started, outlet,
+            runtime, prepared, work, events, started, outlet, state,
         ));
         // The task owns the instance, so nothing here can observe it half-dropped. A panic
         // inside it has already been logged by the panic hook; `Executor::spawn` and
@@ -188,6 +190,7 @@ async fn instance_task(
     events: mpsc::UnboundedSender<Event>,
     started: oneshot::Sender<anyhow::Result<()>>,
     outlet: Outlet,
+    state: Namespace,
 ) {
     // DAEMON §11: every line from here on — the daemon's own and the guest's `log` calls
     // alike — carries this identity. Entered per callback rather than held across the loop,
@@ -200,7 +203,7 @@ async fn instance_task(
     );
 
     let (mut live, mut running) =
-        match span.in_scope(|| Live::start(&runtime, prepared, events, outlet)) {
+        match span.in_scope(|| Live::start(&runtime, prepared, events, outlet, state)) {
             Ok(started) => started,
             Err(error) => {
                 // Nothing was spawned that needs unwinding: `start` reports only failures that
@@ -286,6 +289,7 @@ impl Live {
         prepared: Prepared,
         events: mpsc::UnboundedSender<Event>,
         outlet: Outlet,
+        state: Namespace,
     ) -> anyhow::Result<(Live, Running<Guest>)> {
         // ABI §11.1's `required`/`default` rule, then EXPR §10's static analysis. Both are
         // configuration-time gates, and a failure of either is a rejection the deployer
@@ -312,6 +316,17 @@ impl Live {
         let core = Core::new(descriptor.limits, budgets, descriptor.outputs.len() as u32);
         core.register(&mut guest, &properties)
             .map_err(|error| anyhow::anyhow!("wiring eio:core: {error}"))?;
+
+        // ABI §7.2, for a block that declared the capability and only then: §4.3 makes the
+        // import section authoritative, so registering `eio:state` for a block that never
+        // asked would be this host offering a capability nothing imports. The manifest is
+        // where the question is answered because that is where the cross-check already
+        // resolved it (`eio_manifest::validate`, above).
+        if prepared.manifest.capabilities.contains(&Capability::State) {
+            eio_host_core::state::register(&mut guest, state)
+                .map_err(|error| anyhow::anyhow!("wiring eio:state: {error}"))?;
+        }
+
         check_abi_version(&mut guest, &prepared.manifest)?;
 
         let mut live = Live {
@@ -559,16 +574,21 @@ impl Live {
 
 /// Refuses a block needing a capability this host does not implement.
 ///
-/// `eio:core` is all the daemon has. Refusing here, by name, is what SCOPE §3.3's capability
-/// negotiation amounts to for a node with no devices — and it is much more useful than the
-/// linker's answer, which would name a missing symbol rather than the capability that asked
-/// for it.
+/// `eio:core` (ABI §7.0) and `eio:state` (§7.2, DAEMON §10) are what the daemon has; the three
+/// device namespaces are still nobody's. Refusing here, by name, is what SCOPE §3.3's
+/// capability negotiation amounts to for a node with no devices — and it is much more useful
+/// than the linker's answer, which would name a missing symbol rather than the capability that
+/// asked for it.
+///
+/// Spelled from `eio_manifest`'s own name for each capability rather than as string literals,
+/// so that a capability this host implements cannot be listed here under a name no manifest
+/// uses.
 ///
 /// Reachable from boot as well as from here, because DAEMON §3 step 2 lists the capability
 /// check among a service's *validations*: a block wanting `gpio` on a node with no GPIO is a
 /// deployment aimed at the wrong node, which an operator answers by moving it — not by
 /// looking at why a service would not start.
-pub const IMPLEMENTED_CAPABILITIES: &[&str] = &[];
+pub const IMPLEMENTED_CAPABILITIES: &[&str] = &[Capability::State.as_str()];
 
 /// See [`IMPLEMENTED_CAPABILITIES`].
 pub fn refuse_unimplemented_capabilities(manifest: &Manifest) -> anyhow::Result<()> {

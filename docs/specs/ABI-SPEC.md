@@ -253,7 +253,7 @@ Properties are always expressions, evaluated **host-side, per-signal, on demand*
 
 ### 7.2 `eio:state` — capability `state`
 
-Durable KV, scoped to the block instance (namespaced by host: system/service/instance).
+Durable KV, scoped to the block instance. The host composes the namespace and the guest never sees it: a block writes `count` and the host keys that under the instance it belongs to. Scoping by **service and instance** is required, because a block instance's state is its own (SERVICE §2 makes an id unique only within its service file); a `system` component is the host's option and not an obligation — a node that does not know which System it is in does not have one to key by (DAEMON §10).
 
 |Import|Signature|
 |---|---|

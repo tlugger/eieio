@@ -22,7 +22,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
-use eio_host_core::{Arg, Engine, EngineError, ErrorCode, HostCall, OutBuffer, Ret};
+use eio_host_core::{
+    Arg, Engine, EngineError, ErrorCode, HostCall, OutBuffer, Ret, StateError, StateStore,
+};
 use eio_manifest::Capability;
 
 /// What a capability function answers next, when a scenario has scripted one.
@@ -155,9 +157,14 @@ impl Capabilities {
             return self.scripted(answer, name, call);
         }
         match name {
-            "state_get" => self.state_get(call),
-            "state_put" => self.state_put(call),
-            "state_del" => self.state_del(call),
+            // `eio:state`'s three are `eio_host_core`'s, over this harness's map. ABI §13 makes
+            // divergence between two hosts a conformance bug, so the reference host does not
+            // get its own reading of §7.2's argument lists and §8's size convention: it answers
+            // with the same code the daemon does, and a scenario that passes here for the wrong
+            // reason would have to pass there for the same wrong reason.
+            "state_get" => eio_host_core::state::get(call, &mut *self.shared.borrow_mut()),
+            "state_put" => eio_host_core::state::put(call, &mut *self.shared.borrow_mut()),
+            "state_del" => eio_host_core::state::del(call, &mut *self.shared.borrow_mut()),
             "timer_set" | "gpio_watch" | "http_request" => Ret::I32(self.next_id()),
             // ABI §8's `ERR_NOT_FOUND` is "key/id does not exist", so an unknown id is one.
             // Nothing here tracks which ids are live, because a scenario that cancels an id
@@ -194,63 +201,6 @@ impl Capabilities {
         }
     }
 
-    /// `state_get(key, key_len, buf, cap) -> i32` (ABI §7.2), under the size convention.
-    fn state_get(&self, call: HostCall<'_>) -> Ret {
-        let [
-            Arg::I32(key),
-            Arg::I32(key_len),
-            Arg::I32(buf),
-            Arg::I32(cap),
-        ] = *call.args
-        else {
-            return Ret::I32(ErrorCode::InvalidArg.as_i32());
-        };
-        let Ok(key) = call.memory.read(key as u32, key_len as u32) else {
-            return Ret::I32(ErrorCode::InvalidArg.as_i32());
-        };
-        let Some(value) = self.shared.borrow().store.get(&key).cloned() else {
-            return Ret::I32(ErrorCode::NotFound.as_i32());
-        };
-        Ret::I32(OutBuffer::new(buf as u32, cap as u32).fill(call.memory, &value))
-    }
-
-    /// `state_put(key, key_len, val, val_len) -> i32` (ABI §7.2).
-    fn state_put(&self, call: HostCall<'_>) -> Ret {
-        let [
-            Arg::I32(key),
-            Arg::I32(key_len),
-            Arg::I32(val),
-            Arg::I32(val_len),
-        ] = *call.args
-        else {
-            return Ret::I32(ErrorCode::InvalidArg.as_i32());
-        };
-        let (Ok(key), Ok(value)) = (
-            call.memory.read(key as u32, key_len as u32),
-            call.memory.read(val as u32, val_len as u32),
-        ) else {
-            return Ret::I32(ErrorCode::InvalidArg.as_i32());
-        };
-        self.shared.borrow_mut().store.insert(key, value);
-        Ret::I32(0)
-    }
-
-    /// `state_del(key, key_len) -> i32` (ABI §7.2).
-    ///
-    /// `0` whether or not the key was there. ABI §7.2 does not say which it is, and §8's
-    /// `ERR_NOT_FOUND` is a plausible other reading — so a scenario MUST NOT assert on the
-    /// missing-key case until the spec decides (eieio follow-up).
-    fn state_del(&self, call: HostCall<'_>) -> Ret {
-        let [Arg::I32(key), Arg::I32(key_len)] = *call.args else {
-            return Ret::I32(ErrorCode::InvalidArg.as_i32());
-        };
-        let Ok(key) = call.memory.read(key as u32, key_len as u32) else {
-            return Ret::I32(ErrorCode::InvalidArg.as_i32());
-        };
-        self.shared.borrow_mut().store.remove(&key);
-        Ret::I32(0)
-    }
-
     /// The next id, for `timer_set`, `gpio_watch` and `http_request` (ABI §8's id convention).
     fn next_id(&self) -> i32 {
         let mut shared = self.shared.borrow_mut();
@@ -275,6 +225,27 @@ impl Capabilities {
 impl Default for Capabilities {
     fn default() -> Capabilities {
         Capabilities::new()
+    }
+}
+
+/// The harness's `eio:state`: a map that round-trips, and never refuses (ABI §7.2).
+///
+/// A refusal is *scripted* rather than produced here — `ERR_THROTTLED` is a property of the
+/// hardware, so a scenario injects one through [`Answer::Error`] and this store stays the
+/// honest one it is compared against.
+impl StateStore for Shared {
+    fn get(&mut self, key: &[u8]) -> Result<Option<Vec<u8>>, StateError> {
+        Ok(self.store.get(key).cloned())
+    }
+
+    fn put(&mut self, key: &[u8], value: &[u8]) -> Result<(), StateError> {
+        self.store.insert(key.to_vec(), value.to_vec());
+        Ok(())
+    }
+
+    fn del(&mut self, key: &[u8]) -> Result<(), StateError> {
+        self.store.remove(key);
+        Ok(())
     }
 }
 

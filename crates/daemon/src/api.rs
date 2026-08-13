@@ -32,6 +32,7 @@ mod logs;
 mod node;
 mod services;
 mod sse;
+mod state;
 mod taps;
 
 use std::sync::Arc;
@@ -112,6 +113,11 @@ pub fn routes() -> Vec<Route> {
             &["POST"],
             "/services/{service}/reload",
             post(services::reload),
+        ),
+        (
+            &["GET"],
+            "/services/{service}/state/{instance}",
+            get(state::instance_state),
         ),
         (
             &["GET", "POST"],

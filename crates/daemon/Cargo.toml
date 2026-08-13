@@ -57,6 +57,10 @@ utoipa.workspace = true
 async-stream.workspace = true
 futures-core.workspace = true
 
+# What backs `eio:state` (DAEMON §10). One file under the node's `state/`, and the
+# only durable thing on a node that is not a file an operator wrote.
+redb.workspace = true
+
 wasmtime.workspace = true
 tokio.workspace = true
 tracing.workspace = true
