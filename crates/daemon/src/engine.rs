@@ -1246,6 +1246,56 @@ mod tests {
     }
 
     #[test]
+    fn what_the_engine_cannot_refuse_the_loader_does() {
+        // ABI §4.3's carve-out, from the daemon's side. Two of the six proposals are
+        // accepted only in part, and this engine accepts them whole — not by oversight but
+        // because a `Config` has one switch per proposal, and turning bulk memory off to
+        // refuse `table.copy` would refuse the `memory.copy` in every Rust block with it.
+        //
+        // So the engine compiles these and `eio_manifest::validate` refuses them, and both
+        // halves are asserted here rather than only the second: a test that checked the
+        // loader alone would still pass on the day someone "fixed" this config, leaving
+        // one refusal where §4.3 requires two layers. `crates/manifest/tests/portable.rs`
+        // carries the full carve-out; three cases are enough to pin the pairing.
+        let runtime = Runtime::new(Budgets::default()).expect("an engine");
+        for (feature, wat) in [
+            (
+                "table.copy",
+                r#"(module (table 4 funcref)
+                     (func (export "f") (table.copy (i32.const 2) (i32.const 0) (i32.const 1))))"#,
+            ),
+            (
+                "table.get",
+                r#"(module (table 4 funcref)
+                     (func (export "f") (drop (table.get (i32.const 0)))))"#,
+            ),
+            (
+                "data.drop",
+                r#"(module (data $d "\07") (func (export "f") (data.drop $d)))"#,
+            ),
+        ] {
+            compile(&runtime, wat)
+                .unwrap_or_else(|e| panic!("the engine has no switch that refuses {feature}: {e}"));
+
+            // No manifest section, so validation would fail for that reason too — which is
+            // exactly why the variant is matched rather than the fact of an error.
+            let wasm = wat::parse_str(wat).expect("the snippet assembles");
+            let error = eio_manifest::validate(&wasm, None)
+                .err()
+                .unwrap_or_else(|| panic!("{feature} is carved out of the accepted set"));
+            assert!(
+                matches!(error, eio_manifest::ModuleError::Unportable { .. }),
+                "{feature} must be refused as unportable, and was: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(feature),
+                "the refusal of {feature} has to name it, and said: {message}"
+            );
+        }
+    }
+
+    #[test]
     fn wasmparsers_mvp_set_is_not_one_this_build_can_ask_for() {
         // Why [`MVP`] subtracts `GC_TYPES` rather than being wasmparser's set as-is: with
         // the `gc` cargo feature compiled out, asking for that flag does not merely admit

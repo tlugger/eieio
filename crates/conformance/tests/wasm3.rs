@@ -364,92 +364,335 @@ fn wasm3_passes_the_conformance_suite() {
     assert!(ran >= 12, "only {ran} scenario(s) reached wasm3");
 }
 
-/// What wasm3 actually executes, instruction by instruction (SCOPE §3.2, ABI §1.1).
+/// Wraps `contents` in a module with a memory, loads it on a fresh wasm3, calls its `f`,
+/// and answers what came back.
+///
+/// The wrapper is here rather than in each of the forty cases below so that a case is only
+/// its instruction — which is what the two tables are read for. The memory export is not
+/// incidental: [`Host::instantiate`] refuses a module without one, so a snippet is the same
+/// shape as something this file would really load.
+///
+/// One engine per snippet: the question each case asks is what wasm3 does with a module
+/// *by itself*, and the refusals below happen at load or at eager compilation, which a
+/// shared engine would let one case's failure reach another's.
+fn run(contents: &str) -> Result<i64, String> {
+    let text = format!(r#"(module (memory (export "memory") 1) {contents})"#);
+    let wasm = wat::parse_str(&text).expect("the snippet assembles");
+    let mut config = Config::new();
+    config.compilation_mode(CompilationMode::Eager);
+    let engine = wasm3x::Engine::new(&config);
+    let module = Module::new(&engine, &wasm).map_err(|e| format!("refused: {e}"))?;
+    let mut store = Store::new(&engine, State::default());
+    let linker = Linker::new(&engine);
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("would not instantiate: {e}"))?;
+    let func = instance.get_func(&store, "f").ok_or("exports no f")?;
+    let results = func.ty(&store).map(|ty| ty.results().len()).unwrap_or(1);
+    let mut out = [Val::I32(0)];
+    func.call(&mut store, &[], &mut out[..results])
+        .map_err(|e| format!("would not run: {e}"))?;
+    match out[0] {
+        Val::I32(value) => Ok(i64::from(value)),
+        Val::I64(value) => Ok(value),
+        ref other => Err(format!("returned {other:?}")),
+    }
+}
+
+/// What wasm3 actually executes, instruction by instruction (SCOPE §3.2, ABI §1.1, §4.3).
 ///
 /// The measurement that settles the accepted feature set, kept as a test rather than written
 /// into a spec as prose — because the spec previously *did* assert wasm3's limits from its
 /// documentation, and was wrong. wasm3's own README calls bulk memory "partial" and reference
-/// types "in progress"; it runs both.
+/// types "in progress"; it runs part of each.
+///
+/// Every instruction of §4.3's portable subset appears here, not one per proposal. The earlier
+/// version of this test checked six instructions and let a whole proposal in behind each,
+/// which is how `table.copy` came to be accepted by two of this repository's hosts and refused
+/// by the third — see the companion test below for the half that was missing.
 ///
 /// Each case returns a value that could only be produced by executing the instruction
 /// correctly, so an engine that parsed and ignored one would fail here.
 #[test]
-fn wasm3_executes_every_feature_the_rust_toolchain_emits() {
-    for (proposal, expected, wat) in [
+fn wasm3_executes_every_instruction_of_the_portable_subset() {
+    for (instruction, expected, wat) in [
         (
             "MVP control",
             42,
-            r#"(module (memory (export "memory") 1)
-                 (func (export "f") (result i32) (i32.const 42)))"#,
+            r#"(func (export "f") (result i32) (i32.const 42))"#,
         ),
+        // ── bulk memory, the accepted half ──
         (
-            "bulk memory: memory.copy",
+            "memory.copy",
             7,
-            r#"(module (memory (export "memory") 1)
-                 (func (export "f") (result i32)
+            r#"(func (export "f") (result i32)
                    (i32.store (i32.const 0) (i32.const 7))
                    (memory.copy (i32.const 64) (i32.const 0) (i32.const 4))
-                   (i32.load (i32.const 64))))"#,
+                   (i32.load (i32.const 64)))"#,
         ),
         (
-            "bulk memory: memory.fill",
+            "memory.fill",
             9,
-            r#"(module (memory (export "memory") 1)
-                 (func (export "f") (result i32)
+            r#"(func (export "f") (result i32)
                    (memory.fill (i32.const 0) (i32.const 9) (i32.const 4))
-                   (i32.load8_u (i32.const 2))))"#,
+                   (i32.load8_u (i32.const 2)))"#,
         ),
+        // ── sign extension, whole. Each takes an all-ones field of its own width, so a
+        // narrower or wider extension than the one asked for gives a different answer.
         (
-            "sign extension",
+            "i32.extend8_s",
             -1,
-            r#"(module (memory (export "memory") 1)
-                 (func (export "f") (result i32) (i32.extend8_s (i32.const 0xFF))))"#,
+            r#"(func (export "f") (result i32) (i32.extend8_s (i32.const 0xFF)))"#,
         ),
         (
-            "non-trapping float-to-int",
+            "i32.extend16_s",
+            -1,
+            r#"(func (export "f") (result i32) (i32.extend16_s (i32.const 0xFFFF)))"#,
+        ),
+        (
+            "i64.extend8_s",
+            -1,
+            r#"(func (export "f") (result i64) (i64.extend8_s (i64.const 0xFF)))"#,
+        ),
+        (
+            "i64.extend16_s",
+            -1,
+            r#"(func (export "f") (result i64) (i64.extend16_s (i64.const 0xFFFF)))"#,
+        ),
+        (
+            "i64.extend32_s",
+            -1,
+            r#"(func (export "f") (result i64) (i64.extend32_s (i64.const 0xFFFFFFFF)))"#,
+        ),
+        // ── non-trapping float-to-int, whole. Saturation and NaN are the whole point of
+        // the proposal — a plain `trunc` traps on both — so every case is out of range.
+        (
+            "i32.trunc_sat_f32_s",
+            i64::from(i32::MAX),
+            r#"(func (export "f") (result i32) (i32.trunc_sat_f32_s (f32.const 1e30)))"#,
+        ),
+        (
+            "i32.trunc_sat_f32_u",
+            i64::from(u32::MAX as i32),
+            r#"(func (export "f") (result i32) (i32.trunc_sat_f32_u (f32.const 1e30)))"#,
+        ),
+        (
+            "i32.trunc_sat_f64_s",
+            0,
+            r#"(func (export "f") (result i32) (i32.trunc_sat_f64_s (f64.const nan)))"#,
+        ),
+        (
+            "i32.trunc_sat_f64_u",
+            i64::from(u32::MAX as i32),
+            r#"(func (export "f") (result i32) (i32.trunc_sat_f64_u (f64.const 1e30)))"#,
+        ),
+        (
+            "i64.trunc_sat_f32_s",
+            i64::MAX,
+            r#"(func (export "f") (result i64) (i64.trunc_sat_f32_s (f32.const 1e30)))"#,
+        ),
+        (
+            "i64.trunc_sat_f32_u",
+            -1,
+            r#"(func (export "f") (result i64) (i64.trunc_sat_f32_u (f32.const 1e30)))"#,
+        ),
+        (
+            "i64.trunc_sat_f64_s",
+            i64::MIN,
+            r#"(func (export "f") (result i64) (i64.trunc_sat_f64_s (f64.const -1e30)))"#,
+        ),
+        (
+            "i64.trunc_sat_f64_u",
+            -1,
+            r#"(func (export "f") (result i64) (i64.trunc_sat_f64_u (f64.const 1e30)))"#,
+        ),
+        // ── multi-value, whole ──
+        (
+            "multi-result block",
             3,
-            r#"(module (memory (export "memory") 1)
-                 (func (export "f") (result i32) (i32.trunc_sat_f32_s (f32.const 3.9))))"#,
+            r#"(func (export "f") (result i32)
+                   (i32.add (block (result i32 i32) (i32.const 1) (i32.const 2))))"#,
         ),
         (
-            "multi-value",
+            "multi-result function",
             3,
-            r#"(module (memory (export "memory") 1)
-                 (func (export "f") (result i32)
-                   (i32.add (block (result i32 i32) (i32.const 1) (i32.const 2)))))"#,
+            r#"(func $g (result i32 i32) (i32.const 1) (i32.const 2))
+                 (func (export "f") (result i32) (i32.add (call $g)))"#,
         ),
         (
-            "reference types: call_indirect encoding",
+            "block parameters",
+            3,
+            r#"(func (export "f") (result i32)
+                   (i32.const 1) (i32.const 2)
+                   (block (param i32 i32) (result i32) (i32.add)))"#,
+        ),
+        (
+            "loop parameters",
+            3,
+            r#"(func (export "f") (result i32)
+                   (i32.const 1) (i32.const 2)
+                   (loop (param i32 i32) (result i32) (i32.add)))"#,
+        ),
+        (
+            "multi-result if",
+            3,
+            r#"(func (export "f") (result i32)
+                   (i32.add (if (result i32 i32) (i32.const 1)
+                     (then (i32.const 1) (i32.const 2))
+                     (else (i32.const 9) (i32.const 9)))))"#,
+        ),
+        // ── reference types, the accepted sliver: the encoding, not the value type ──
+        (
+            "call_indirect, implicit table 0",
             5,
-            r#"(module (memory (export "memory") 1)
-                 (table 1 funcref) (elem (i32.const 0) $g)
+            r#"(table 1 funcref) (elem (i32.const 0) $g)
                  (func $g (result i32) (i32.const 5))
                  (type $t (func (result i32)))
-                 (func (export "f") (result i32) (call_indirect (type $t) (i32.const 0))))"#,
+                 (func (export "f") (result i32) (call_indirect (type $t) (i32.const 0)))"#,
+        ),
+        (
+            "call_indirect, explicit table 0",
+            5,
+            r#"(table 1 funcref) (elem (i32.const 0) $g)
+                 (func $g (result i32) (i32.const 5))
+                 (type $t (func (result i32)))
+                 (func (export "f") (result i32) (call_indirect 0 (type $t) (i32.const 0)))"#,
+        ),
+        // ── mutable globals. Only the exported direction: an imported global cannot reach
+        // a block at all, because ABI §4.3 confines every import to an `eio:*` function.
+        (
+            "exported mutable global",
+            3,
+            r#"(global $g (export "g") (mut i32) (i32.const 1))
+                 (func (export "f") (result i32)
+                   (global.set $g (i32.const 3)) (global.get $g))"#,
         ),
     ] {
-        let wasm = wat::parse_str(wat).expect("the snippet assembles");
-        let mut config = Config::new();
-        config.compilation_mode(CompilationMode::Eager);
-        let engine = wasm3x::Engine::new(&config);
-        let module =
-            Module::new(&engine, &wasm).unwrap_or_else(|e| panic!("wasm3 refused {proposal}: {e}"));
-        let mut store = Store::new(&engine, State::default());
-        let linker = Linker::new(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .unwrap_or_else(|e| panic!("wasm3 would not instantiate {proposal}: {e}"));
-        let func = instance
-            .get_func(&store, "f")
-            .unwrap_or_else(|| panic!("{proposal} exports no f"));
-        let mut out = [Val::I32(0)];
-        func.call(&mut store, &[], &mut out)
-            .unwrap_or_else(|e| panic!("wasm3 would not run {proposal}: {e}"));
-        assert_eq!(
-            out[0].i32(),
-            Some(expected),
-            "wasm3 ran {proposal} and got the wrong answer, which is worse than refusing it"
-        );
+        match run(wat) {
+            Ok(value) => assert_eq!(
+                value, expected,
+                "wasm3 ran {instruction} and got the wrong answer, \
+                 which is worse than refusing it"
+            ),
+            Err(why) => panic!("wasm3 {why} for {instruction}"),
+        }
+    }
+}
+
+/// And what it refuses (ABI §4.3, the portable subset).
+///
+/// The other half of the measurement, and the half without which the first half means very
+/// little: four of the six proposals run whole on wasm3, but bulk memory and reference types
+/// do not, and their remainder is carved out of the accepted set. This test is what makes
+/// that carve-out a fact rather than a claim, in both directions — the day wasm3 gains one of
+/// these, a case here fails, and the failure is the notice that the accepted set can widen.
+///
+/// wasm3 refuses each at load or at eager compilation, never by running it and returning
+/// something plausible, which is why the assertion is on the refusal alone.
+///
+/// The daemon's engine accepts every one of these (`crates/daemon/src/engine.rs`), because a
+/// `Config` gates whole proposals and `memory.copy` cannot be admitted without `table.copy`.
+/// `eio_manifest::validate` is what refuses them on both hosts, and its vectors are
+/// `crates/manifest/tests/portable.rs`.
+#[test]
+fn wasm3_refuses_everything_the_portable_subset_carves_out() {
+    for (instruction, wat) in [
+        // ── bulk memory, the carved-out remainder ──
+        (
+            "memory.init",
+            r#"(data $d "\07\00\00\00")
+                 (func (export "f") (result i32)
+                   (memory.init $d (i32.const 32) (i32.const 0) (i32.const 4))
+                   (i32.load (i32.const 32)))"#,
+        ),
+        (
+            "data.drop",
+            r#"(data $d "\07")
+                 (func (export "f") (result i32) (data.drop $d) (i32.const 1))"#,
+        ),
+        (
+            "table.init",
+            r#"(table 4 funcref) (elem $e func $g)
+                 (func $g (result i32) (i32.const 5))
+                 (type $t (func (result i32)))
+                 (func (export "f") (result i32)
+                   (table.init $e (i32.const 1) (i32.const 0) (i32.const 1))
+                   (call_indirect (type $t) (i32.const 1)))"#,
+        ),
+        (
+            "table.copy",
+            r#"(table 4 funcref) (elem (i32.const 0) $g)
+                 (func $g (result i32) (i32.const 5))
+                 (type $t (func (result i32)))
+                 (func (export "f") (result i32)
+                   (table.copy (i32.const 2) (i32.const 0) (i32.const 1))
+                   (call_indirect (type $t) (i32.const 2)))"#,
+        ),
+        (
+            "elem.drop",
+            r#"(table 4 funcref)
+                 (elem $e func $g) (func $g (result i32) (i32.const 5))
+                 (func (export "f") (result i32) (elem.drop $e) (i32.const 1))"#,
+        ),
+        // ── reference types, everything but the call_indirect encoding ──
+        (
+            "ref.null and ref.is_null",
+            r#"(func (export "f") (result i32) (ref.is_null (ref.null func)))"#,
+        ),
+        (
+            "ref.func",
+            r#"(func $g) (elem declare func $g)
+                 (func (export "f") (result i32) (ref.is_null (ref.func $g)))"#,
+        ),
+        (
+            "table.get and table.set",
+            r#"(table 4 funcref) (elem (i32.const 0) $g)
+                 (func $g (result i32) (i32.const 5))
+                 (type $t (func (result i32)))
+                 (func (export "f") (result i32)
+                   (table.set (i32.const 3) (table.get (i32.const 0)))
+                   (call_indirect (type $t) (i32.const 3)))"#,
+        ),
+        (
+            "table.size",
+            r#"(table 4 funcref)
+                 (func (export "f") (result i32) (table.size))"#,
+        ),
+        (
+            "table.grow",
+            r#"(table 4 funcref)
+                 (func (export "f") (result i32)
+                   (table.grow (ref.null func) (i32.const 2)))"#,
+        ),
+        (
+            "table.fill",
+            r#"(table 4 funcref) (elem (i32.const 0) $g)
+                 (func $g (result i32) (i32.const 5))
+                 (type $t (func (result i32)))
+                 (func (export "f") (result i32)
+                   (table.fill (i32.const 1) (table.get (i32.const 0)) (i32.const 2))
+                   (call_indirect (type $t) (i32.const 2)))"#,
+        ),
+        (
+            "a reference value type outside a table",
+            r#"(func (export "f") (result i32) (local externref)
+                   (ref.is_null (local.get 0)))"#,
+        ),
+        (
+            "a second table",
+            r#"(table $a 1 funcref) (table $b 2 funcref)
+                 (elem (table $b) (i32.const 1) func $g)
+                 (func $g (result i32) (i32.const 5))
+                 (type $t (func (result i32)))
+                 (func (export "f") (result i32) (call_indirect $b (type $t) (i32.const 1)))"#,
+        ),
+    ] {
+        if let Ok(value) = run(wat) {
+            panic!(
+                "wasm3 ran {instruction} and returned {value} — it is inside the accepted \
+                 set after all, and ABI §4.3 should say so"
+            );
+        }
     }
 }
 
