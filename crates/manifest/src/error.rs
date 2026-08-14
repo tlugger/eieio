@@ -299,6 +299,25 @@ pub enum ModuleError {
         proposal: &'static str,
     },
 
+    /// The module uses a proposal outside §4.3's six that an engine *runs* rather than
+    /// refuses.
+    ///
+    /// Feature conformance is the engine's, and for six of the nine refused proposals it
+    /// stays the engine's. Three are measured exceptions: wasm3 loads, compiles and runs
+    /// `return_call`, an `i64`-indexed memory and a shared memory (eieio-7d8.26). A gap in
+    /// an engine is not a gap in the platform, so the loader closes those three and no
+    /// others — see `portable.rs` for why a bound of measurements is not a second
+    /// definition of the accepted set.
+    ///
+    /// Distinct from [`ModuleError::Unportable`] because it says something else: that is a
+    /// construct carved out from *within* the six, this is one from outside them.
+    PostMvp {
+        /// The instruction or construct, spelled as WASM text.
+        feature: &'static str,
+        /// The proposal it belongs to. §4.3 makes naming it a MUST for a loader refusal.
+        proposal: &'static str,
+    },
+
     /// An import came from outside the `eio:*` namespaces (§4.3).
     ///
     /// The import section is the capability system (§1), so an import the host cannot
@@ -430,6 +449,10 @@ impl fmt::Display for ModuleError {
             ModuleError::Unportable { feature, proposal } => write!(
                 f,
                 "{feature} is outside the portable subset of the {proposal} proposal — the leaf interpreter does not run it (§4.3)",
+            ),
+            ModuleError::PostMvp { feature, proposal } => write!(
+                f,
+                "{feature} is the {proposal} proposal, which is outside the accepted set — the leaf interpreter runs it instead of refusing it, so the loader refuses it (§4.3)",
             ),
             ModuleError::ForeignImport { namespace, name } => write!(
                 f,

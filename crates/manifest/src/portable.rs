@@ -1,44 +1,63 @@
-//! The portable subset of ABI §4.3's six proposals.
+//! What a module may contain if both hosts are to treat it the same way (ABI §4.3).
+//!
+//! Two duties, one walk, and the same reason behind both: an engine's feature
+//! configuration cannot express the accepted set, so the loader is where the rest of it
+//! is stated. Neither duty restates what the engine already gates.
+//!
+//! # 1. The portable subset — the part of the six the leaf interpreter does not run
 //!
 //! Four of the six run whole on the leaf interpreter. Two do not: wasm3 executes
 //! `memory.copy` and `memory.fill` but refuses the rest of bulk memory, and executes the
 //! `call_indirect` table-index encoding but refuses every other reference-types
-//! instruction. ABI §4.3 therefore carves that remainder out of the accepted set, and
-//! this module is where the carve-out is enforced.
+//! instruction. ABI §4.3 therefore carves that remainder out of the accepted set.
 //!
-//! # Why the loader, when §4.3 puts feature gating on the engine
-//!
-//! Because no engine can hold this. A feature configuration has one switch per
+//! No engine can hold that carve-out. A feature configuration has one switch per
 //! *proposal* — `wasmtime::Config`, WAMR's build flags, all of them — so a host that
 //! enables bulk memory to get `memory.copy` gets `table.copy` with it, and will run a
 //! module wasm3 refuses at flash time. That is exactly the two-host divergence ABI §13
-//! exists to prevent, and the engine has no setting that prevents it.
+//! exists to prevent, and the engine has no setting that prevents it. So this is a
+//! *narrowing* of what the engine already gates, and the only place the real set can be
+//! stated at all.
 //!
-//! So this is not a second definition of the accepted set competing with the engine's,
-//! which is what §4.3 rules out. It is a *narrowing* of what the engine already gates,
-//! and the only place the real set can be stated at all. The engine still owns the
-//! seventh proposal; this owns the part of the six that never became portable.
+//! # 2. The measured gaps — a proposal outside the six that an engine runs anyway
 //!
-//! # What it costs a block author
+//! The engine owns the seventh proposal *when it refuses one*. Measured, wasm3 does not
+//! always: it loads, compiles and runs a `return_call`, an `i64`-indexed memory and a
+//! shared memory, all three of which wasmtime refuses by name (eieio-7d8.26). For the
+//! two memory flags it is almost certainly ignoring the encoding rather than implementing
+//! the proposal, which is a silent misinterpretation and worse than an honest refusal.
+//!
+//! A gap in an engine is not a gap in the platform, so the loader closes it — for those
+//! constructs and no others. That bound is what keeps this from becoming the second,
+//! slower-moving definition of the accepted set §4.3 rules out: an entry earns its place
+//! by being measured, and leaves the day the engine refuses it and
+//! `crates/conformance/tests/wasm3.rs` fails.
+//!
+//! # What both cost a block author
 //!
 //! Nothing measurable. ABI §13.2's five golden blocks, built by stock rustc with no
-//! flags, contain `memory.copy`, `memory.fill`, one table and numeric locals — not one
-//! carved-out instruction between them. Rust reaches for the rest only through
-//! `externref` or a `-Z build-std` shared-memory build, neither of which a block does.
+//! flags, contain `memory.copy`, `memory.fill`, one table, one 32-bit unshared memory and
+//! numeric locals — not one refused construct between them. Rust reaches for the rest
+//! only through `externref`, a tail-call feature it does not emit, or a `-Z build-std`
+//! shared-memory build, none of which a block does.
 
-use wasmparser::{CompositeInnerType, Operator, Parser, Payload, TypeRef, ValType};
+use wasmparser::{CompositeInnerType, MemoryType, Operator, Parser, Payload, TypeRef, ValType};
 
 use crate::error::ModuleError;
 
-/// The proposals a carve-out can belong to, spelled as the rejection names them.
+/// The proposals a refusal can name, spelled as the rejection names them.
 ///
-/// ABI §4.3 requires a rejection to name the offending proposal; a carve-out rejection
-/// names the instruction too, because "bulk memory" alone would send an author looking
-/// for a compiler flag that would not have helped.
+/// ABI §4.3 requires a *loader* rejection to name the offending proposal — the message is
+/// the loader's own to write, unlike an engine's — and it names the construct too,
+/// because "bulk memory" alone would send an author looking for a compiler flag that
+/// would not have helped.
 const BULK_MEMORY: &str = "bulk memory";
 const REFERENCE_TYPES: &str = "reference types";
+const TAIL_CALL: &str = "tail call";
+const MEMORY64: &str = "memory64";
+const THREADS: &str = "threads";
 
-/// Refuses a module using anything ABI §4.3 carves out of the six accepted proposals.
+/// Refuses a module ABI §4.3 accepts on one host and not the other.
 ///
 /// Structural unreadability is [`ModuleError::Unreadable`], the same as everywhere else
 /// in this crate: whether the module is *valid* WASM remains the engine's judgement, and
@@ -62,6 +81,16 @@ pub(crate) fn check(wasm: &[u8]) -> Result<(), ModuleError> {
                 }
             }
             Payload::TableSection(reader) => tables += reader.count() as usize,
+            Payload::MemorySection(reader) => {
+                // The declaration is the whole offence: an `i64` index type is memory64 and
+                // a `shared` flag is threads, with no instruction anywhere to give it away.
+                // An *imported* memory is not read here — every import MUST be an `eio:*`
+                // function (§4.3, §7), so `check_imports` refuses one whatever its flags
+                // say, and it says the more useful thing.
+                for memory in reader {
+                    memory_declaration(&memory.map_err(ModuleError::Unreadable)?)?;
+                }
+            }
             Payload::TypeSection(reader) => {
                 for group in reader {
                     for ty in group.map_err(ModuleError::Unreadable)?.into_types() {
@@ -82,25 +111,23 @@ pub(crate) fn check(wasm: &[u8]) -> Result<(), ModuleError> {
     }
 
     if tables > 1 {
-        return Err(ModuleError::Unportable {
-            feature: "a second table",
-            proposal: REFERENCE_TYPES,
-        });
+        return Err(unportable("a second table", REFERENCE_TYPES));
     }
     Ok(())
 }
 
-/// Scans one function body for a carved-out local type or instruction.
+/// Scans one function body for a refused local type or instruction.
 ///
 /// **Anything this cannot decode, it stays silent about.** An operator from a proposal
-/// outside §4.3's six — a `v128` opcode, a GC one — makes the reader stop, and the right
-/// answer to that is to say nothing: the engine refuses such a module and names the
-/// proposal, which §4.3 requires it to do, and a `not a readable WASM module` from here
-/// would replace that sentence with one nobody can act on. This scan narrows the six; it
-/// is not the module's reader, and `Module::read` runs right after it.
+/// this walk has no business in — a `v128` opcode, a GC one — makes the reader stop, and
+/// the right answer to that is to say nothing: the engine refuses such a module and names
+/// the proposal, which §4.3 requires it to do, and a `not a readable WASM module` from
+/// here would replace that sentence with one nobody can act on. This scan states the part
+/// of the accepted set an engine cannot; it is not the module's reader, and `Module::read`
+/// runs right after it.
 ///
 /// Nothing hides behind the silence. A body that stops decoding stops because of an
-/// instruction the engine will refuse, so a carved-out instruction further along it never
+/// instruction the engine will refuse, so a refused instruction further along it never
 /// reaches has no module left to be in.
 fn function(entry: &wasmparser::FunctionBody<'_>) -> Result<(), ModuleError> {
     if let Ok(locals) = entry.get_locals_reader() {
@@ -114,42 +141,88 @@ fn function(entry: &wasmparser::FunctionBody<'_>) -> Result<(), ModuleError> {
     };
     for op in operators {
         let Ok(op) = op else { return Ok(()) };
-        if let Some((feature, proposal)) = carved_out(&op) {
-            return Err(ModuleError::Unportable { feature, proposal });
+        if let Some(error) = refused(&op) {
+            return Err(error);
         }
     }
     Ok(())
 }
 
-/// The `(instruction, proposal)` a carved-out operator belongs to, or `None`.
+/// Why this operator is refused, or `None`.
 ///
-/// Only the two partially accepted proposals appear here. An instruction from a seventh
-/// proposal — `v128.const`, `return_call` — is absent deliberately: the engine refuses
-/// those, naming the proposal itself, and answering them here as well would be the
-/// duplicated feature gating §4.3 rules out.
-fn carved_out(op: &Operator<'_>) -> Option<(&'static str, &'static str)> {
+/// One match over the operator and not one per duty, because this runs for every instruction
+/// in every function body of every block a node loads, on hardware where that is worth a
+/// thought. The two duties are the two groups of arms, and which they belong to is in the
+/// error each one builds.
+///
+/// **The carved-out arms** are the two partially accepted proposals, and only those. An
+/// instruction from a seventh proposal belongs in the group below it if it belongs here at
+/// all — and most do not: the engine refuses `v128.const` and names SIMD, and answering it
+/// here as well would be the duplicated feature gating §4.3 rules out.
+///
+/// **The post-MVP arms** are the measured gaps, and tail call is the only one of the three
+/// with an instruction to find. Measured, wasm3 compiles `return_call` and executes it,
+/// returning what a correct implementation returns (eieio-7d8.26), so no engine's refusal can
+/// be relied on and the loader answers. That group is short because it is a list of
+/// *measurements*, not of proposals.
+fn refused(op: &Operator<'_>) -> Option<ModuleError> {
     Some(match op {
-        Operator::MemoryInit { .. } => ("memory.init", BULK_MEMORY),
-        Operator::DataDrop { .. } => ("data.drop", BULK_MEMORY),
-        Operator::TableInit { .. } => ("table.init", BULK_MEMORY),
-        Operator::TableCopy { .. } => ("table.copy", BULK_MEMORY),
-        Operator::ElemDrop { .. } => ("elem.drop", BULK_MEMORY),
-        Operator::RefNull { .. } => ("ref.null", REFERENCE_TYPES),
-        Operator::RefIsNull => ("ref.is_null", REFERENCE_TYPES),
-        Operator::RefFunc { .. } => ("ref.func", REFERENCE_TYPES),
-        Operator::TableGet { .. } => ("table.get", REFERENCE_TYPES),
-        Operator::TableSet { .. } => ("table.set", REFERENCE_TYPES),
-        Operator::TableSize { .. } => ("table.size", REFERENCE_TYPES),
-        Operator::TableGrow { .. } => ("table.grow", REFERENCE_TYPES),
-        Operator::TableFill { .. } => ("table.fill", REFERENCE_TYPES),
+        // ── carved out of the six (§4.3's portable subset) ──
+        Operator::MemoryInit { .. } => unportable("memory.init", BULK_MEMORY),
+        Operator::DataDrop { .. } => unportable("data.drop", BULK_MEMORY),
+        Operator::TableInit { .. } => unportable("table.init", BULK_MEMORY),
+        Operator::TableCopy { .. } => unportable("table.copy", BULK_MEMORY),
+        Operator::ElemDrop { .. } => unportable("elem.drop", BULK_MEMORY),
+        Operator::RefNull { .. } => unportable("ref.null", REFERENCE_TYPES),
+        Operator::RefIsNull => unportable("ref.is_null", REFERENCE_TYPES),
+        Operator::RefFunc { .. } => unportable("ref.func", REFERENCE_TYPES),
+        Operator::TableGet { .. } => unportable("table.get", REFERENCE_TYPES),
+        Operator::TableSet { .. } => unportable("table.set", REFERENCE_TYPES),
+        Operator::TableSize { .. } => unportable("table.size", REFERENCE_TYPES),
+        Operator::TableGrow { .. } => unportable("table.grow", REFERENCE_TYPES),
+        Operator::TableFill { .. } => unportable("table.fill", REFERENCE_TYPES),
         // The *encoding* is what §4.3 accepts, and the encoding carries a table index.
         // Index 0 is the one wasm3 compiles; anything else needs the second table it
         // refuses to have, so this is unreachable in practice and cheap to be sure of.
         Operator::CallIndirect { table_index, .. } if *table_index != 0 => {
-            ("call_indirect on a table other than 0", REFERENCE_TYPES)
+            unportable("call_indirect on a table other than 0", REFERENCE_TYPES)
         }
+        // ── outside the six, and run by the leaf engine anyway (§4.3's measured gaps) ──
+        Operator::ReturnCall { .. } => post_mvp("return_call", TAIL_CALL),
+        Operator::ReturnCallIndirect { .. } => post_mvp("return_call_indirect", TAIL_CALL),
         _ => return None,
     })
+}
+
+/// A carve-out rejection: something within the six the leaf interpreter does not run.
+fn unportable(feature: &'static str, proposal: &'static str) -> ModuleError {
+    ModuleError::Unportable { feature, proposal }
+}
+
+/// A measured-gap rejection: something outside the six the leaf interpreter runs anyway.
+fn post_mvp(feature: &'static str, proposal: &'static str) -> ModuleError {
+    ModuleError::PostMvp { feature, proposal }
+}
+
+/// Refuses a memory whose declaration is itself a proposal the leaf engine ignores.
+///
+/// Measured, wasm3 accepts and runs both (eieio-7d8.26), and for these two that is worse
+/// than the tail-call gap: there is no instruction to misexecute, so it is almost
+/// certainly reading the flag and dropping it — an `i64` index silently truncated to 32
+/// bits, a shared memory that is not shared. A block would work on the daemon and be
+/// quietly wrong on the leaf.
+///
+/// Shared memory is also refused for a reason that survives any engine fixing it: ABI §1.2
+/// gives an instance one caller at a time, so a second thread reaching into guest memory
+/// has no place in this ABI at all.
+fn memory_declaration(memory: &MemoryType) -> Result<(), ModuleError> {
+    if memory.memory64 {
+        return Err(post_mvp("a memory with an i64 index", MEMORY64));
+    }
+    if memory.shared {
+        return Err(post_mvp("a shared memory", THREADS));
+    }
+    Ok(())
 }
 
 /// Refuses a reference value type where WASM 1.0 has only numbers.
@@ -161,9 +234,9 @@ fn numeric(ty: ValType) -> Result<(), ModuleError> {
     match ty {
         ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 => Ok(()),
         ValType::V128 => Ok(()), // SIMD: the engine's to refuse, naming its own proposal.
-        ValType::Ref(_) => Err(ModuleError::Unportable {
-            feature: "a reference value type outside a table",
-            proposal: REFERENCE_TYPES,
-        }),
+        ValType::Ref(_) => Err(unportable(
+            "a reference value type outside a table",
+            REFERENCE_TYPES,
+        )),
     }
 }

@@ -85,11 +85,11 @@ Import *signatures* are checked when the host links the module, by the engine. T
 
 **Whole-proposal conformance (§1) is enforced by the engine, not by manifest validation.** A host configures its engine to accept the proposals below and nothing more; a module reaching for a seventh proposal is refused at instantiation. This is deliberate placement: WASM feature gating is a moving target that engines already track, and duplicating it in the loader would create a second, slower-moving definition of what is accepted.
 
-A host MUST refuse such a module. The rejection SHOULD name the offending proposal, and MUST name it where the host's engine reports which one it objected to — because a host that refuses a module without saying which feature it objected to leaves a deployer with a working block, a passing manifest, and nothing to act on.
+A host MUST refuse such a module. Where the engine is what refuses it, the rejection SHOULD name the offending proposal, and MUST name it where the host's engine reports which one it objected to — because a host that refuses a module without saying which feature it objected to leaves a deployer with a working block, a passing manifest, and nothing to act on. **Where the loader is what refuses it, naming the proposal is a MUST**, unconditionally: that message is written in this repository rather than reported by an engine, so there is nothing for a host to be excused from.
 
-**Why that is a SHOULD and not the MUST it was.** Because measured against real engines it was unsatisfiable, and a MUST no conformant host can meet is not a requirement but a bug in this document. Of the nine refused proposals, wasmtime names eight and does not name **extended const** — a module whose global initialiser is `i32.add` is refused with `constant expression required: non-constant operator: i32.add`, which describes the instruction and never the proposal. wasm3 names **none** of the nine: its refusals are `unknown opcode`, `restricted opcode`, `out of order Wasm section`, `malformed Wasm binary`. A host cannot invent a name its engine does not give it, and a loader that recomputed one would be the second definition of the accepted set this section spends its length refusing.
+**Why the engine's half is a SHOULD and not the MUST it was.** Because measured against real engines it was unsatisfiable, and a MUST no conformant host can meet is not a requirement but a bug in this document. Of the nine refused proposals, wasmtime names eight and does not name **extended const** — a module whose global initialiser is `i32.add` is refused with `constant expression required: non-constant operator: i32.add`, which describes the instruction and never the proposal. wasm3 names **none** of the nine: its refusals are `unknown opcode`, `restricted opcode`, `out of order Wasm section`, `malformed Wasm binary`. A host cannot invent a name its engine does not give it, and a loader that recomputed one would be the second definition of the accepted set this section spends its length refusing.
 
-So the obligation is placed where it can be met: name it when you know it, and the conformance vectors assert the name only for the proposals an engine actually reports (§13.1). Widening this back to a MUST means giving the shared loader a proposal scan — the same shape as the portable-subset carve-out above, and a much larger claim.
+So the obligation is placed where it can be met: name it when you know it, and the conformance vectors assert the name only for the proposals an engine actually reports (§13.1) — except for the three the loader refuses, below, where every host names it.
 
 **The accepted set.** Core WASM 1.0, plus exactly these six:
 
@@ -117,14 +117,32 @@ Measured on wasm3 (`crates/conformance/tests/wasm3.rs`), instruction by instruct
 |multi-value|multi-result functions, `block`/`loop`/`if` parameters and multiple results|—|
 |mutable globals|exported|imported globals are already unreachable: every import MUST be an `eio:*` *function* (§7), so the import rules above refuse one first|
 
-**The carve-out is enforced by the loader, and this is the one exception to the paragraph above.** It is not a second definition of the accepted set — it is the only place the real one can be stated. An engine's feature configuration is per *proposal*: neither wasmtime's `Config` nor any other engine's can express "bulk memory minus `memory.init`", so a host that admits `memory.copy` admits `table.copy` with it, and would run a block the leaf tier cannot flash. The loader scan narrows what the engine already gates; it never restates it. Hosts therefore enforce the accepted set in two layers, and both are mandatory:
+#### The measured gaps
 
-1. the engine refuses the seventh proposal (`crates/daemon/src/engine.rs`);
-2. the loader refuses the carved-out instructions within the six (`eio_manifest::validate`).
+The engine owns the seventh proposal *when it refuses one*. Measured, wasm3 does not always. Three proposals outside the six are not refused by it at all — it loads, compiles and **runs** them, while wasmtime refuses each by name:
 
-**The carve-out costs a block author nothing**, which is why it is affordable. ABI §13.2's five golden blocks, built by stock rustc with no flags, contain `memory.copy`, `memory.fill`, one table and numeric locals only — not one carved-out instruction between them. Rust reaches for the rest only under `-Z build-std` with shared memory, or through `externref`, neither of which a block does.
+|Proposal|What the leaf engine runs|
+|---|---|
+|tail call|`return_call` compiles and executes, returning what a correct implementation returns|
+|memory64|`(memory i64 1)` is accepted and instantiated|
+|threads|`(memory 1 1 shared)` is accepted and instantiated|
 
-Both halves are pinned by tests, not by these tables: `crates/daemon/src/engine.rs` asserts a conformant host accepts each proposal and that the loader refuses the carve-out the engine would have run, and `crates/conformance/tests/wasm3.rs` runs every accepted instruction on wasm3 checking the value it produces, and asserts wasm3 refuses every carved-out one.
+For the two memory flags it is almost certainly reading the encoding and dropping it rather than implementing the proposal — an `i64` index quietly truncated, a shared memory that is not shared. That is a silent misinterpretation, and worse than an honest refusal: the block works on the daemon and is wrong on the leaf. A hand-written `.wat` or a future non-Rust SDK (SDK §7) is all it takes to produce one.
+
+A gap in an engine's refusals is not a gap in the platform, so **the loader refuses these three** — for them and for nothing else. That bound is what keeps this from becoming the second, slower-moving definition of the accepted set: an entry earns its place by being *measured*, and leaves the day the engine refuses it and `crates/conformance/tests/wasm3.rs` fails. Every other proposal outside the six is refused by both engines, which is where this section leaves it: a loader that answered for SIMD as well would be claiming to validate MVP, which it does not.
+
+Threads is also refused for a reason no engine fix would remove: §1.2 gives an instance one caller at a time, so a second thread reaching into guest memory has no place in this ABI.
+
+**Both of those are enforced by the loader, and neither is a second definition of the accepted set** — between them they are the only place the real one can be stated. An engine's feature configuration is per *proposal*: neither wasmtime's `Config` nor any other engine's can express "bulk memory minus `memory.init`", so a host that admits `memory.copy` admits `table.copy` with it, and would run a block the leaf tier cannot flash. Nor can any configuration make an engine refuse what it does not implement refusing. The loader scan states what the engine cannot; it never restates what the engine does. Hosts therefore enforce the accepted set in two layers, and both are mandatory:
+
+1. **the engine** refuses a seventh proposal (`crates/daemon/src/engine.rs`);
+2. **the loader** refuses what the engine cannot or does not (`eio_manifest::validate`) — the carved-out instructions within the six, which no feature switch can express, and the three proposals above that the leaf engine runs rather than refuses.
+
+Layer 2 is a fixed, measured list on both counts, and that is what makes it a narrowing rather than a rival: it never grows by argument, only by a measurement, and every entry names the proposal it refuses.
+
+**Both cost a block author nothing**, which is why they are affordable. ABI §13.2's five golden blocks, built by stock rustc with no flags, contain `memory.copy`, `memory.fill`, one table, one 32-bit unshared memory and numeric locals only — not one refused construct between them. Rust reaches for the rest only under `-Z build-std` with shared memory, or through `externref`, or through a tail-call feature it does not emit, none of which a block does.
+
+Every half is pinned by tests, not by these tables. `crates/daemon/src/engine.rs` asserts a conformant host accepts each of the six, that it refuses the three measured gaps by name, and that the loader refuses both what this engine would have run: the carve-out and those three. `crates/conformance/tests/wasm3.rs` runs every accepted instruction on wasm3 checking the value it produces, asserts wasm3 refuses every carved-out one — and asserts it still *runs* all three measured gaps, so that a real refusal from it fails the suite and says so.
 
 **Producers need no feature flags**, and this is a correction. Earlier drafts of this section required `-C target-feature=-bulk-memory` and called it "the only flag needed". Measured on rustc 1.97.1, that flag changes nothing: the offending `memory.copy` lives in `alloc::string::String::clone` inside the precompiled `rust-std`, which no `RUSTFLAGS` rebuilds — nor does `-Z build-std`. Strict MVP was therefore not merely unnecessary, it was unreachable, and the rule made every Rust block unloadable while protecting a constraint wasm3 does not have. An ordinary `cargo build --release --target wasm32-unknown-unknown` produces a conformant module; `crates/conformance/tests/wasm3.rs` builds one with no flags at all and drives it through §5.1 on both engines.
 

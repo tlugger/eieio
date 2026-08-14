@@ -22,9 +22,19 @@ use eio_manifest::{ModuleError, validate};
 /// nothing while passing.
 #[track_caller]
 fn module(extra: &str) -> Vec<u8> {
+    module_with_memory(r#"(memory (export "memory") 1)"#, extra)
+}
+
+/// The same module with its `memory` declaration supplied.
+///
+/// Two of the three measured gaps *are* a memory declaration — an `i64` index type and a
+/// `shared` flag — so they cannot be expressed as `extra`: a module has one memory, and a
+/// second one is multi-memory, which is a different proposal and a different refusal.
+#[track_caller]
+fn module_with_memory(memory: &str, extra: &str) -> Vec<u8> {
     let text = format!(
         r#"(module
-             (memory (export "memory") 1)
+             {memory}
              {extra}
              (func (export "eio_abi_version") (result i32) (i32.const 65536))
              (func (export "eio_alloc") (param i32) (result i32) (i32.const 0))
@@ -303,13 +313,98 @@ fn a_second_table_needs_no_instruction_to_be_refused() {
     ));
 }
 
+/// The three proposals outside the six that the leaf engine runs rather than refuses.
+///
+/// The second duty of this scan, and the one that is not a carve-out: these are whole
+/// proposals, and a whole proposal is the engine's to refuse — except that wasm3 does not.
+/// Measured, it loads, compiles and *runs* all three (eieio-7d8.26), so relying on the
+/// engine here would deploy a block to a leaf node that silently misreads it.
+///
+/// The pairing is `crates/conformance/tests/wasm3.rs`, which asserts wasm3 still runs each
+/// one: the day it refuses one instead, that test fails and the entry can leave this list.
+/// `crates/daemon/src/engine.rs` asserts the other side — wasmtime refuses all three by
+/// name, so both of §4.3's layers hold on the daemon.
+#[test]
+fn every_proposal_the_leaf_engine_runs_instead_of_refusing_is_refused_here() {
+    for (case, named, proposal, memory, extra) in [
+        (
+            "return_call",
+            "return_call",
+            "tail call",
+            r#"(memory (export "memory") 1)"#,
+            r#"(func $g (result i32) (i32.const 1))
+               (func (export "probe") (result i32) (return_call $g))"#,
+        ),
+        (
+            "return_call_indirect",
+            "return_call_indirect",
+            "tail call",
+            r#"(memory (export "memory") 1)"#,
+            r#"(table 1 funcref) (elem (i32.const 0) $g)
+               (func $g (result i32) (i32.const 5))
+               (type $t (func (result i32)))
+               (func (export "probe") (result i32)
+                 (return_call_indirect (type $t) (i32.const 0)))"#,
+        ),
+        (
+            "an i64-indexed memory",
+            "a memory with an i64 index",
+            "memory64",
+            r#"(memory (export "memory") i64 1)"#,
+            "",
+        ),
+        (
+            "a shared memory",
+            "a shared memory",
+            "threads",
+            r#"(memory (export "memory") 1 1 shared)"#,
+            "",
+        ),
+    ] {
+        let wasm = module_with_memory(memory, extra);
+        let error = validate(&wasm, None)
+            .err()
+            .unwrap_or_else(|| panic!("{case} is outside the accepted set (§4.3)"));
+        assert!(
+            matches!(error, ModuleError::PostMvp { .. }),
+            "{case} should be refused as post-MVP, and was: {error}"
+        );
+        // §4.3 makes naming the proposal a MUST for a loader refusal, unconditionally: the
+        // message is the loader's own to write, unlike an engine's.
+        let message = error.to_string();
+        assert!(
+            message.contains(named) && message.contains(proposal),
+            "the refusal of {case} must name {named} and the {proposal} proposal, and said: {message}"
+        );
+    }
+}
+
+/// The accepted neighbours of the two memory flags still load.
+///
+/// A scan that read the memory section and refused too much would refuse every block, so
+/// the negative direction is worth a case of its own: an ordinary 32-bit unshared memory
+/// is what every golden block declares, and a `call` is not a `return_call`.
+#[test]
+fn an_ordinary_memory_and_an_ordinary_call_are_untouched() {
+    let wasm = module(
+        r#"(func $g (result i32) (i32.const 1))
+           (func (export "probe") (result i32) (call $g))"#,
+    );
+    validate(&wasm, None).expect("a plain call in a module with a plain memory");
+}
+
 /// A seventh proposal is still the engine's to refuse, and this check says nothing.
 ///
-/// The carve-out narrows §4.3's six; it does not become a second opinion on what a
-/// *proposal* is. A SIMD opcode stops the operator reader, and answering that with "not a
-/// readable WASM module" would take the engine's place and lose the sentence §4.3 makes a
-/// MUST — the one naming `simd`. So the scan stays silent and validation continues on to
-/// the reasons a manifest can be wrong.
+/// This scan states what an engine cannot; it does not restate what an engine does. A SIMD
+/// opcode stops the operator reader, and answering that with "not a readable WASM module"
+/// would take the engine's place and lose the sentence §4.3 makes a MUST — the one naming
+/// `simd`. So the scan stays silent and validation continues on to the reasons a manifest
+/// can be wrong.
+///
+/// This is the bound on the list above, and the reason it is a list of measurements rather
+/// than of proposals: both engines refuse SIMD, so neither needs the loader's help, and a
+/// loader that answered anyway would be the second definition of the accepted set §4.3
+/// spends its length refusing.
 #[test]
 fn an_instruction_from_a_seventh_proposal_is_left_to_the_engine() {
     let wasm = module(
@@ -318,7 +413,9 @@ fn an_instruction_from_a_seventh_proposal_is_left_to_the_engine() {
     );
     // Whatever the outcome otherwise — and today it loads, because nothing before the
     // engine reads an opcode — it is not this check's answer.
-    if let Err(ModuleError::Unportable { feature, .. }) = validate(&wasm, None) {
+    if let Err(ModuleError::Unportable { feature, .. } | ModuleError::PostMvp { feature, .. }) =
+        validate(&wasm, None)
+    {
         panic!("SIMD is a whole proposal the engine refuses, not {feature}");
     }
 }

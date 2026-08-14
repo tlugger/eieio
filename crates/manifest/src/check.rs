@@ -2,7 +2,7 @@
 //!
 //! Seven checks, in the order a rejection is most useful in:
 //!
-//! 0. the module stays inside the portable subset of §4.3's six accepted proposals
+//! 0. the module contains nothing §4.3 accepts on one host and not the other
 //!    (`portable`) — first, because it is the only check that does not need the manifest,
 //!    and a module the leaf tier cannot run is not made loadable by a correct one;
 //! 1. every import is from an `eio:*` namespace, and names a function that namespace
@@ -21,9 +21,10 @@
 //! **WASM validity, and which *proposals* are accepted.** The engine settles both, and a
 //! host configures its engine to §4.3's six. Duplicating proposal gating here would
 //! create a second definition of the accepted set that drifts from the one that actually
-//! runs the code. Check 0 is not that: it refuses instructions *within* two of the six
-//! that the leaf interpreter does not implement, which no engine's per-proposal
-//! configuration can express (§4.3, `portable`).
+//! runs the code. Check 0 is not that: it states the two parts of the accepted set no
+//! engine's per-proposal configuration can — the remainder of two of the six that the
+//! leaf interpreter does not implement, and the three proposals outside the six that it
+//! runs rather than refuses (§4.3, `portable`).
 //!
 //! **Import signatures.** The engine checks them when it links imports, with the same
 //! information and better placement. This module checks namespaces and names, which is

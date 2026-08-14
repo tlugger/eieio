@@ -36,12 +36,18 @@
 //! *proposals* are accepted: that is engine configuration (§4.3), which engines already
 //! track and which a second partial gate here would only invite the belief about.
 //!
-//! One exception, and §4.3 names it as one. Two of the six accepted proposals are
-//! accepted only in part, because the leaf interpreter runs only part of them, and a
-//! feature configuration has one switch per proposal — so "bulk memory minus
-//! `memory.init`" is a set no engine can be asked for. [`validate`] refuses that
-//! remainder itself (`portable`), which narrows what the engine gates rather than
-//! restating it.
+//! Two exceptions, and §4.3 names both as ones — they are what a per-proposal feature
+//! switch cannot say:
+//!
+//! - Two of the six accepted proposals are accepted only **in part**, because the leaf
+//!   interpreter runs only part of them, and a feature configuration has one switch per
+//!   proposal — so "bulk memory minus `memory.init`" is a set no engine can be asked for.
+//! - Three proposals **outside** the six are run rather than refused by the leaf engine:
+//!   `return_call`, an `i64`-indexed memory and a shared memory (eieio-7d8.26). A gap in
+//!   an engine's refusals is not a gap in the platform.
+//!
+//! [`validate`] refuses both itself (`portable`), which narrows what the engine gates
+//! rather than restating it.
 //!
 //! # Strict on purpose
 //!
