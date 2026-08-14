@@ -358,6 +358,8 @@ Hosts MAY additionally constant-fold sub-expressions or compile to bytecode — 
 
 The monorepo carries `expr-tests/`: a host-agnostic vector suite covering every builtin, every special form, every error code, truthiness/equality tables, canonical-rendering pins, budget behavior at the floors, and signal-dependence classification. Both interpreter deployments (daemon, leaf) MUST pass identically. Divergence is a conformance bug by definition (same rule as ABI §13).
 
+The directory holds two further corpora that are **not** this specification's, and are there because it is where the platform keeps vectors a host in any language can read: `expr-tests/properties/` (ABI §11.1, described below) and `expr-tests/cbor/` (ABI §6.3.1's canonical encoding). Each has its own runner and its own audit; this section governs the top-level files, which is also all the language runner reads.
+
 The vector file format is itself a contract, and **`expr-tests/README.md` is its normative description**: one JSON file per area of this specification, each vector an expression plus an optional signal, and either the value it must produce or the error code it must fail with. Values carry an explicit type tag, because `1` and `1.0` are different values (§4.2) and no untagged notation can say which one a vector means.
 
 Two rules of this document shape the format and are worth restating where an implementer will meet them. A vector asserting a **static** rejection (§10) does not pin an error code — hosts MUST agree on whether an expression is rejected, not on how they describe the fault — and a vector asserting `FUEL` pins the code and the floor guarantee, never the step at which the code arrives (§9.1).

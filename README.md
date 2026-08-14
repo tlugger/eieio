@@ -81,7 +81,8 @@ crates/
   manifest/   ★ manifest schema, parsing, WASM import cross-check
   host-core/  ★ engine-agnostic ABI host: lifecycle, memory, props, router core
   daemon/       the std binary: tokio, wasmtime, executor
-expr-tests/     host-agnostic expression conformance vectors
+expr-tests/     host-agnostic vectors: the expression language, ABI property
+                types, ABI §6.3.1 canonical CBOR
 docs/
   SCOPE.md              scope and decision record — read first
   specs/

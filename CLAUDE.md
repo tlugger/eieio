@@ -107,7 +107,7 @@ These are the decisions most likely to be eroded by a reasonable-seeming local i
 
 Conformance is the mechanism that keeps two host implementations honest, so it is not an afterthought:
 
-- **`expr-tests/`** — host-agnostic vectors: expression, optional signal CBOR, expected value or error code. Every builtin, every special form, every error code, budget floors, signal-dependence classification (EXPR §11).
+- **`expr-tests/`** — host-agnostic vectors, three corpora and one format (`expr-tests/README.md` is normative): the expression language at the top level — every builtin, every special form, every error code, budget floors, signal-dependence classification (EXPR §11); `properties/` for ABI §11.1's property types; `cbor/` for ABI §6.3.1's canonical encoding, both RFC 8949 deviations included. Each has a runner that fails the build on an uncovered rule.
 - **`conformance/`** — reference wasmtime harness plus golden blocks: pure transform, multi-port filter, timer emitter, stateful counter, GPIO echo, and hostile blocks (spinner, allocator-liar, reentrancy-prober, oversize-emitter) (ABI §13).
 - Daemon and leaf runtime must pass the same suites. **Divergence between hosts is a conformance bug by definition** — when they disagree, the fix is not "make the leaf special".
 - New ABI or language surface arrives with its vectors in the same commit.

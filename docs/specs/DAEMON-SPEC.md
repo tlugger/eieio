@@ -44,7 +44,7 @@ crates/
   conformance/     Reference harness + golden blocks (ABI §13)
 ```
 
-The expression conformance vectors are **not** here: they are data files at the repository root in `expr-tests/` (EXPR §11), because a host written in another language must be able to consume them without building a Rust crate. `conformance/` holds the ABI harness, which is Rust by nature — it drives a WASM engine.
+The expression conformance vectors are **not** here: they are data files at the repository root in `expr-tests/` (EXPR §11), because a host written in another language must be able to consume them without building a Rust crate. The same directory holds the ABI vectors that answer to the same argument — `expr-tests/properties/` for §11.1's property types and `expr-tests/cbor/` for §6.3.1's canonical encoding — each with a runner in the crate that owns the rule. `conformance/` holds the ABI harness, which is Rust by nature: it drives a WASM engine.
 
 ★-marked crates are shared with the leaf runtime and MUST stay `no_std`-compatible (`alloc` allowed). `daemon` and `cargo-eio` are `std` binaries; `block-sdk` is `no_std` by necessity (it compiles into guests).
 
