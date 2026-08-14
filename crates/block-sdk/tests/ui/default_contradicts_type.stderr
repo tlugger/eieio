@@ -1,0 +1,5 @@
+error: properties: default for "threshold" evaluates to bool, but the property declares int (ABI §11.1)
+ --> tests/ui/default_contradicts_type.rs:8:34
+  |
+8 |     #[prop(ty = "int", default = "true")]
+  |                                  ^^^^^^

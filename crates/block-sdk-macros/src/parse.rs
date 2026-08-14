@@ -27,6 +27,12 @@ pub struct Block {
     pub name: String,
     /// `version = ".."`, defaulting to the crate's own (ABI §11.1 requires SemVer).
     pub version: String,
+    /// Where the version was written, for an error to point at.
+    ///
+    /// The struct's own name when it was not written at all: a `CARGO_PKG_VERSION` cargo
+    /// would not accept is not a token in this file, and pointing at nothing is worse than
+    /// pointing at the block it belongs to.
+    pub version_span: Span,
     /// `description = ".."`, optional.
     pub description: Option<String>,
     /// `inputs(a, b)` — position is the port index (ABI §5.2).
@@ -69,8 +75,12 @@ pub struct Prop {
     pub declared: PropertyType,
     /// `desc = ".."`, optional.
     pub description: Option<String>,
-    /// `default = ".."` — an expression string (ABI §11.1).
-    pub default: Option<String>,
+    /// `default = ".."` — an expression string (ABI §11.1), and where it was written.
+    ///
+    /// One field and not two, because the span exists only to point at *this* expression when
+    /// the manifest rejects it: two `Option`s that must always be `Some` together are two
+    /// fields a later edit can desynchronise, and nothing would notice.
+    pub default: Option<(String, Span)>,
     /// `required` — a bare flag.
     pub required: bool,
     /// Where the field was written.
@@ -142,7 +152,7 @@ impl Block {
 
             match key.as_str() {
                 "name" => name = Some(string_value(&meta, "name")?),
-                "version" => version = Some(string_value(&meta, "version")?),
+                "version" => version = Some(string_literal(&meta, "version")?),
                 "description" => description = Some(string_value(&meta, "description")?),
                 "inputs" => inputs = ports(&meta, "inputs")?,
                 "outputs" => outputs = ports(&meta, "outputs")?,
@@ -168,8 +178,11 @@ impl Block {
 
         // The crate's own version, so a block author states it once in `Cargo.toml`. ABI
         // §11.1 requires SemVer, and cargo already requires it of `package.version`.
-        let version = version.unwrap_or_else(|| {
-            std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| String::from("0.0.0"))
+        let (version, version_span) = version.unwrap_or_else(|| {
+            (
+                std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| String::from("0.0.0")),
+                item.ident.span(),
+            )
         });
 
         let props = parse_props(&item)?;
@@ -177,6 +190,7 @@ impl Block {
             item,
             name,
             version,
+            version_span,
             description,
             inputs,
             outputs,
@@ -209,9 +223,11 @@ impl Block {
                     return Err(syn::Error::new(
                         port.span,
                         format!(
-                            "`{}` is not a valid port name (ABI §11.1): lowercase alphanumeric, \
-                             `_` and `-` inside, at most 64 bytes",
-                            port.name
+                            "`{}` is not a valid port name (ABI §11.1): must match {}, at \
+                             most {} bytes",
+                            port.name,
+                            eio_manifest::PORT_NAME_PATTERN,
+                            eio_manifest::MAX_NAME_BYTES
                         ),
                     ));
                 }
@@ -245,9 +261,11 @@ impl Block {
                 return Err(syn::Error::new(
                     prop.span,
                     format!(
-                        "`{}` is not a valid property name (ABI §11.1): lowercase alphanumeric, \
-                         `_` and `-` inside, at most 64 bytes",
-                        prop.name
+                        "`{}` is not a valid property name (ABI §11.1): must match {}, at \
+                         most {} bytes",
+                        prop.name,
+                        eio_manifest::PORT_NAME_PATTERN,
+                        eio_manifest::MAX_NAME_BYTES
                     ),
                 ));
             }
@@ -263,9 +281,11 @@ impl Block {
             return Err(syn::Error::new(
                 self.item.ident.span(),
                 format!(
-                    "`{}` is not a valid block name (ABI §11.1): lowercase alphanumeric, \
-                     `.`, `_` and `-` inside, at most 64 bytes",
-                    self.name
+                    "`{}` is not a valid block name (ABI §11.1): must match {}, at most \
+                     {} bytes",
+                    self.name,
+                    eio_manifest::REF_NAME_PATTERN,
+                    eio_manifest::MAX_NAME_BYTES
                 ),
             ));
         }
@@ -286,6 +306,15 @@ fn ident_list(list: &syn::MetaList) -> Result<Punctuated<syn::Ident, Token![,]>>
 }
 
 fn string_value(meta: &Meta, key: &str) -> Result<String> {
+    string_literal(meta, key).map(|(value, _)| value)
+}
+
+/// The same, keeping the literal's own span.
+///
+/// Which matters for the two values ABI §11.1 judges as *content* rather than as a name —
+/// `version` and a property's `default`. Those are checked against the manifest the macro is
+/// about to emit, well after this function ran, so the span has to be carried to meet them.
+fn string_literal(meta: &Meta, key: &str) -> Result<(String, Span)> {
     let Meta::NameValue(pair) = meta else {
         return Err(syn::Error::new(
             meta.span(),
@@ -296,7 +325,7 @@ fn string_value(meta: &Meta, key: &str) -> Result<String> {
         Expr::Lit(ExprLit {
             lit: Lit::Str(text),
             ..
-        }) => Ok(text.value()),
+        }) => Ok((text.value(), text.span())),
         other => Err(syn::Error::new(
             other.span(),
             format!("`{key}` takes a string literal"),
@@ -400,7 +429,7 @@ fn parse_props(item: &ItemStruct) -> Result<Vec<Prop>> {
                     declared = Some(closed_set(&ident, "property type", &PropertyType::ALL)?);
                 }
                 "desc" => description = Some(string_value(&meta, "desc")?),
-                "default" => default = Some(string_value(&meta, "default")?),
+                "default" => default = Some(string_literal(&meta, "default")?),
                 "required" => required = true,
                 other => {
                     return Err(syn::Error::new(

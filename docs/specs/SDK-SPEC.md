@@ -81,12 +81,16 @@ Each argument MAY appear at most once; a repeat is an error rather than last-win
 |---|---|---|
 |`ty`|`ty = "float"`|REQUIRED. ABI §11.1's closed set: `bool`, `int`, `float`, `string`, `bytes`, `any`|
 |`desc`|`desc = "..."`|Absent = no description|
-|`default`|`default = "..."`|An expression string (ABI §11.1), checked by the manifest crate at parse time|
+|`default`|`default = "..."`|An expression string (ABI §11.1). Parsed and statically analysed (EXPR §10) at expansion time, and — when it is signal-independent — folded and checked against `ty`|
 |`required`|`required`|A bare flag. Absent = `false`|
 
 A field **without** `#[prop]` is the block's own state: it takes no `prop_id`, never reaches the manifest, and is initialized with `Default`.
 
-ABI §11.1's rules are enforced at *expansion* time — reserved port name, duplicate port or property, name pattern, closed sets. Every one is something a host refuses at load, and §11.1 states them as regexes precisely so one rule reaches every surface; a block author should meet them at `cargo build`.
+**ABI §11.1's rules are enforced at *expansion* time — all of them, and not a list of them.** The macro builds the manifest it is about to embed and hands it to the crate that decides whether a manifest is valid, so what `#[block]` accepts is by construction what a host accepts. That is the difference that matters: an enumerated set of checks is complete only until §11.1 grows a rule, and the rules that went missing that way were the two §11.1 judges as *content* rather than as shape — `version` against SemVer, and a `default` against EXPR §10 and its declared `type`. Neither falls out of a pattern, so neither was caught by a name check.
+
+The macro still refuses, first and by hand, the rules it can point a *token* at — a reserved port name, a duplicate port or property, a name that fails its pattern. A verdict on a document cannot say which identifier was wrong, and a compile error that cannot underline the offending token is worth less than one that can. Where a rejection does come from the manifest, the macro maps it back to the span it recorded: the `version` literal, the offending `default`, the port.
+
+Messages quote the pattern rather than paraphrasing it. §11.1 states these as regexes precisely so one rule reaches every surface, and a paraphrase in a compile error is a second statement of the rule that is free to drift from the first.
 
 ### 1.2 `Prop<T>` and the type mapping (normative)
 

@@ -55,8 +55,22 @@ mod parse;
 #[proc_macro_attribute]
 pub fn block(args: TokenStream, input: TokenStream) -> TokenStream {
     let item = parse_macro_input!(input as ItemStruct);
-    match parse::Block::parse(args.into(), item) {
-        Ok(block) => generate::expand(&block).into(),
+    match expand(args.into(), item) {
+        Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+/// Parse, check, and generate — the two gates in the order they give the best message.
+///
+/// `parse` refuses what it can point a token at; `check_manifest` then asks `eio-manifest`
+/// whether the document about to be emitted is one a host would accept. The second is what
+/// makes the macro complete against ABI §11.1 rather than complete against a list.
+fn expand(
+    args: proc_macro2::TokenStream,
+    item: ItemStruct,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let block = parse::Block::parse(args, item)?;
+    generate::check_manifest(&block)?;
+    Ok(generate::expand(&block))
 }

@@ -1,0 +1,5 @@
+error: `Threshold` is not a valid port name (ABI §11.1): must match ^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$, at most 64 bytes
+ --> tests/ui/bad_port_name.rs:5:33
+  |
+5 | #[block(name = "filter", inputs(Threshold))]
+  |                                 ^^^^^^^^^

@@ -18,12 +18,117 @@
 //! That is the single most repeated piece of unsafe-adjacent bookkeeping in the ecosystem,
 //! and it is exactly what a macro should own so that no block author writes it twice.
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 
-use eio_manifest::{Abi, Manifest, PORT_ERR_NAME, Port, Property, PropertyType};
+use eio_manifest::{
+    Abi, Error as ManifestError, Manifest, NameSite, PORT_ERR_NAME, Port, Property, PropertyType,
+};
 
 use crate::parse::Block;
+
+/// Every ABI §11.1 rule, asked of the manifest this macro is about to emit.
+///
+/// [`crate::parse::Block::check`] refuses the rules it can point a token at, and its messages
+/// are better for it. This is the other half, and it is what makes the macro *complete*: the
+/// document generated here is handed to the crate that decides whether a manifest is valid,
+/// so a rule §11.1 grows is enforced at `cargo build` the day `eio-manifest` learns it rather
+/// than the day somebody remembers to restate it here.
+///
+/// It is also the only check for the two values §11.1 judges as content rather than as shape —
+/// `version` against SemVer, and a property `default` against EXPR §10 and its declared type.
+/// Neither is a name, so neither falls out of a pattern.
+pub fn check_manifest(block: &Block) -> syn::Result<()> {
+    let manifest = manifest(block);
+
+    // §11.1's size bound, which `validate` does not check and cannot: it is a rule about a
+    // *document*, and `validate` is handed a parsed one. The macro is the rare caller holding
+    // both, because it is about to serialize this manifest into the module's custom section —
+    // so the check belongs here or nowhere.
+    //
+    // Against the reference default rather than the 8 KiB floor. The floor is what every
+    // conforming host MUST accept, so refusing at it would refuse blocks the reference host
+    // runs happily; the default is what a block is actually about to meet.
+    let json = manifest.to_json();
+    if json.len() > eio_manifest::MAX_MANIFEST_BYTES as usize {
+        return Err(syn::Error::new(
+            block.item.ident.span(),
+            format!(
+                "this block's manifest is {} bytes, over the {} a host reads by default \
+                 (ABI §11.1); hosts MUST accept only {}, so shorten the descriptions or the \
+                 defaults",
+                json.len(),
+                eio_manifest::MAX_MANIFEST_BYTES,
+                eio_manifest::MIN_MANIFEST_BYTES
+            ),
+        ));
+    }
+
+    manifest.validate().map_err(|error| {
+        // Cited, because every other message this macro emits names the rule — but not where
+        // the rejection has already named one itself, since "(ABI §6.4) (ABI §11.1)" reads
+        // like a bug because it is one. Decided from the variant rather than by searching the
+        // rendered prose: the typed error is right here, and a message that happened to
+        // mention a section for some other reason would fool a substring.
+        let message = error.to_string();
+        let cited = match error {
+            ManifestError::ReservedName { .. } => message,
+            _ => format!("{message} (ABI §11.1)"),
+        };
+        syn::Error::new(span_of(block, &error), cited)
+    })
+}
+
+/// The token an `eio-manifest` rejection is about, as far as the macro can tell.
+///
+/// A verdict with no span is a verdict a compiler prints against line 1, so this maps back to
+/// what [`crate::parse`] recorded. The struct's own name is the fallback and not a failure:
+/// some rejections — a missing portable target — are about the document rather than about
+/// anything the author wrote.
+fn span_of(block: &Block, error: &ManifestError) -> Span {
+    let property = |name: &str| block.props.iter().find(|prop| prop.name == name);
+    match error {
+        ManifestError::InvalidVersion { .. } => block.version_span,
+        ManifestError::InvalidDefaults(defaults) => defaults
+            .first()
+            .and_then(|invalid| property(&invalid.property))
+            .and_then(|prop| prop.default.as_ref())
+            .map(|(_, span)| *span)
+            .unwrap_or_else(|| block.item.ident.span()),
+        ManifestError::DefaultTypeMismatch { property: name, .. } => property(name)
+            .and_then(|prop| prop.default.as_ref())
+            .map(|(_, span)| *span)
+            .unwrap_or_else(|| block.item.ident.span()),
+        ManifestError::InvalidName { site, name } | ManifestError::DuplicateName { site, name } => {
+            named(block, *site, name).unwrap_or_else(|| block.item.ident.span())
+        }
+        ManifestError::ReservedName { site } => {
+            named(block, *site, PORT_ERR_NAME).unwrap_or_else(|| block.item.ident.span())
+        }
+        _ => block.item.ident.span(),
+    }
+}
+
+/// Where a name at `site` was written.
+fn named(block: &Block, site: NameSite, name: &str) -> Option<Span> {
+    let port = |ports: &[crate::parse::Port]| {
+        ports
+            .iter()
+            .find(|port| port.name == name)
+            .map(|port| port.span)
+    };
+    match site {
+        NameSite::Block => Some(block.item.ident.span()),
+        NameSite::Input => port(&block.inputs),
+        NameSite::Output => port(&block.outputs),
+        NameSite::Property => block
+            .props
+            .iter()
+            .find(|prop| prop.name == name)
+            .map(|prop| prop.span),
+        NameSite::Capability | NameSite::Target | NameSite::Aot => None,
+    }
+}
 
 /// Expands a parsed `#[block]` into the item plus everything the ABI needs.
 pub fn expand(block: &Block) -> TokenStream {
@@ -359,7 +464,7 @@ fn manifest(block: &Block) -> Manifest {
                 name: prop.name.clone(),
                 ty: prop.declared,
                 description: prop.description.clone().unwrap_or_default(),
-                default: prop.default.clone(),
+                default: prop.default.as_ref().map(|(text, _)| text.clone()),
                 required: prop.required,
             })
             .collect(),
@@ -568,4 +673,59 @@ fn optional_exports(block: &Block) -> TokenStream {
     });
 
     quote! { #timer #gpio #http }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal block carrying `description`, which is the one field an author can make
+    /// arbitrarily long.
+    fn block_with_description(description: &str) -> Block {
+        Block {
+            item: syn::parse_quote!(
+                struct Filter {}
+            ),
+            name: String::from("filter"),
+            version: String::from("1.0.0"),
+            version_span: Span::call_site(),
+            description: Some(String::from(description)),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            capabilities: Vec::new(),
+            props: Vec::new(),
+        }
+    }
+
+    /// ABI §11.1's size bound, at build time.
+    ///
+    /// Not a `tests/ui` case, and the reason is the fixture: provoking this needs a manifest
+    /// over 64 KiB, which as a `.rs` file is 64 KiB of string literal nobody can review. The
+    /// rule is about a length, so a test that computes one says more than a file that is one.
+    #[test]
+    fn a_manifest_over_the_reference_bound_is_refused() {
+        let bound = eio_manifest::MAX_MANIFEST_BYTES as usize;
+
+        // Just inside. The rest of the document is well under a hundred bytes, and this
+        // asserts the gate is not simply always firing.
+        let small = block_with_description(&"x".repeat(bound / 2));
+        assert!(check_manifest(&small).is_ok());
+
+        let large = block_with_description(&"x".repeat(bound + 1));
+        let error = check_manifest(&large).expect_err("over the bound");
+        let message = error.to_string();
+        assert!(message.contains("over the"), "{message}");
+        assert!(message.contains("ABI §11.1"), "{message}");
+    }
+
+    /// The bound is the reference default, not the floor every host MUST accept.
+    ///
+    /// Refusing at the floor would refuse blocks the reference host runs happily, which is a
+    /// build tool inventing a limit rather than reporting one.
+    #[test]
+    fn the_bound_is_the_default_and_not_the_floor() {
+        let between = eio_manifest::MIN_MANIFEST_BYTES as usize + 1;
+        assert!(between < eio_manifest::MAX_MANIFEST_BYTES as usize);
+        assert!(check_manifest(&block_with_description(&"x".repeat(between))).is_ok());
+    }
 }

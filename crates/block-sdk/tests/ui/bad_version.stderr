@@ -1,0 +1,5 @@
+error: version: "1.0" is not a semantic version — must match ^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$ (ABI §11.1)
+ --> tests/ui/bad_version.rs:5:36
+  |
+5 | #[block(name = "filter", version = "1.0")]
+  |                                    ^^^^^

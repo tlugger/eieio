@@ -1,0 +1,5 @@
+error: properties: default for "threshold" is invalid: UNBOUND at 1..9: unbound symbol (ABI §11.1)
+ --> tests/ui/unanalysable_default.rs:8:34
+  |
+8 |     #[prop(ty = "int", default = "(nosuchfn 1)")]
+  |                                  ^^^^^^^^^^^^^^
