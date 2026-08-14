@@ -202,6 +202,7 @@ The project is `eieio`; the identifier prefix is `eio` — short enough for hot-
 |Module custom section|`eio:manifest`|
 |SDK crate / import path|`eio-sdk` / `eio_sdk`|
 |Cargo subcommand|`cargo eio`|
+|CLI binary|`eio`|
 |Node data directory|`/etc/eieio/`|
 
 `nio` survives only in historic references (§1) and links to the original project's repos. Any `nio_*` or `nio:*` identifier in code or docs is a leftover and a bug.

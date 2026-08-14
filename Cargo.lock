@@ -684,6 +684,17 @@ name = "eio-abi"
 version = "0.1.0"
 
 [[package]]
+name = "eio-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "eio-manifest",
+ "eio-service",
+ "getrandom 0.4.3",
+]
+
+[[package]]
 name = "eio-conformance"
 version = "0.1.0"
 dependencies = [

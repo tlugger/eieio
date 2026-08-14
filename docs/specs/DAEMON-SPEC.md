@@ -31,6 +31,12 @@ crates/
                    `alloc::sync` does not exist. Shared by the daemon, the CLI
                    and the Designer's backend, which is why it is a crate and
                    not a daemon module
+  cli/             Binary `eio` (SCOPE §5.1): the operator's and the agent's
+                   command surface. Today `eio service`, which authors a
+                   service file through `service`'s editor (SERVICE §9.1);
+                   node and management-API commands join it here. Separate
+                   from `cargo-eio`, which is the *block author's* surface
+                   (SDK §5) and answers to cargo rather than to a person
   daemon/          Binary: tokio runtime, wasmtime engine, OCI client,
                    management API, state store, pub/sub bridge
   block-sdk/       Guest-side (SDK-SPEC); published as `eio-sdk`
@@ -70,6 +76,7 @@ For the same reason the **property scope is the driver's**, not its caller's. AB
 |`signal/`|`eio-signal`|`eio_signal`|
 |`manifest/`|`eio-manifest`|`eio_manifest`|
 |`service/`|`eio-service`|`eio_service`|
+|`cli/`|`eio-cli`|—|
 |`daemon/`|`eio-daemon`|—|
 |`block-sdk/`|`eio-sdk`|`eio_sdk`|
 |`block-sdk-macros/`|`eio-sdk-macros`|`eio_sdk_macros`|
@@ -80,6 +87,8 @@ For the same reason the **property scope is the driver's**, not its caller's. AB
 `block-sdk-macros/` follows `block-sdk/`'s existing exception rather than the directory rule, so the pair reads as one thing: a block author sees `eio-sdk` and never names the macro crate, which `eio-sdk` re-exports.
 
 `cargo-eio` is the sole exception: cargo discovers subcommands by binary name, so it cannot be prefixed differently. No crate overrides its `[lib] name` — package name and import path differ only by the `-`→`_` substitution cargo already performs.
+
+`cli/` is `eio-cli` by the directory rule and ships a binary named **`eio`**, which is SCOPE §5.1's entry and not a third naming convention: the package is what cargo resolves and the binary is what a person types, and the prefix rule is about identifiers rather than about argv. `eio-cli` is what `Cargo.toml` says; nobody types it.
 
 The prefix is not cosmetic. `eio-sdk` publishes to crates.io (SCOPE §7.1), and a published crate cannot depend on path-only crates, so every crate reachable from it — `signal` (SDK-SPEC §2) and `expr` (SDK-SPEC §6.1, `TestHost` evaluates with the real interpreter) at minimum — MUST carry a publishable name. The bare names `signal`, `expr`, and `manifest` are already taken on crates.io.
 

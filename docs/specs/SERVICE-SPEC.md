@@ -210,8 +210,39 @@ Four rules an editor MUST follow, each of them a way the format can be violated 
 
 An editor SHOULD re-run §7 stage 1 over what it is about to write. Stage 1 needs nothing but the text, so there is no reason not to, and it is what makes the preceding rule provable rather than asserted.
 
-**Who edits.** The `eio service` CLI, the Designer through its backend, and an agent through either. Not the daemon: DAEMON §9.3's `PUT` stores the bytes a client composed and edits none of them, which is what keeps §2's rule true of a node while this section is true of everything else. The conflict detection that makes concurrent editing safe is that endpoint's, and is specified there.
+**Who edits.** The `eio service` CLI (§9.1), the Designer through its backend, and an agent through either. Not the daemon: DAEMON §9.3's `PUT` stores the bytes a client composed and edits none of them, which is what keeps §2's rule true of a node while this section is true of everything else. The conflict detection that makes concurrent editing safe is that endpoint's, and is specified there.
+
+### 9.1 `eio service`
+
+The command surface for authoring a service file, in the `eio` binary (SCOPE §5.1, DAEMON §1). It is a **local** tool: every command reads and writes a file, none of them contacts a node, and nothing here needs a daemon to be running. Deploying what it produced is `PUT` or a git push, and both are somebody else's section.
+
+```
+eio service new           <name> [--dir D] [--autostart]
+eio service add-block     <file> --block REF [--name LABEL] [--id ID] [--prop K=EXPR]…
+eio service remove-block  <file> <id>
+eio service connect       <file> <id.port> <id.port>
+eio service disconnect    <file> <id.port> <id.port>
+eio service set-prop      <file> <id> <property> <expression>
+eio service unset-prop    <file> <id> <property>
+eio service set-autostart <file> <true|false>
+eio service show          <file>
+eio service validate      <file> [--manifest REF=PATH]…
+```
+
+**`add-block` mints the id**, and that is the command's reason to exist. §2 puts id-minting on tooling at authoring time, and until there was a command that added a block to a file, the rule described nobody. A generated id is checked against the ids the file already uses and is **printed**, because the next thing its author does is write a connection naming it. `--id` supplies one instead, held to §2.1 like any other.
+
+**Every mutating command is a §9 edit**: it reads the file, applies exactly what it was asked, re-runs §7 stage 1, and only then writes. A command that would leave the file invalid changes nothing and says which rule it broke. The write is atomic — the file is replaced, never truncated in place — because it is a file a person has open in an editor and a half-written service file is worse than a failed command.
+
+**Nothing is announced until it is on disk.** The refusal can arrive *after* the edit was applied in memory, because stage 1 runs last — so a command that reported as it went would describe an edit that does not exist. `add-block` is the case that makes this load-bearing rather than tidy: it prints a minted id precisely so its author can wire it up next, and an id printed for a block that was never written sends them to a `connect` that cannot work. A failed command writes nothing to standard output, which is what lets a caller that reads only standard output — an agent, per SCOPE §4 — believe it.
+
+**`show` resolves names, and that is the whole of what it is for.** §5 keeps connections id-only so that a name is never load-bearing, and accepts in exchange that raw TOML makes a human cross-reference the block tables by hand. This is the tooling that pays that back: instances with their labels, then every edge with both ends' labels beside their ids. It renders and never writes.
+
+**`validate` runs both stages and distinguishes every class.** Stage 1 needs only the file. Stage 2 needs manifests, and §7 makes them an *input* rather than something the stage fetches — so they are supplied as `--manifest REF=PATH`, keyed by the `block` reference the file already writes, which is what lets two instances of one block share one manifest.
+
+A block whose manifest was not supplied is reported as **not checked**, and **stage 2's own result line says how much of it ran** — every block, some of them, or none. Both halves are needed for the same reason: a partial stage 2 must not read as a complete one, and a caller scanning for the result line reads *that* rather than the notices under it. A service with no blocks has nothing to check, which is a third answer again and not a skip.
+
+§1's stem-equals-name rule is checked here too, and refusing it is the point: a file the CLI accepted and a node refuses would make this command worth less than reading the specification.
 
 ## 10. Expansion list (for the in-depth pass)
 
-The `eio service` CLI that mints ids and renders a graph for a human; whether a service may reference another service's ports.
+Whether a service may reference another service's ports.

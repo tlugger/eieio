@@ -1,0 +1,41 @@
+[package]
+name = "eio-cli"
+description = "The eieio command line: author service files, and drive a node (SCOPE §5.1)"
+# Its own, like the daemon's and for the same reason: SCOPE §7.2 makes release
+# pipelines per component and tag-triggered, so the CLI has to be able to reach
+# 0.2.0 without republishing crates nothing in them changed.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The package is `eio-cli` by the workspace's directory rule; the binary is `eio`,
+# which is what SCOPE §5.1 records and what a person types. DAEMON §1 says why that
+# is not a third naming convention: the prefix rule is about identifiers, not argv.
+[[bin]]
+name = "eio"
+path = "src/main.rs"
+
+[dependencies]
+# The service file: schema, both validation stages, and — since SERVICE §9 — the
+# preserving editor every mutating command here goes through. This crate contributes
+# argument parsing and output; it contributes no opinion about what a service file is.
+eio-service.workspace = true
+
+# Stage 2's input (SERVICE §7). `--manifest REF=PATH` reads what `cargo eio build`
+# wrote, through the same parser a node validates with.
+eio-manifest.workspace = true
+
+# `add-block` mints an id, and `eio_service::id::generate` takes its randomness from
+# the caller precisely so that a service file's contents do not depend on which binary
+# was linked. This is that caller's source, and it is the daemon's too.
+getrandom.workspace = true
+
+# Derive rather than the builder, so the flags and the structs cannot drift.
+clap.workspace = true
+
+anyhow.workspace = true
+
+[lints]
+workspace = true
