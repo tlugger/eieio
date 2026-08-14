@@ -52,7 +52,12 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<PathBuf> {
     // and their signatures, imports within the declared capabilities, capability-paired
     // callbacks, the embedded manifest. This is what makes a module that builds a module a
     // node accepts — and a build-time approximation of it would be a second, drifting rule.
-    let manifest = eio_manifest::validate(&wasm, None)
+    //
+    // `_unaided` because this command compiles nothing (§4.3): it prints `Built` and stops,
+    // so anything the loader stays quiet about here is something nobody ever looks at. The
+    // deploy path keeps the silence, because there an engine reads the module next and says
+    // which proposal it objected to.
+    let manifest = eio_manifest::validate_unaided(&wasm, None)
         .map_err(|error| anyhow!("{}: {error}", artifact.wasm.display()))?;
 
     let manifest_json = artifact.wasm.with_file_name(MANIFEST_JSON);

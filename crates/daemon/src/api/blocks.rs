@@ -72,7 +72,10 @@ pub async fn list(State(shared): State<crate::api::State>) -> Json<Vec<CachedBlo
             let Ok(wasm) = cache.read_at(&path) else {
                 continue;
             };
-            match eio_manifest::validate(&wasm, None) {
+            // `_unaided`: this endpoint reports what is in the cache and compiles nothing
+            // (§4.3), so a body the loader cannot finish reading has no engine behind it to
+            // explain itself — and listing such a block as good is the false confidence.
+            match eio_manifest::validate_unaided(&wasm, None) {
                 Ok(manifest) => blocks.push(CachedBlock {
                     name: name.clone(),
                     version,
@@ -151,7 +154,9 @@ pub async fn pull(
         }
     };
 
-    let manifest = eio_manifest::validate(&wasm, None)
+    // `_unaided`, for the reason `list` gives: a successful pull answers "the block is in
+    // the cache", and nothing between here and a deploy will compile it (§4.3).
+    let manifest = eio_manifest::validate_unaided(&wasm, None)
         .map_err(|error| unresolvable(format!("this artifact is not a loadable block: {error}")))?;
     let entry = cache
         .entry(&request.reference)

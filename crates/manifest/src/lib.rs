@@ -114,7 +114,7 @@ mod validate;
 pub use abi::{
     CORE_FUNCTIONS, CORE_NAMESPACE, ExportSpec, MEMORY_EXPORT, REQUIRED_EXPORTS, Signature, ValType,
 };
-pub use check::{validate, validate_against};
+pub use check::{validate, validate_against, validate_unaided};
 pub use error::{Error, ModuleError, NameSite};
 pub use module::{Export, ExportKind, FuncType, Import, MANIFEST_SECTION, Module};
 pub use name::{

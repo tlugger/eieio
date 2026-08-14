@@ -738,6 +738,7 @@ dependencies = [
  "tracing-subscriber",
  "ureq",
  "utoipa",
+ "wasmparser 0.255.0",
  "wasmtime",
  "wat",
 ]

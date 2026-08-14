@@ -62,7 +62,7 @@ const THREADS: &str = "threads";
 /// Structural unreadability is [`ModuleError::Unreadable`], the same as everywhere else
 /// in this crate: whether the module is *valid* WASM remains the engine's judgement, and
 /// this walk stops at the first thing it cannot read rather than guessing past it.
-pub(crate) fn check(wasm: &[u8]) -> Result<(), ModuleError> {
+pub(crate) fn check(wasm: &[u8], downstream: Downstream) -> Result<(), ModuleError> {
     // Every table in the module, imported or declared. wasm3 answers "element table
     // index must be zero for MVP" to the second one, so more than one is refused even
     // when no instruction ever addresses it.
@@ -105,7 +105,7 @@ pub(crate) fn check(wasm: &[u8]) -> Result<(), ModuleError> {
                     }
                 }
             }
-            Payload::CodeSectionEntry(entry) => function(&entry)?,
+            Payload::CodeSectionEntry(entry) => function(&entry, downstream)?,
             _ => {}
         }
     }
@@ -116,33 +116,72 @@ pub(crate) fn check(wasm: &[u8]) -> Result<(), ModuleError> {
     Ok(())
 }
 
+/// Whether an engine will compile this module after the loader has spoken (ABI §4.3).
+///
+/// The distinction the operator walk's silence turns on, and the reason it is the caller's
+/// to make rather than this module's: what the walk cannot decode is judged by whoever
+/// comes next, and on some flows nobody does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Downstream {
+    /// An engine is about to compile it, and will name a proposal this walk cannot.
+    Engine,
+    /// Nothing will. This verdict is the last word the module gets.
+    Nothing,
+}
+
 /// Scans one function body for a refused local type or instruction.
 ///
-/// **Anything this cannot decode, it stays silent about.** An operator from a proposal
-/// this walk has no business in — a `v128` opcode, a GC one — makes the reader stop, and
-/// the right answer to that is to say nothing: the engine refuses such a module and names
-/// the proposal, which §4.3 requires it to do, and a `not a readable WASM module` from
-/// here would replace that sentence with one nobody can act on. This scan states the part
-/// of the accepted set an engine cannot; it is not the module's reader, and `Module::read`
-/// runs right after it.
+/// **What this cannot decode it stays silent about — while an engine follows.** An operator
+/// from a proposal this walk has no business in — a `v128` opcode, a GC one — makes the
+/// reader stop, and the right answer is then to say nothing: the engine refuses such a
+/// module and names the proposal, which §4.3 requires it to try to do, and a `not a readable
+/// WASM module` from here would replace that sentence with one nobody can act on. This scan
+/// states the part of the accepted set an engine cannot; it is not the module's reader.
 ///
-/// Nothing hides behind the silence. A body that stops decoding stops because of an
-/// instruction the engine will refuse, so a refused instruction further along it never
-/// reaches has no module left to be in.
-fn function(entry: &wasmparser::FunctionBody<'_>) -> Result<(), ModuleError> {
-    if let Ok(locals) = entry.get_locals_reader() {
-        for local in locals {
-            let Ok((_, ty)) = local else { return Ok(()) };
-            numeric(ty)?;
+/// Where nothing follows, the silence is the last word and there is nothing behind it, so
+/// the stop is reported instead ([`ModuleError::Undecodable`]). It names an offset and not a
+/// proposal, because `BinaryReaderError` carries a message and an offset and no kind: a
+/// seventh proposal's opcode and a corrupt body are indistinguishable here, and guessing
+/// between them is what §4.3 rules out.
+fn function(
+    entry: &wasmparser::FunctionBody<'_>,
+    downstream: Downstream,
+) -> Result<(), ModuleError> {
+    // A stop, answered by whether anyone is left to explain it.
+    let stopped = |error: &wasmparser::BinaryReaderError| match downstream {
+        Downstream::Engine => Ok(()),
+        Downstream::Nothing => Err(ModuleError::Undecodable {
+            offset: error.offset(),
+        }),
+    };
+
+    match entry.get_locals_reader() {
+        // `?` and not `return`, so that under `Engine` this falls through to the operator walk
+        // exactly as the previous code did. A body whose locals will not read is one the engine
+        // refuses anyway, and returning here would quietly skip a carved-out instruction the
+        // old scan would have found — a behaviour change on the flow that must not have one.
+        Err(error) => stopped(&error)?,
+        Ok(locals) => {
+            for local in locals {
+                match local {
+                    Err(error) => return stopped(&error),
+                    Ok((_, ty)) => numeric(ty)?,
+                }
+            }
         }
     }
-    let Ok(operators) = entry.get_operators_reader() else {
-        return Ok(());
+    let operators = match entry.get_operators_reader() {
+        Err(error) => return stopped(&error),
+        Ok(operators) => operators,
     };
     for op in operators {
-        let Ok(op) = op else { return Ok(()) };
-        if let Some(error) = refused(&op) {
-            return Err(error);
+        match op {
+            Err(error) => return stopped(&error),
+            Ok(op) => {
+                if let Some(error) = refused(&op) {
+                    return Err(error);
+                }
+            }
         }
     }
     Ok(())

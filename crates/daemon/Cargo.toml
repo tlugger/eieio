@@ -94,5 +94,10 @@ eio-conformance.workspace = true
 # and assembled at test time. Same rationale, and same pin, as `manifest`'s fixtures.
 wat.workspace = true
 
+# One test corrupts a cached module inside a well-framed function body (ABI §4.3), and
+# locating that byte through the same reader the loader uses is what proves the corruption
+# is not a truncation — which was always refused and would test nothing new.
+wasmparser.workspace = true
+
 [lints]
 workspace = true

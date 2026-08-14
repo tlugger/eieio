@@ -285,6 +285,22 @@ pub enum ModuleError {
     /// this crate does not duplicate that judgement.
     Unreadable(wasmparser::BinaryReaderError),
 
+    /// A function body stopped decoding, on a flow where no engine follows (§4.3).
+    ///
+    /// Distinct from [`ModuleError::Unreadable`] because the module *is* readable as far
+    /// as its framing goes — every section length agrees and every payload parsed. What
+    /// stopped is the operator walk, and it cannot say why: an instruction from a proposal
+    /// outside §4.3's six and a corrupt body are the same `BinaryReaderError`, which
+    /// carries a message and an offset and no kind.
+    ///
+    /// Only ever reported by [`crate::validate_unaided`]. Where an engine follows, the
+    /// walk stays silent and the engine names the proposal, which §4.3 requires it to try
+    /// to do and this crate cannot do for it.
+    Undecodable {
+        /// Where in the module decoding stopped.
+        offset: usize,
+    },
+
     /// The module uses something ABI §4.3 carves out of the six accepted proposals.
     ///
     /// Two of the six are accepted only in part, because the leaf interpreter implements
@@ -446,6 +462,12 @@ impl fmt::Display for ModuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ModuleError::Unreadable(error) => write!(f, "not a readable WASM module: {error}"),
+            ModuleError::Undecodable { offset } => write!(
+                f,
+                "the code section stops decoding at offset {offset:#x}: either an instruction \
+                 outside ABI §4.3's accepted set, which an engine would name, or a corrupt \
+                 body — and nothing here will compile this module to tell them apart",
+            ),
             ModuleError::Unportable { feature, proposal } => write!(
                 f,
                 "{feature} is outside the portable subset of the {proposal} proposal — the leaf interpreter does not run it (§4.3)",

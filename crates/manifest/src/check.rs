@@ -40,7 +40,7 @@ use crate::abi::{CORE_FUNCTIONS, CORE_NAMESPACE, MEMORY_EXPORT, REQUIRED_EXPORTS
 use crate::error::ModuleError;
 use crate::module::{ExportKind, Module};
 use crate::parse;
-use crate::portable;
+use crate::portable::{self, Downstream};
 use crate::schema::{Abi, Capability, Manifest};
 
 /// Validates a module for loading on a host implementing [`Abi::CURRENT`].
@@ -76,6 +76,20 @@ pub fn validate(wasm: &[u8], registry: Option<&Manifest>) -> Result<Manifest, Mo
     validate_against(wasm, registry, Abi::CURRENT)
 }
 
+/// The same, for a caller that will not compile the module afterwards (ABI §4.3).
+///
+/// [`validate`] leaves what it cannot decode to the engine, because the engine names the
+/// proposal and this crate cannot. That is sound while an engine follows. Where the answer
+/// is the last word the module gets — a build tool printing its success, a registry endpoint
+/// answering that the block is cached — the silence is not deference, it is a claim nobody
+/// checked, and §4.3 requires a refusal instead ([`ModuleError::Undecodable`]).
+///
+/// Everything else is identical. The two differ only in who is left to explain a body that
+/// stops decoding.
+pub fn validate_unaided(wasm: &[u8], registry: Option<&Manifest>) -> Result<Manifest, ModuleError> {
+    validate_with(wasm, registry, Abi::CURRENT, Downstream::Nothing)
+}
+
 /// Validates a module for loading on a host implementing `host`.
 ///
 /// The `host` parameter exists because ABI acceptance is host policy (§12), and a leaf
@@ -85,7 +99,17 @@ pub fn validate_against(
     registry: Option<&Manifest>,
     host: Abi,
 ) -> Result<Manifest, ModuleError> {
-    portable::check(wasm)?;
+    validate_with(wasm, registry, host, Downstream::Engine)
+}
+
+/// The one implementation, over both of ABI §4.3's flows.
+fn validate_with(
+    wasm: &[u8],
+    registry: Option<&Manifest>,
+    host: Abi,
+    downstream: Downstream,
+) -> Result<Manifest, ModuleError> {
+    portable::check(wasm, downstream)?;
     let module = Module::read(wasm)?;
     let manifest = effective_manifest(&module, registry)?;
 

@@ -421,6 +421,70 @@ async fn a_node_reports_what_a_service_can_be_built_against() {
 }
 
 #[tokio::test]
+async fn a_cached_block_whose_body_stops_decoding_is_not_listed_as_good() {
+    // ABI §4.3: this endpoint reports what is in the cache and compiles nothing, so the
+    // loader's usual deference to the engine has nobody to defer to. A block that arrived
+    // over a registry pull is exactly the foreign artifact that can be corrupt, and
+    // answering "here it is, with its manifest" for one is the false confidence.
+    let harness = Harness::start("api-blocks-undecodable").await;
+
+    let path = harness
+        .root
+        .join("blocks")
+        .join("transform")
+        .join("1.0.0")
+        .join("block.wasm");
+    let wasm = std::fs::read(&path).expect("the harness cached the golden transform");
+    assert!(
+        !harness
+            .get("/blocks")
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "it is listed before the corruption, so the assertion below means something"
+    );
+
+    // Inside a well-framed body: every section length still agrees, which is what makes
+    // this the case `Module::read` cannot see.
+    let corrupted = corrupt_first_opcode(&wasm);
+    assert!(
+        eio_manifest::Module::read(&corrupted).is_ok(),
+        "the corruption must be inside a well-framed body"
+    );
+    std::fs::write(&path, &corrupted).expect("the cache entry is writable");
+
+    let blocks = harness.get("/blocks").await.json();
+    assert_eq!(
+        blocks.as_array().map(Vec::len),
+        Some(0),
+        "a block the loader cannot finish reading is not reported loadable: {blocks}"
+    );
+}
+
+/// Overwrites the first opcode byte of the module's first function body.
+///
+/// Located through `wasmparser` rather than by pattern, so the corruption is provably
+/// *inside* a body rather than a truncation — which was always refused and would test
+/// nothing new.
+fn corrupt_first_opcode(wasm: &[u8]) -> Vec<u8> {
+    let mut corrupted = wasm.to_vec();
+    for payload in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let Ok(wasmparser::Payload::CodeSectionEntry(body)) = payload {
+            let at = body
+                .get_operators_reader()
+                .expect("the golden block's body reads")
+                .original_position();
+            // Not an opcode in any proposal, so no engine could name one for it.
+            corrupted[at] = 0xff;
+            return corrupted;
+        }
+    }
+    panic!("the golden block has a code section");
+}
+
+#[tokio::test]
 async fn put_writes_a_definition_and_brings_the_service_up() {
     let harness = Harness::start("api-put").await;
     let answer = harness
