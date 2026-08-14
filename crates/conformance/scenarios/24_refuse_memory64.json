@@ -1,10 +1,11 @@
 {
   "name": "a-memory64-module-is-refused",
   "spec": "§4.3, §13.1",
-  "note": "The exported memory is itself the flaw: `i64` indices are the memory64 proposal, so this module has no offending instruction anywhere. wasm3 accepts and runs it (eieio-7d8.26), and very likely by ignoring the index type rather than implementing it — a silent misinterpretation, which is worse than an honest refusal.",
+  "note": "The exported memory is itself the flaw: `i64` indices are the memory64 proposal, so this module has no offending instruction anywhere. wasm3 accepts and runs it (eieio-7d8.26), and very likely by ignoring the index type rather than implementing it — a silent misinterpretation, which is worse than an honest refusal. Refused in the loader for that reason, on every host.",
   "module": "blocks/post_mvp_memory64.wat",
   "refuses": {
     "proposal": "memory64",
-    "names": "memory64"
+    "names": "memory64",
+    "layer": "loader"
   }
 }

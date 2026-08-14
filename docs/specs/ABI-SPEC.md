@@ -552,17 +552,21 @@ A scenario fixes:
 A scenario may instead assert that the module is **never loaded at all**. It then carries `refuses` and no steps, and publishes no `limits` — a module that never instantiates has no descriptor to read them from, and §9.7's rule that a host may not choose those numbers is untouched by a scenario that has none.
 
 ```json
-{ "refuses": { "proposal": "tail call", "names": "tail call" } }
+{ "refuses": { "proposal": "tail call", "names": "tail call", "layer": "loader" } }
 ```
 
-`proposal` is the feature §4.3 refuses, and is what the report and any skip say. `names` is optional: when present, the host's rejection MUST contain it, matched case-insensitively as a substring so an engine stays free to rephrase the sentence around it. It is omitted for a proposal no engine names — **extended const** today — because a vector asserting a name nothing produces would fail every conformant host, and the scenario's `note` is where that is recorded.
+`proposal` is the feature §4.3 refuses, and is what the report and any skip say. `names` is optional: when present, the rejection MUST contain it, matched case-insensitively as a substring so an engine stays free to rephrase the sentence around it. It is omitted for a proposal no engine names — **extended const** today — because a vector asserting a name nothing produces would fail every conformant host, and the scenario's `note` is where that is recorded.
 
-Two host answers shape the run, both of them declarations a host makes about its engine rather than about this specification:
+`layer` is which of §4.3's two mandatory layers must do the refusing: `engine` (the default) or `loader`. It is stated rather than inferred from whichever layer answered first, because "either one refused it" is the assertion a creeping second definition of the accepted set would satisfy — a loader that began refusing SIMD would pass the SIMD scenario while §4.3 still said the engine owns that proposal, and nothing would say otherwise. A `loader` scenario therefore also asserts what an `engine` scenario asserts of its fixture: that the *other* layer had no opinion.
 
-- **A host that does not refuse the proposal at all** reports the scenario **skipped, with the proposal named**, exactly as an unimplemented capability is. This is not an excuse and it is not a pass: it is a divergence made visible, and §13's "divergence between the two hosts is a conformance bug by definition" applies to it in full. It is recorded here because the alternative — a suite that goes red on a known, tracked gap — gets muted, and a muted suite pins nothing.
-- **A host whose engine names no proposal** has `names` skipped for it while the refusal itself is still asserted. wasm3 is that host for all nine.
+The layer decides two things:
 
-What a refusal scenario must not be is a module that is broken in some *other* way, or the vector would pass for the wrong reason. Every refusal fixture is therefore a block valid under §4.1 and §11 — every export present with the right signature, an `eio:manifest` section that agrees — so that `validate` accepts it and only the engine objects. The suite asserts that of each fixture rather than trusting it.
+- **A `loader` refusal is never skipped, and always names the proposal.** It is the same code on every host, so no host has an engine gap to declare and none is excused from the name — which is why the three measured gaps of §4.3 are the only refusals in the suite whose *name* is asserted on the leaf engine.
+- **An `engine` refusal turns on two answers a host gives about its engine**, neither of them an opinion about this specification:
+  - **A host whose engine does not refuse the proposal at all** reports the scenario **skipped, with the proposal named**, exactly as an unimplemented capability is. This is not an excuse and it is not a pass: it is a divergence made visible, and §13's "divergence between the two hosts is a conformance bug by definition" applies to it in full. It is recorded here because the alternative — a suite that goes red on a known, tracked gap — gets muted, and a muted suite pins nothing. No host answers so today; wasm3 did, for the three proposals that are now refused in the loader's layer instead.
+  - **A host whose engine names no proposal** has `names` skipped for it while the refusal itself is still asserted. wasm3 is that host for all six it refuses.
+
+What a refusal scenario must not be is a module that is broken in some *other* way, or the vector would pass for the wrong reason. Every refusal fixture is therefore a block valid under §4.1 and §11 — every export present with the right signature, an `eio:manifest` section that agrees — so that the named proposal is the only thing left to object to. The suite asserts that of each fixture rather than trusting it: for an `engine` scenario by requiring `validate` to accept the module, and for a `loader` scenario by requiring the refusal to name the proposal, which no other flaw in a fixture would produce.
 
 **Batches are canonical CBOR, written as hex.** §6.3.1 admits exactly one encoding of any batch, and pinning bytes is half of what this suite is for. A JSON spelling of a batch would be a second, lossier data model — it has no byte string, and it resolves duplicate keys before rule 7 can reject them.
 

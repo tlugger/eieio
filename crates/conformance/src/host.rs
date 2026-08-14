@@ -92,18 +92,22 @@ pub trait Host {
         true
     }
 
-    /// Whether this host refuses a module using `proposal` (ABI §4.3, §13.1).
+    /// Whether this host's *engine* refuses a module using `proposal` (ABI §4.3, §13.1).
     ///
-    /// `true` by default, because §4.3 requires it: a host accepts the six accepted proposals
-    /// and nothing more. Answering `false` is a host declaring a gap in its *engine*, not an
-    /// opinion about the specification, and the scenario is then reported skipped with the
-    /// proposal named rather than passed over.
+    /// `true` by default, because §4.3 requires it: a host configures its engine to the six
+    /// accepted proposals and nothing more. Answering `false` is a host declaring a gap in its
+    /// engine, not an opinion about the specification, and an `engine`-layer scenario is then
+    /// reported skipped with the proposal named rather than passed over — visible on every run
+    /// instead of red until someone mutes it.
     ///
-    /// wasm3 answers `false` for three of them — it loads, compiles and runs tail-call,
-    /// memory64 and shared-memory modules that wasmtime refuses by name. That is the two-host
-    /// divergence §13 calls a conformance bug by definition, and it is tracked as one; what
-    /// this method buys is that the suite *says so on every run* instead of going red on a
-    /// known gap until someone mutes it.
+    /// Read only for an `engine`-layer refusal. A `loader`-layer one is
+    /// `eio_manifest::validate`'s answer, which is the same code on every host, so there is no
+    /// engine gap for a host to declare.
+    ///
+    /// **No host answers `false` today.** wasm3 did, for the three proposals it runs rather
+    /// than refuses, and those moved to the loader's layer when eieio-7d8.26 closed the
+    /// divergence. The method stays because the next engine's gap should be a named skip
+    /// rather than a mystery.
     fn refuses_proposal(&self, _proposal: &str) -> bool {
         true
     }

@@ -82,28 +82,16 @@ impl Host for Wasm3 {
     }
 
     /// None of them. Every wasm3 rejection is `unknown opcode`, `restricted opcode`, `out of
-    /// order Wasm section` or `malformed Wasm binary` — measured across all nine refused
-    /// proposals, none of which it names. ABI §4.3's naming obligation is a MUST only where
-    /// the engine reports which feature it objected to, and this one never does; a binding
-    /// that answered `true` here would be claiming to know something it was not told.
+    /// order Wasm section` or `malformed Wasm binary` — measured across the six refused
+    /// proposals it refuses at all, none of which it names. ABI §4.3's naming obligation is a
+    /// MUST for an engine only where the engine reports which feature it objected to, and this
+    /// one never does; a binding that answered `true` here would be claiming to know something
+    /// it was not told.
+    ///
+    /// The other three are the measured gaps, refused by the loader instead — and their name
+    /// *is* asserted here, on this engine, because that message is not this engine's.
     fn names_refusals(&self) -> bool {
         false
-    }
-
-    /// Three it does not refuse at all (eieio-7d8.26).
-    ///
-    /// Measured, and the worst kind of result: wasm3 loads, compiles and *runs* a tail-call
-    /// module, a memory64 module and a shared-memory one, all of which wasmtime refuses by
-    /// name. For the latter two it is almost certainly ignoring the flag rather than
-    /// implementing the proposal, which is a silent misinterpretation rather than an honest
-    /// refusal.
-    ///
-    /// Answering `false` skips those scenarios *with the proposal named*, so every run says
-    /// out loud that the leaf tier is not holding a line the daemon holds. It does not make
-    /// the divergence acceptable — ABI §13 calls it a conformance bug by definition, and it
-    /// is filed as one. When it is closed these three lines go, and the scenarios run.
-    fn refuses_proposal(&self, proposal: &str) -> bool {
-        !matches!(proposal, "tail call" | "memory64" | "threads")
     }
 
     fn instantiate(&mut self, wasm: &[u8], _budget: Budget) -> Result<Guest, HostError> {
@@ -385,8 +373,32 @@ fn wasm3_passes_the_conformance_suite() {
     }
     summary.assert_ok();
 
+    // A floor, raised whenever a skip is closed rather than left where it was written: the
+    // number is only worth anything as a ratchet. It reached 27 of 28 when the three proposals
+    // wasm3 runs moved into the loader's layer (eieio-7d8.26), leaving the budget scenario as
+    // the one thing this engine cannot express.
     let ran = summary.reports.len() - summary.skipped().count();
-    assert!(ran >= 12, "only {ran} scenario(s) reached wasm3");
+    assert!(ran >= 27, "only {ran} scenario(s) reached wasm3");
+}
+
+/// Assembles a whole module and instantiates it on a fresh wasm3.
+///
+/// The half of [`run`] that is only about loading, because two of the measurements below *are*
+/// the `memory` declaration and so cannot be expressed as `run`'s contents. Nothing is called:
+/// for a memory declaration there is nothing to call, and being accepted is the whole result.
+/// Eager compilation is what makes that result mean something (see this file's header).
+fn load(text: &str) -> Result<(Store<State>, Instance), String> {
+    let wasm = wat::parse_str(text).expect("the snippet assembles");
+    let mut config = Config::new();
+    config.compilation_mode(CompilationMode::Eager);
+    let engine = wasm3x::Engine::new(&config);
+    let module = Module::new(&engine, &wasm).map_err(|e| format!("refused: {e}"))?;
+    let mut store = Store::new(&engine, State::default());
+    let linker = Linker::new(&engine);
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .map_err(|e| format!("would not instantiate: {e}"))?;
+    Ok((store, instance))
 }
 
 /// Wraps `contents` in a module with a memory, loads it on a fresh wasm3, calls its `f`,
@@ -402,16 +414,7 @@ fn wasm3_passes_the_conformance_suite() {
 /// shared engine would let one case's failure reach another's.
 fn run(contents: &str) -> Result<i64, String> {
     let text = format!(r#"(module (memory (export "memory") 1) {contents})"#);
-    let wasm = wat::parse_str(&text).expect("the snippet assembles");
-    let mut config = Config::new();
-    config.compilation_mode(CompilationMode::Eager);
-    let engine = wasm3x::Engine::new(&config);
-    let module = Module::new(&engine, &wasm).map_err(|e| format!("refused: {e}"))?;
-    let mut store = Store::new(&engine, State::default());
-    let linker = Linker::new(&engine);
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .map_err(|e| format!("would not instantiate: {e}"))?;
+    let (mut store, instance) = load(&text)?;
     let func = instance.get_func(&store, "f").ok_or("exports no f")?;
     let results = func.ty(&store).map(|ty| ty.results().len()).unwrap_or(1);
     let mut out = [Val::I32(0)];
@@ -718,6 +721,92 @@ fn wasm3_refuses_everything_the_portable_subset_carves_out() {
                  set after all, and ABI §4.3 should say so"
             );
         }
+    }
+}
+
+/// The tail-call measurement, shared by the two tests below so that the fixture is one thing.
+///
+/// A callee returning a value only `return_call` can carry back, and an `f` that tail-calls it.
+const TAIL_CALL: &str = r#"(func $g (result i32) (i32.const 1))
+     (func (export "f") (result i32) (return_call $g))"#;
+
+/// The three proposals outside §4.3's six that wasm3 runs rather than refuses (eieio-7d8.26).
+///
+/// The measurement that moved these three out of the engine's layer and into the loader's.
+/// wasmtime refuses each by name; wasm3 accepts all three, and *executes* the one of them that
+/// has anything to execute — `return_call` is not tolerated and ignored, it is compiled and run
+/// and it returns what a correct implementation returns. For the two memory flags there is no
+/// instruction to misexecute, so it is almost certainly reading the flag and dropping it, which
+/// is a silent misinterpretation and worse: the block works on the daemon and is quietly wrong
+/// on the leaf.
+///
+/// Asserted alongside the loader's refusal below, for the reason the carve-out's pairing in
+/// `crates/daemon/src/engine.rs` gives: a suite that checked only the loader would still pass
+/// on the day wasm3 gained a real refusal, leaving a loader entry that §4.3 says earns its
+/// place by measurement. **This test failing is the notice that the entry can go.**
+#[test]
+fn wasm3_runs_three_proposals_outside_the_accepted_set() {
+    assert_eq!(
+        run(TAIL_CALL),
+        Ok(1),
+        "wasm3 runs return_call, which is why the loader refuses it"
+    );
+    // A memory declaration is the whole offence in these two, so each is a whole module.
+    for (proposal, text) in [
+        ("memory64", r#"(module (memory (export "memory") i64 1))"#),
+        (
+            "threads",
+            r#"(module (memory (export "memory") 1 1 shared))"#,
+        ),
+    ] {
+        if let Err(refused) = load(text) {
+            panic!(
+                "wasm3 refuses {proposal} after all ({refused}) — it belongs in the engine's \
+                 layer, and ABI §4.3 and `eio_manifest`'s scan should both say so"
+            );
+        }
+    }
+}
+
+/// And the loader refuses all three, by name, on every host (ABI §4.3).
+///
+/// The other half of the pairing above. §4.3 makes naming the proposal a MUST for a loader
+/// refusal — the message is written in this repository, so no engine's silence excuses it, and
+/// these three are the only refusals whose *name* this file can assert at all.
+#[test]
+fn the_loader_refuses_the_three_by_name() {
+    for (proposal, needle, text) in [
+        (
+            "tail call",
+            "return_call",
+            format!(r#"(module (memory (export "memory") 1) {TAIL_CALL})"#),
+        ),
+        (
+            "memory64",
+            "i64 index",
+            r#"(module (memory (export "memory") i64 1))"#.to_string(),
+        ),
+        (
+            "threads",
+            "shared memory",
+            r#"(module (memory (export "memory") 1 1 shared))"#.to_string(),
+        ),
+    ] {
+        let wasm = wat::parse_str(&text).expect("the snippet assembles");
+        // The variant rather than the fact of an error: these snippets carry no manifest, so
+        // validation would fail for that reason too — three checks later.
+        let error = eio_manifest::validate(&wasm, None)
+            .err()
+            .unwrap_or_else(|| panic!("the loader has to refuse {proposal}: wasm3 will not"));
+        assert!(
+            matches!(error, eio_manifest::ModuleError::PostMvp { .. }),
+            "{proposal} must be refused as post-MVP, and was: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(proposal) && message.contains(needle),
+            "the refusal of {proposal} must name it and {needle}, and said: {message}"
+        );
     }
 }
 

@@ -1,10 +1,11 @@
 {
   "name": "a-tail-call-module-is-refused",
   "spec": "§4.3, §13.1",
-  "note": "wasm3 does not refuse this one — it loads, compiles and RUNS it, returning 1 (eieio-7d8.26). So this scenario skips there, by name, and pins the daemon alone until that is closed.",
+  "note": "One of the three proposals the leaf engine runs rather than refuses: wasm3 loads, compiles and executes `return_call`, returning 1 (eieio-7d8.26). So this one is refused in the loader, on every host, and the refusal names the proposal on every host too — which is why this scenario runs on wasm3 where the six engine-layer ones cannot assert a name.",
   "module": "blocks/post_mvp_tail_call.wat",
   "refuses": {
     "proposal": "tail call",
-    "names": "tail call"
+    "names": "tail call",
+    "layer": "loader"
   }
 }

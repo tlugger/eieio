@@ -9,7 +9,7 @@
 //! (`crates/daemon/src/conformance.rs`), which is what makes ABI §13's "both hosts MUST pass"
 //! a fact about this repository rather than an aspiration.
 
-use eio_conformance::{Reference, suite};
+use eio_conformance::{Loaded, Outcome, Reference, RefusalLayer, run, suite};
 
 #[test]
 fn the_reference_host_passes_the_suite() {
@@ -32,6 +32,83 @@ fn the_reference_host_passes_the_suite() {
         summary.reports.len() >= 19,
         "the suite shrank to {} scenarios",
         summary.reports.len()
+    );
+}
+
+/// One refusal scenario, with its `layer` changed to the wrong one.
+///
+/// The two directions of ABI §4.3's two layers, and the reason `layer` is stated by the
+/// scenario rather than inferred from whichever layer answered first: with it, the suite
+/// notices when a refusal moves. Without it — "either layer refused, so pass" — a loader that
+/// grew an opinion about SIMD would satisfy the SIMD vector silently, and a proposal that
+/// slipped out of the loader's list would be caught by nothing.
+#[track_caller]
+fn mislayered(scenario: &str, layer: RefusalLayer) -> Loaded {
+    let mut loaded =
+        suite::load(&suite::scenarios_dir().join(scenario)).expect("the scenario loads");
+    loaded
+        .scenario
+        .refuses
+        .as_mut()
+        .expect("a refusal scenario")
+        .layer = layer;
+    loaded
+}
+
+#[test]
+fn a_refusal_in_the_wrong_layer_is_a_failure_in_both_directions() {
+    let mut host = Reference::new().expect("a wasmtime engine");
+
+    // Tail call is the loader's (a measured gap: wasm3 runs it). Asked of the engine, the
+    // loader's rejection arrives first and reads as a fixture broken in some other way — which
+    // is exactly what it would be if this proposal had left the loader's list.
+    let report = run(
+        &mislayered("22_refuse_tail_call.json", RefusalLayer::Engine),
+        &mut host,
+    );
+    assert_eq!(report.outcome, Outcome::Failed);
+
+    // SIMD is the engine's, and both engines refuse it. Asked of the loader, the loader accepts
+    // the module — as §4.3 says it must, having no opinion about a proposal an engine settles.
+    let report = run(
+        &mislayered("20_refuse_simd.json", RefusalLayer::Loader),
+        &mut host,
+    );
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert!(
+        report.violations.iter().any(|violation| violation
+            .detail
+            .contains("the loader accepted a module using SIMD")),
+        "the failure has to say the loader had no opinion: {:?}",
+        report.violations
+    );
+}
+
+#[test]
+fn a_loader_scenario_that_asserts_no_proposal_name_is_a_failure() {
+    // §4.3 makes naming the proposal unconditional for a loader refusal, so a loader-layer
+    // scenario with no `names` asserts less than the specification requires — and, without this
+    // rule, would pass while doing it. `names` stays optional in the schema because six of the
+    // nine proposals are the engine's and wasmtime names only eight of them.
+    let mut host = Reference::new().expect("a wasmtime engine");
+    let mut loaded = suite::load(&suite::scenarios_dir().join("22_refuse_tail_call.json"))
+        .expect("the scenario loads");
+    loaded
+        .scenario
+        .refuses
+        .as_mut()
+        .expect("a refusal scenario")
+        .names = None;
+
+    let report = run(&loaded, &mut host);
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.detail.contains("needs `names`")),
+        "the failure has to say what is missing: {:?}",
+        report.violations
     );
 }
 

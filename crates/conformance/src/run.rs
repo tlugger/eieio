@@ -31,7 +31,8 @@ use crate::host::{Budget, Host, HostError};
 use crate::record::{Ledger, Recording};
 use crate::report::{Outcome, Report, Violation};
 use crate::scenario::{
-    Action, DeathKind, Expect, RefusalKind, RefusalSpec, RunExpect, Scenario, Scripted, Step,
+    Action, DeathKind, Expect, RefusalKind, RefusalLayer, RefusalSpec, RunExpect, Scenario,
+    Scripted, Step,
 };
 
 /// A scenario with its module read and assembled — what [`run`] consumes.
@@ -68,17 +69,18 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
     // ABI §4, in full, before anything is compiled: exports with the right signatures,
     // imports within `eio:*` and within the declared capabilities, paired callbacks in both
     // directions, embedded and registry manifests in agreement.
-    let manifest = match eio_manifest::validate(&loaded.wasm, loaded.registry.as_ref()) {
+    let validated = eio_manifest::validate(&loaded.wasm, loaded.registry.as_ref());
+
+    // A refusal scenario ends here, and the loader's answer is half of what it asserts —
+    // which half depends on the layer §4.3 puts the refusal in (§13.1).
+    if let Some(refusal) = &scenario.refuses {
+        return refused(report, loaded, host, refusal, validated);
+    }
+
+    let manifest = match validated {
         Ok(manifest) => manifest,
         Err(error) => return failed(report, None, format!("the module is not loadable: {error}")),
     };
-
-    // A refusal scenario ends here, and reaching here is half of what it asserts: the fixture
-    // got through §4 validation, so whatever the host says next is about the engine and not
-    // about a module that was broken in some other way (§13.1).
-    if let Some(refusal) = &scenario.refuses {
-        return refused(report, loaded, host, refusal);
-    }
 
     let Some(spec) = scenario.limits else {
         return failed(
@@ -275,17 +277,22 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
     report
 }
 
-/// Runs a load-time refusal scenario: the module must not instantiate (ABI §4.3, §13.1).
+/// Runs a load-time refusal scenario: the module must never load (ABI §4.3, §13.1).
 ///
 /// The interesting outcome is the one that looks like success. A host that *accepts* a
 /// post-MVP module has not merely missed an assertion — it will deploy a block the leaf tier
 /// cannot flash, which is the divergence §13 exists to catch, so it is a failure stated in
 /// those words rather than a bare "expected Err".
+///
+/// `validated` is the loader's answer, already computed: for a `loader`-layer scenario it is
+/// the assertion, and for an `engine`-layer one it is the precondition that the fixture was
+/// broken in no other way.
 fn refused<H: Host>(
     report: Report,
     loaded: &Loaded,
     host: &mut H,
     refusal: &RefusalSpec,
+    validated: Result<Manifest, eio_manifest::ModuleError>,
 ) -> Report {
     let scenario = &loaded.scenario;
     let proposal = &refusal.proposal;
@@ -304,50 +311,112 @@ fn refused<H: Host>(
         );
     }
 
-    // A host that does not refuse this proposal at all. Skipped with the proposal named, the
-    // same answer §13.1 gives an unimplemented capability, and for the same reason: a suite
-    // that scored an unreachable scenario as a pass would claim coverage the platform has
-    // not got. The gap is a conformance bug; this is what keeps it visible while it is open.
-    if !host.refuses_proposal(proposal) {
-        return Report::skipped(
-            &scenario.name,
-            host.name(),
-            format!("this host does not refuse {proposal}, so the refusal cannot be observed"),
-        );
-    }
+    // Which of §4.3's two layers is being asked, and what it said. The two are not
+    // interchangeable: a loader refusal is the same code on every host, and an engine refusal
+    // is the one thing about a host that is genuinely its engine's.
+    let detail = match refusal.layer {
+        RefusalLayer::Loader => {
+            let Err(error) = validated else {
+                return failed(
+                    report,
+                    None,
+                    format!(
+                        "the loader accepted a module using {proposal}, which ABI §4.3 puts in \
+                         the loader's layer — the leaf engine runs that one rather than \
+                         refusing it, so nothing downstream will catch it"
+                    ),
+                );
+            };
+            error.to_string()
+        }
+        RefusalLayer::Engine => {
+            // Half of what an engine-layer scenario asserts: the fixture got through §4
+            // validation, so whatever the engine says next is about the proposal and not
+            // about a module that was broken in some other way (§13.1). It is also what
+            // keeps the loader honest — a loader that grew an opinion about a proposal §4.3
+            // leaves to the engine would fail here instead of quietly satisfying it.
+            if let Err(error) = validated {
+                return failed(
+                    report,
+                    None,
+                    format!(
+                        "a refusal scenario's fixture is valid in every way but the proposal \
+                         (§13.1), and the loader refused it: {error}"
+                    ),
+                );
+            }
 
-    let budget = Budget::from(&scenario.budget);
-    let detail = match host.instantiate(&loaded.wasm, budget) {
-        Ok(_) => {
+            // A host whose engine does not refuse this proposal at all. Skipped with the
+            // proposal named, the same answer §13.1 gives an unimplemented capability, and
+            // for the same reason: a suite that scored an unreachable scenario as a pass
+            // would claim coverage the platform has not got. The gap is a conformance bug;
+            // this is what keeps it visible while it is open.
+            if !host.refuses_proposal(proposal) {
+                return Report::skipped(
+                    &scenario.name,
+                    host.name(),
+                    format!(
+                        "this host's engine does not refuse {proposal}, so the refusal cannot \
+                         be observed"
+                    ),
+                );
+            }
+
+            let budget = Budget::from(&scenario.budget);
+            match host.instantiate(&loaded.wasm, budget) {
+                Ok(_) => {
+                    return failed(
+                        report,
+                        None,
+                        format!(
+                            "the host loaded a module using {proposal}, which ABI §4.3 refuses \
+                             — a block it accepts here is one the leaf tier will not flash"
+                        ),
+                    );
+                }
+                Err(HostError::Unsupported(reason)) => {
+                    return Report::skipped(&scenario.name, host.name(), reason);
+                }
+                Err(HostError::Refused(detail)) => detail,
+            }
+        }
+    };
+
+    // §4.3 makes the name unconditional for a loader refusal, so a loader-layer scenario that
+    // omits `names` is asserting less than the specification requires — and would pass while
+    // doing it, which is the silent satisfaction this whole layer distinction exists to
+    // prevent. Enforced here rather than left to scenario authors, like the steps-and-limits
+    // rule above (§13.1).
+    let Some(needle) = &refusal.names else {
+        if refusal.layer == RefusalLayer::Loader {
             return failed(
                 report,
                 None,
                 format!(
-                    "the host loaded a module using {proposal}, which ABI §4.3 refuses — \
-                     a block it accepts here is one the leaf tier will not flash"
+                    "a loader refusal names the proposal unconditionally (§4.3), so a \
+                     loader-layer scenario has to assert it: {proposal} needs `names`"
                 ),
             );
         }
-        Err(HostError::Unsupported(reason)) => {
-            return Report::skipped(&scenario.name, host.name(), reason);
-        }
-        Err(HostError::Refused(detail)) => detail,
-    };
-
-    // §4.3 makes naming the proposal a MUST only where the engine reports which one it
-    // objected to. Both halves of that are declarations about an engine: `names` is absent
-    // for a proposal no engine names, and `names_refusals` is false for a host whose
-    // rejections are all `unknown opcode`.
-    let Some(needle) = &refusal.names else {
         return report;
     };
-    if !host.names_refusals() || detail.to_lowercase().contains(&needle.to_lowercase()) {
+    // §4.3 makes naming the proposal a MUST for a loader refusal and a SHOULD for an engine
+    // one, and the asymmetry is the whole difference between the layers: the loader's message
+    // is written here, in this repository, so a host cannot be excused from it. An engine's
+    // is not — `names_refusals` is false for a host whose rejections are all `unknown
+    // opcode`, and a name it was never given is not one it can pass on.
+    let layer = match refusal.layer {
+        RefusalLayer::Loader => "loader",
+        RefusalLayer::Engine if !host.names_refusals() => return report,
+        RefusalLayer::Engine => "host",
+    };
+    if detail.to_lowercase().contains(&needle.to_lowercase()) {
         return report;
     }
     failed(
         report,
         None,
-        format!("refusing {proposal} has to name it, and the host said: {detail}"),
+        format!("refusing {proposal} has to name it, and the {layer} said: {detail}"),
     )
 }
 

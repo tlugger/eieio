@@ -105,6 +105,37 @@ pub struct RefusalSpec {
     /// sentence around the noun without failing the suite.
     #[serde(default)]
     pub names: Option<String>,
+    /// Which of §4.3's two mandatory layers has to do the refusing.
+    ///
+    /// Defaults to [`RefusalLayer::Engine`], which is where six of the nine refused
+    /// proposals are settled and where every scenario written before the three measured
+    /// gaps sat.
+    #[serde(default)]
+    pub layer: RefusalLayer,
+}
+
+/// Which layer of §4.3's two must refuse the module.
+///
+/// Stated by the scenario rather than inferred from whichever layer answered first, because
+/// "either one refused it" is the assertion a creeping second definition of the accepted
+/// set would pass: a loader that started refusing SIMD would satisfy the SIMD scenario
+/// while §4.3 was still saying the engine owns that proposal, and nothing would say so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalLayer {
+    /// The engine, at compile or instantiate time (§4.3's layer 1).
+    ///
+    /// The default, and the answer for a whole proposal both engines refuse.
+    #[default]
+    Engine,
+    /// The loader — `eio_manifest::validate` — before any engine sees the module (§4.3's
+    /// layer 2).
+    ///
+    /// For the carved-out remainder of the six, which no engine's feature configuration can
+    /// express, and for the three proposals outside the six that the leaf engine runs
+    /// rather than refuses. A loader refusal is the same on every host, so it is never
+    /// skipped, and it MUST name the proposal — the message is the loader's own to write.
+    Loader,
 }
 
 /// The limits a scenario publishes to the instance (ABI §5.2, §9.7).
