@@ -10,11 +10,36 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::api::error::{ApiError, Kind};
 use crate::boot::{self, Start};
+
+/// The header a client reads a definition's version from (§9.3).
+const ETAG: &str = "etag";
+
+/// The header a client names the version it edited in (§9.3).
+const IF_MATCH: &str = "if-match";
+
+/// RFC 9110's "any current representation".
+const ANY: &str = "*";
+
+/// A definition's entity tag: `"sha256:<lowercase hex>"` (§9.3).
+///
+/// §4.1's digest spelling *and* §4.1's function — a node should not have two ways of naming a
+/// hash, and [`crate::blocks::sha256_hex`] is already what identifies content by content here.
+/// Strong and quoted, per RFC 9110: a weak tag would mean two definitions could be equivalent
+/// without being the same bytes, and for a file the daemon stores verbatim there is no such
+/// thing.
+fn etag(definition: &str) -> String {
+    format!(
+        "\"sha256:{}\"",
+        crate::blocks::sha256_hex(definition.as_bytes())
+    )
+}
 
 /// One service, as the API reports it (DAEMON §9).
 #[derive(Debug, Serialize, ToSchema)]
@@ -73,13 +98,17 @@ pub async fn list(State(shared): State<crate::api::State>) -> Json<Vec<ServiceSu
 }
 
 /// One service: its definition text and its state.
+///
+/// The `ETag` is the version a `PUT` must name to overwrite this definition (§9.3). It is
+/// opaque: a client carries it back in `If-Match` and never computes one.
 #[utoipa::path(
     get,
     path = "/services/{service}",
     tag = "services",
     params(("service" = String, Path, description = "The service's name")),
     responses(
-        (status = 200, description = "The definition and the state", body = ServiceDetail),
+        (status = 200, description = "The definition and the state", body = ServiceDetail,
+         headers(("etag" = String, description = "The version to send back in `If-Match`"))),
         (status = 401, description = "Missing or wrong bearer token", body = ApiError),
         (status = 404, description = "No such service on this node", body = ApiError),
     ),
@@ -87,14 +116,15 @@ pub async fn list(State(shared): State<crate::api::State>) -> Json<Vec<ServiceSu
 pub async fn get_service(
     State(shared): State<crate::api::State>,
     Path(name): Path<String>,
-) -> Result<Json<ServiceDetail>, ApiError> {
+) -> Result<Response, ApiError> {
     let path = boot::service_path(&shared.node, &name).ok_or_else(|| bad_name(&name))?;
     let definition =
         std::fs::read_to_string(&path).map_err(|_| ApiError::no_such_service(&name))?;
+    let tag = etag(&definition);
 
     let services = shared.services.lock().await;
     let state = services.get(&name);
-    Ok(Json(ServiceDetail {
+    let detail = ServiceDetail {
         name,
         // A file that exists but is in no state is one this node has not loaded since it
         // appeared — which is `stopped` from a caller's point of view, and becomes real on the
@@ -102,35 +132,50 @@ pub async fn get_service(
         state: String::from(state.map_or("stopped", crate::boot::State::label)),
         definition,
         error: state.and_then(failure_of).map(ApiError::from),
-    }))
+    };
+    Ok(([(ETAG, tag)], Json(detail)).into_response())
 }
 
-/// Writes a service definition, after validating it.
+/// Writes a service definition, after checking its precondition and validating it.
 ///
-/// The body is the service file's text. It is validated exactly as boot validates one —
-/// SERVICE §7 stage 1, block resolution (which MAY pull), then stage 2 — and **only then**
-/// written. A definition that does not validate changes nothing: not the file, not the running
-/// service. The path's name must equal the body's `name` (SERVICE §1).
+/// The body is the service file's text. Overwriting a service that already exists requires
+/// `If-Match` carrying the `ETag` a `GET` returned; a definition that does not validate, and one
+/// whose precondition fails, both change nothing — not the file, not the running service. The
+/// path's name must equal the body's `name` (SERVICE §1).
 ///
 /// On success the service is brought to what the file says, exactly as `reload` would.
 #[utoipa::path(
     put,
     path = "/services/{service}",
     tag = "services",
-    params(("service" = String, Path, description = "The service's name; must equal the body's `name`")),
+    params(
+        ("service" = String, Path, description = "The service's name; must equal the body's `name`"),
+        ("if-match" = Option<String>, Header,
+         description = "The `ETag` of the definition being replaced. REQUIRED when the service \
+                        already exists; `*` overwrites whatever is there. Omit only to create."),
+    ),
     request_body(content = String, description = "The service file, as TOML", content_type = "text/toml"),
     responses(
-        (status = 200, description = "Written, and the service brought to what it says", body = ServiceSummary),
+        (status = 200, description = "Written, and the service brought to what it says", body = ServiceSummary,
+         headers(("etag" = String, description = "The version just written"))),
         (status = 401, description = "Missing or wrong bearer token", body = ApiError),
+        (status = 412, description = "`If-Match` is not the definition on disk; nothing was changed", body = ApiError),
         (status = 422, description = "The definition did not validate; nothing was changed", body = ApiError),
+        (status = 428, description = "The service exists and the request carried no `If-Match`", body = ApiError),
     ),
 )]
 pub async fn put_service(
     State(shared): State<crate::api::State>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     definition: String,
-) -> Result<Json<ServiceSummary>, ApiError> {
+) -> Result<Response, ApiError> {
     let path = boot::service_path(&shared.node, &name).ok_or_else(|| bad_name(&name))?;
+
+    // Before validation, per RFC 9110 and because it is cheaper: a stale `PUT` is refused
+    // without resolving a single block, so a conflict never triggers a pull (§4.1). Checked
+    // again under the lock below, which is the check that decides.
+    precondition(&name, &path, &headers, &definition)?;
 
     // Validated before anything is written — DAEMON §9.3. Off the reactor because resolution
     // may pull (§4.1), which is blocking by design.
@@ -144,6 +189,15 @@ pub async fn put_service(
     .map_err(|error| ApiError::new(Kind::Internal, error.to_string()))?
     .map_err(|failure| ApiError::from(&failure))?;
 
+    // The lock first, and the precondition again under it. Validation above may have taken a
+    // while — it MAY pull (§4.1) — and a second `PUT` holding the same tag could have landed
+    // and been written in the meantime. Checking once before validating would make "never
+    // silent-overwrite" true of a slow client and false of two fast ones, which is the case
+    // DESIGNER §4 says to expect. The lock is what makes this the last word: every writer on
+    // this node passes through here, so nothing can slip between the check and the write.
+    let mut services = shared.services.lock().await;
+    precondition(&name, &path, &headers, &definition)?;
+
     std::fs::write(&path, &definition).map_err(|error| {
         ApiError::new(
             Kind::Internal,
@@ -155,7 +209,6 @@ pub async fn put_service(
     // The two are the same bytes by construction — this handler is the only writer and it
     // wrote them a line ago — so re-reading would buy nothing and cost a second parse and a
     // second resolution of every block the definition names.
-    let mut services = shared.services.lock().await;
     let state = boot::apply(&shared.executor, valid, Start::AsTheFileSays).await;
     let summary = ServiceSummary {
         name: name.clone(),
@@ -163,7 +216,76 @@ pub async fn put_service(
         error: failure_of(&state).map(ApiError::from),
     };
     services.set(&name, state).await;
-    Ok(Json(summary))
+    // The version the client now holds, so an editor can make a second edit without a `GET`
+    // between them. Computed over the same bytes that were written, a few lines above.
+    Ok(([(ETAG, etag(&definition))], Json(summary)).into_response())
+}
+
+/// RFC 9110's `If-Match`, over the definition on disk (§9.3).
+///
+/// Four cases, and the asymmetry between two of them is deliberate. **Overwriting requires a
+/// precondition**, because SCOPE §4 makes an agent a peer of every other client and DESIGNER §4
+/// calls humans and agents editing the same file the expected condition — a client that could
+/// opt out of the check by forgetting a header is one that will. **Creating does not**, because
+/// there is no version to conflict with, and requiring a header to create would mean the
+/// simplest way to put a service on a node could not be the first thing anyone does.
+fn precondition(
+    name: &str,
+    path: &std::path::Path,
+    headers: &HeaderMap,
+    proposed: &str,
+) -> Result<(), ApiError> {
+    let current = std::fs::read_to_string(path).ok();
+    let condition = headers.get(IF_MATCH).and_then(|value| value.to_str().ok());
+
+    match (current, condition) {
+        // Creating. Nothing to conflict with, so nothing to prove.
+        (None, None) => Ok(()),
+        // RFC 9110: `If-Match` against no current representation fails, `*` included.
+        (None, Some(_)) => Err(ApiError::new(
+            Kind::Conflict,
+            format!("this node has no service called `{name}` for `If-Match` to match"),
+        )),
+        (Some(_), None) => Err(ApiError::new(
+            Kind::PreconditionRequired,
+            format!(
+                "`{name}` already exists: send `If-Match` with the `ETag` from `GET \
+                 /services/{name}`, or `If-Match: *` to overwrite whatever is there"
+            ),
+        )),
+        (Some(current), Some(condition)) => {
+            let actual = etag(&current);
+            // RFC 9110 spells `If-Match` as a list, and a client sending one it read from two
+            // places is conforming. Any member matching is a match.
+            if condition
+                .split(',')
+                .any(|tag| tag.trim() == ANY || tag.trim() == actual)
+            {
+                return Ok(());
+            }
+            Err(ApiError::detailed(
+                Kind::Conflict,
+                format!("`{name}` has changed on disk since {condition} was read"),
+                serde_json::json!({
+                    "expected": condition,
+                    "actual": actual,
+                    // The text is what lets the Designer render a conflict on its canvas; the
+                    // diff is what makes the same refusal readable to an operator holding
+                    // `curl`, who should not need a differ to find out what moved.
+                    "current": current,
+                    "diff": diff(&current, proposed),
+                }),
+            ))
+        }
+    }
+}
+
+/// A unified diff from what is on disk to what was proposed (§9.3).
+fn diff(current: &str, proposed: &str) -> String {
+    similar::TextDiff::from_lines(current, proposed)
+        .unified_diff()
+        .header("current", "proposed")
+        .to_string()
 }
 
 /// Why a service is errored, structured.

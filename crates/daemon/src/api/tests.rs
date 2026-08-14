@@ -129,8 +129,14 @@ impl Harness {
 
     /// A `POST` with a JSON body.
     pub async fn post_json(&self, path: &str, body: serde_json::Value) -> Response {
-        self.with_body(path, "application/json", body.to_string(), Method::Post)
-            .await
+        self.with_body(
+            path,
+            "application/json",
+            body.to_string(),
+            Method::Post,
+            None,
+        )
+        .await
     }
 
     /// A `DELETE` carrying this node's token.
@@ -147,13 +153,27 @@ impl Harness {
         .await
     }
 
-    /// A `PUT` carrying a service definition (DAEMON §9.3).
+    /// A `PUT` creating a service definition (DAEMON §9.3).
+    ///
+    /// No `If-Match`, which is the create path: overwriting an existing service through this
+    /// helper is a `428`, deliberately, so a test that means to overwrite has to say so.
     pub async fn put_definition(&self, path: &str, definition: &str) -> Response {
+        self.put_if_match(path, definition, None).await
+    }
+
+    /// A `PUT` naming the version it means to replace (DAEMON §9.3).
+    pub async fn put_if_match(
+        &self,
+        path: &str,
+        definition: &str,
+        condition: Option<&str>,
+    ) -> Response {
         self.with_body(
             path,
             crate::api::TOML_MEDIA_TYPE,
             String::from(definition),
             Method::Put,
+            condition.map(String::from),
         )
         .await
     }
@@ -186,13 +206,14 @@ impl Harness {
         services.get(name).map(|state| String::from(state.label()))
     }
 
-    /// A request with a body, by method.
+    /// A request with a body, by method, optionally carrying `If-Match` (§9.3).
     async fn with_body(
         &self,
         path: &str,
         content_type: &str,
         body: String,
         method: Method,
+        condition: Option<String>,
     ) -> Response {
         let agent = self.agent.clone();
         let url = self.url(path);
@@ -203,10 +224,13 @@ impl Harness {
                 Method::Post => agent.post(&url),
                 Method::Put => agent.put(&url),
             };
-            request
+            let mut request = request
                 .header("authorization", format!("Bearer {token}"))
-                .header("content-type", content_type)
-                .send(body)
+                .header("content-type", content_type);
+            if let Some(condition) = condition {
+                request = request.header("if-match", condition);
+            }
+            request.send(body)
         })
         .await
     }
@@ -239,17 +263,31 @@ pub struct Response {
     pub status: u16,
     /// The body, as text.
     pub body: String,
+    /// The `ETag`, where the endpoint carries one (§9.3). Read through [`Response::etag`].
+    etag: Option<String>,
 }
 
 impl Response {
     fn of(result: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Response {
         let mut response = result.expect("the API answered");
         let status = response.status().as_u16();
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .map(String::from);
         let body = response
             .body_mut()
             .read_to_string()
             .expect("a readable body");
-        Response { status, body }
+        Response { status, body, etag }
+    }
+
+    /// The `ETag`, where the test's point is that there is one.
+    pub fn etag(&self) -> &str {
+        self.etag
+            .as_deref()
+            .unwrap_or_else(|| panic!("no ETag on a {} answer: {}", self.status, self.body))
     }
 
     /// The body as JSON.
@@ -411,7 +449,7 @@ async fn put_of_an_invalid_definition_changes_nothing() {
     // DAEMON §9.3, the decision this endpoint turns on: a running service is not stopped on
     // the strength of a typo, and the file is not touched.
     let harness = Harness::start("api-put-invalid").await;
-    harness
+    let created = harness
         .put_definition("/services/kitchen", &definition("kitchen"))
         .await;
     let before = std::fs::read_to_string(harness.root.join("services").join("kitchen.toml"))
@@ -421,7 +459,10 @@ async fn put_of_an_invalid_definition_changes_nothing() {
         "{}\nconnections = [\"t1.out -> nope.in\"]\n",
         definition("kitchen")
     );
-    let answer = harness.put_definition("/services/kitchen", &broken).await;
+    // The precondition holds — this is about what validation does after it passes.
+    let answer = harness
+        .put_if_match("/services/kitchen", &broken, Some(created.etag()))
+        .await;
     assert_eq!(answer.status, 422, "{}", answer.body);
     assert_eq!(answer.json()["error"], "invalid");
     assert!(
@@ -443,6 +484,212 @@ async fn put_of_an_invalid_definition_changes_nothing() {
         Some("running"),
         "and the running service was not disturbed"
     );
+}
+
+/// The tag `GET` hands out for a service, so a test can name the version it read.
+async fn tag_of(harness: &Harness, name: &str) -> String {
+    String::from(harness.get(&format!("/services/{name}")).await.etag())
+}
+
+#[tokio::test]
+async fn an_overwrite_names_the_version_it_replaces() {
+    // DAEMON §9.3's happy path: read a definition, edit it, write it back naming what was read.
+    let harness = Harness::start("api-put-conditional").await;
+    let created = harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+    assert_eq!(created.status, 200, "{}", created.body);
+    assert_eq!(
+        created.etag(),
+        tag_of(&harness, "kitchen").await,
+        "the tag a write answers with is the tag a read answers with"
+    );
+
+    let edited = definition("kitchen").replace("(+ $n 1)", "(+ $n 2)");
+    let answer = harness
+        .put_if_match("/services/kitchen", &edited, Some(created.etag()))
+        .await;
+    assert_eq!(answer.status, 200, "{}", answer.body);
+    assert_ne!(
+        answer.etag(),
+        created.etag(),
+        "and the client is handed the new version, so a second edit needs no GET between"
+    );
+    assert_eq!(
+        harness.get("/services/kitchen").await.json()["definition"],
+        edited
+    );
+
+    // RFC 9110 spells `If-Match` as a list, and any member matching is a match.
+    let listed = format!("\"sha256:not-this-one\", {}", answer.etag());
+    assert_eq!(
+        harness
+            .put_if_match("/services/kitchen", &edited, Some(&listed))
+            .await
+            .status,
+        200
+    );
+
+    // `*` is RFC 9110's "whatever is there", which is how a client says overwrite deliberately.
+    assert_eq!(
+        harness
+            .put_if_match("/services/kitchen", &definition("kitchen"), Some("*"))
+            .await
+            .status,
+        200
+    );
+}
+
+#[tokio::test]
+async fn two_writers_holding_the_same_version_do_not_both_land() {
+    // The window this closes is between validating a definition — which MAY pull (§4.1), so it
+    // is not quick — and writing it. A precondition checked only before that gap would make
+    // "never silent-overwrite" true of one slow client and false of two concurrent ones, which
+    // is precisely the case DESIGNER §4 says to expect rather than to treat as an edge.
+    let harness = std::sync::Arc::new(Harness::start("api-put-concurrent").await);
+    harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+    let read_by_all = tag_of(&harness, "kitchen").await;
+
+    let writers: Vec<_> = (0..8)
+        .map(|n| {
+            let harness = std::sync::Arc::clone(&harness);
+            let tag = read_by_all.clone();
+            // `10 + n`, so no writer's body is the one already on disk. A `PUT` of the bytes
+            // that are already there is a no-op that leaves the tag alone, and would let a
+            // second holder through without anything having been overwritten.
+            let body = definition("kitchen").replace("(+ $n 1)", &format!("(+ $n 1{n})"));
+            tokio::spawn(async move {
+                harness
+                    .put_if_match("/services/kitchen", &body, Some(&tag))
+                    .await
+                    .status
+            })
+        })
+        .collect();
+
+    let mut landed = 0;
+    for writer in writers {
+        match writer.await.expect("the writer task") {
+            200 => landed += 1,
+            412 => {}
+            other => panic!("neither written nor refused: {other}"),
+        }
+    }
+    assert_eq!(landed, 1, "exactly one of eight holders of one tag wrote");
+}
+
+#[tokio::test]
+async fn an_overwrite_with_no_precondition_is_refused() {
+    // DAEMON §9.3: the requirement is the daemon's guarantee rather than each client's
+    // discipline, because a client that could opt out by forgetting a header is one that will.
+    let harness = Harness::start("api-put-unconditional").await;
+    harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+    let before = std::fs::read_to_string(harness.root.join("services").join("kitchen.toml"))
+        .expect("the file");
+
+    let answer = harness
+        .put_definition(
+            "/services/kitchen",
+            &definition("kitchen").replace('1', "2"),
+        )
+        .await;
+    assert_eq!(answer.status, 428, "{}", answer.body);
+    assert_eq!(answer.json()["error"], "precondition_required");
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join("services").join("kitchen.toml"))
+            .expect("the file"),
+        before,
+        "and nothing was written"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_precondition_is_refused_with_a_diff() {
+    // The condition DESIGNER §4 calls expected rather than an edge case: two clients read the
+    // same definition and both edit it.
+    let harness = Harness::start("api-put-conflict").await;
+    harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+    let read_by_both = tag_of(&harness, "kitchen").await;
+
+    // The first writer lands.
+    let theirs = definition("kitchen").replace("(+ $n 1)", "(+ $n 99)");
+    assert_eq!(
+        harness
+            .put_if_match("/services/kitchen", &theirs, Some(&read_by_both))
+            .await
+            .status,
+        200
+    );
+
+    // The second is holding a tag that is no longer the file.
+    let mine = definition("kitchen").replace("(+ $n 1)", "(+ $n 7)");
+    let answer = harness
+        .put_if_match("/services/kitchen", &mine, Some(&read_by_both))
+        .await;
+    assert_eq!(answer.status, 412, "{}", answer.body);
+
+    let body = answer.json();
+    assert_eq!(body["error"], "conflict");
+    assert_eq!(body["detail"]["expected"], read_by_both);
+    assert_eq!(body["detail"]["actual"], tag_of(&harness, "kitchen").await);
+    assert_eq!(
+        body["detail"]["current"], theirs,
+        "the text is what lets the Designer render the conflict"
+    );
+    let diff = body["detail"]["diff"].as_str().expect("a unified diff");
+    assert!(
+        diff.contains("-val = \"(+ $n 99)\"") && diff.contains("+val = \"(+ $n 7)\""),
+        "and the diff says what moved:\n{diff}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(harness.root.join("services").join("kitchen.toml"))
+            .expect("the file"),
+        theirs,
+        "the first writer's definition is untouched"
+    );
+}
+
+#[tokio::test]
+async fn a_precondition_on_a_service_that_does_not_exist_creates_nothing() {
+    // RFC 9110: `If-Match` against no current representation fails, `*` included. A client
+    // holding a tag for a service this node does not have is confused about which node it is
+    // talking to, and creating the file would be the wrong way to find that out.
+    let harness = Harness::start("api-put-absent").await;
+    for condition in ["\"sha256:0000\"", "*"] {
+        let answer = harness
+            .put_if_match("/services/kitchen", &definition("kitchen"), Some(condition))
+            .await;
+        assert_eq!(answer.status, 412, "{condition}: {}", answer.body);
+        assert_eq!(answer.json()["error"], "conflict");
+        assert!(
+            !harness.root.join("services").join("kitchen.toml").exists(),
+            "{condition}: nothing was created"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_stale_precondition_is_refused_before_a_block_is_resolved() {
+    // §9.3: preconditions are evaluated before validation. The proof is a definition naming a
+    // block no registry can answer for — which would be a `422` after a failed pull, and is a
+    // `412` because the pull never happens.
+    let harness = Harness::start("api-put-conflict-first").await;
+    harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+
+    let unresolvable = definition("kitchen").replace("transform:1.0.0", "nothing-like-this:9.9.9");
+    let answer = harness
+        .put_if_match("/services/kitchen", &unresolvable, Some("\"sha256:stale\""))
+        .await;
+    assert_eq!(answer.status, 412, "{}", answer.body);
 }
 
 #[tokio::test]

@@ -234,6 +234,18 @@ utoipa = { version = "5", features = ["axum_extras"] }
 async-stream = "0.3"
 futures-core = "0.3"
 
+# The unified diff a refused `PUT` carries (DAEMON §9.3). **Zero dependencies of its own** —
+# measured the same way redb was, `cargo tree` is a single node.
+#
+# `text` and nothing else. What that leaves out is what the optional features would add trees
+# for: `unicode` and `bytes` pull `unicode-segmentation` and `bstr`, and `inline` is
+# word-and-character-level diffing. A service file is TOML, so a line diff is what an operator
+# reads and a character-level one would be a prettier answer to a question nobody asked.
+#
+# The alternative was returning only the current text and making every client bring a differ,
+# which for an agent holding `curl` means it does not get one.
+similar = { version = "3.1", default-features = false, features = ["text"] }
+
 
 # ── the state store's dependency (DAEMON §10) ────────────────────────────────
 #

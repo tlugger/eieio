@@ -57,6 +57,10 @@ utoipa.workspace = true
 async-stream.workspace = true
 futures-core.workspace = true
 
+# The diff a refused `PUT` carries (DAEMON §9.3), so a conflict tells an operator what moved
+# rather than handing back two files and a hash.
+similar.workspace = true
+
 # What backs `eio:state` (DAEMON §10). One file under the node's `state/`, and the
 # only durable thing on a node that is not a file an operator wrote.
 redb.workspace = true

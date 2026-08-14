@@ -37,6 +37,10 @@ pub enum Kind {
     Unresolvable,
     /// The definition is valid and the service would not start (ABI §5.1).
     Unstartable,
+    /// An overwrite that named no version to overwrite (§9.3).
+    PreconditionRequired,
+    /// An overwrite whose `If-Match` is no longer the file on disk (§9.3).
+    Conflict,
     /// The node could not do it — a filesystem that refused, and the like.
     Internal,
 }
@@ -57,6 +61,11 @@ impl Kind {
             Kind::Invalid | Kind::Unresolvable | Kind::Unstartable => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
+            // The two RFC 9110 gives for a conditional write, used as it defines them: 428
+            // asks for the precondition the request did not carry, 412 says the one it did
+            // carry no longer holds.
+            Kind::PreconditionRequired => StatusCode::PRECONDITION_REQUIRED,
+            Kind::Conflict => StatusCode::PRECONDITION_FAILED,
             Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

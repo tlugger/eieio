@@ -413,7 +413,21 @@ This is the one place the API and the GitOps path (§2) deliberately differ, and
 
 **The stem is the name.** `PUT /services/kitchen` whose body declares `name = "other"` is refused by SERVICE §1's rule, not silently filed under either — the path and the body disagree about what is being written, and guessing which one meant it is how a deploy lands somewhere nobody looked.
 
-**The daemon writes the bytes it was given, and no others.** SERVICE §2's "a host MUST NOT write to a service file" is about *authoring*: minting an id, normalizing formatting, rewriting what a human or a git checkout put there. Storing a definition a client composed is not that, and the rule is preserved by the daemon never editing the text — no reformatting, no key reordering, no id insertion. Structural edits that preserve the rest of a file round-trip are the CLI's and the Designer's (eieio-8yq.8), which is precisely so that this endpoint stays a byte sink.
+**The daemon writes the bytes it was given, and no others.** SERVICE §2's "a host MUST NOT write to a service file" is about *authoring*: minting an id, normalizing formatting, rewriting what a human or a git checkout put there. Storing a definition a client composed is not that, and the rule is preserved by the daemon never editing the text — no reformatting, no key reordering, no id insertion. Structural edits that preserve the rest of a file round-trip are the CLI's and the Designer's (SERVICE §9), which is precisely so that this endpoint stays a byte sink.
+
+**An overwrite is conditional, and that is what makes concurrent editing safe.** SCOPE §4 makes an agent a peer of every other client, and DESIGNER §4 calls humans and agents editing the same file the expected condition rather than an edge case — so a `PUT` that clobbered whatever it found would lose an edit on an ordinary Tuesday. A client therefore says which version it edited, and the daemon refuses if that is no longer the version on disk:
+
+- **`GET /services/{s}` answers with an `ETag`** over the definition's bytes: strong, quoted, and spelled `"sha256:<lowercase hex>"` — §4.1's digest spelling, because a node should not have two ways of naming a hash. It is opaque to a client, which compares it and never computes it.
+- **A `PUT` to a service that exists MUST carry `If-Match`.** Without one the daemon answers `428` (`precondition_required`) and changes nothing: the requirement is the daemon's guarantee rather than each client's discipline, and a client that could opt out by forgetting a header is one that will.
+- **A `PUT` whose `If-Match` does not name the current bytes answers `412`** (`conflict`) and changes nothing. `detail` carries `expected` and `actual` — the tags — the `current` definition text, and a unified `diff` from it to the body. The text is what lets the Designer render a conflict on its canvas; the diff is what makes the same refusal readable to an operator holding `curl` and to an agent, neither of whom should need a differ to find out what moved.
+- **`If-Match: *` is honoured** as RFC 9110 defines it: it matches any current representation, so it is how a client says *overwrite whatever is there* without a `GET` first. It fails with `412` when there is nothing there, also per RFC 9110.
+- **A `PUT` to a service that does not exist needs no precondition.** There is no version to conflict with, and requiring a header to create a file would mean the simplest way to put a service on a node — `curl -X PUT --data-binary @kitchen.toml` — could not be the first thing anyone does. An `If-Match` sent anyway is evaluated, and fails.
+
+**Preconditions are evaluated before validation**, per RFC 9110 and because it is cheaper: a stale `PUT` is refused without resolving a single block, so a conflict never triggers a pull.
+
+**The check that decides is atomic with the write.** Validation sits between the two and MAY pull, which is not quick, so a precondition tested only on the way in would hold for one slow client and fail for two concurrent ones — and two concurrent ones is the case this exists for. A conforming implementation MUST NOT admit an interleaving in which two requests carrying the same tag both write.
+
+`start` and `reload` carry no precondition. They do not write, and asking a caller to prove which version it read before re-reading the file would be asking about a version that is not the operation's subject.
 
 ### 9.4 Reload applies the file, including its `autostart`
 

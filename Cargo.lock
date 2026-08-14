@@ -720,6 +720,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "similar",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
@@ -2035,6 +2036,12 @@ dependencies = [
  "digest",
  "rand_core 0.6.4",
 ]
+
+[[package]]
+name = "similar"
+version = "3.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85ee016af5d736b69fc89e19254540fa4b5f5492853fb5503920f084011c78b6"
 
 [[package]]
 name = "slab"
