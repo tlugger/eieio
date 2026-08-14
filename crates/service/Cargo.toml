@@ -13,11 +13,19 @@ repository.workspace = true
 # without atomics at all (`alloc::sync` is gated behind `target_has_atomic`, which
 # `riscv32imc-unknown-none-elf` does not have).
 [dependencies]
-# The format (SERVICE §1). `parse` and `serde` only: nothing here writes TOML, because
-# SERVICE §2 says the daemon never writes a service file. When the management API does
-# (SERVICE §9), it will want `toml_edit` for round-trip preservation, which is a
-# different crate for a different job.
+# The format (SERVICE §1), on the reading side. `parse` and `serde` only: what this produces
+# is the value tree stage 1 validates, and a value tree is exactly the wrong thing to write a
+# file back from — it has dropped every comment and every choice of formatting the file made.
 toml = { workspace = true }
+
+# The format on the writing side (SERVICE §9). A preserving parser, so an edit shows up in a
+# diff as the edit and nothing else — which is what makes hand-editing a service file and
+# dragging it on the Designer's canvas the same file rather than two (DESIGNER §4).
+#
+# A different crate for a different job, and deliberately not the authority on what a service
+# file means: `edit` re-runs stage 1 through `toml` above over whatever it rendered, so the
+# reader stays the one definition and the writer is a text transformer that has to satisfy it.
+toml_edit = { workspace = true }
 
 # The schema types, deserialized from that.
 serde.workspace = true

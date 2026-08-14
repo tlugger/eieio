@@ -193,6 +193,25 @@ Each of the following is a **distinct** error, carrying enough to point at the o
 - **It does not carry secrets.** A property is an expression, and an expression is public. Credentials reach a block through node configuration (DAEMON §2, SCOPE §3.11 OPEN).
 - **It does not version itself.** The file has no schema version field: an additive change is compatible by §3's rules, and a breaking one would be a new format with a new name. A version field invites a daemon to support two.
 
-## 9. Expansion list (for the in-depth pass)
+## 9. Editing a service file
 
-Round-trip-preserving writes (`toml_edit`) for the management API's read-modify-write, and the conflict-detection hash DESIGNER §4 asks for; the `eio service` CLI that mints ids and renders a graph for a human; whether a service may reference another service's ports.
+§2 says a host MUST NOT write to a service file, and this section is the other half of that sentence: what the tooling that *does* write one owes the person whose file it is.
+
+**A structural edit is a read-modify-write that preserves everything it did not change.** Comments, key order, alignment, blank lines, inline-versus-multi-line arrays and quoting style all survive; the diff of a file before and after an edit MUST show the edit and nothing else. This is not a nicety. §2's whole argument for hand-editing being first class collapses if the first Designer drag reformats a file a human wrote, and DESIGNER §4 makes it a hard requirement for exactly that reason. A value-tree parser cannot do it — a value tree has no trivia — so an implementation needs a preserving parser, and this repository's editor is `eio-service`'s (`toml_edit` underneath).
+
+**`[ui]` survives unchanged.** §6 already requires it; it is restated here because a read-modify-write is the operation that would break it, and because the Designer is the one caller that writes inside it.
+
+Four rules an editor MUST follow, each of them a way the format can be violated by a well-meaning write:
+
+- **A top-level key stays above the first table header.** §5's rule is a fact about TOML, and an editor that appended `connections` to the end of a file would file it under the last block. An implementation MAY satisfy this by construction — a preserving parser that renders root key-values before sub-tables does — but it MUST NOT emit a file where a top-level key sits below a header.
+- **Removing a block removes the connections that name it.** A connection naming an instance the file does not define is §7's dangling-connection error, so the alternative to cascading is writing a file that will not load. What is removed is the block's business to report; that it happens is not optional.
+- **Removing a block does not touch `[ui]`.** §6 makes a stale annotation inert, and an editor that tidied it would be deciding that `[ui]`'s keys are block ids — a schema §6 says this format does not have.
+- **An edit that would make the file invalid MUST fail and change nothing.** The file on disk and the document in hand are both left as they were, and the caller is told which rule it broke. Writing a file that §7 rejects and calling it the caller's problem is how a service ends up errored by its own tooling.
+
+An editor SHOULD re-run §7 stage 1 over what it is about to write. Stage 1 needs nothing but the text, so there is no reason not to, and it is what makes the preceding rule provable rather than asserted.
+
+**Who edits.** The `eio service` CLI, the Designer through its backend, and an agent through either. Not the daemon: DAEMON §9.3's `PUT` stores the bytes a client composed and edits none of them, which is what keeps §2's rule true of a node while this section is true of everything else. The conflict detection that makes concurrent editing safe is that endpoint's, and is specified there.
+
+## 10. Expansion list (for the in-depth pass)
+
+The `eio service` CLI that mints ids and renders a graph for a human; whether a service may reference another service's ports.

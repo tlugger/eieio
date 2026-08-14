@@ -18,10 +18,16 @@
 //!
 //! # Who writes a service file
 //!
-//! Not this crate, and not a host. Ids are minted by tooling at authoring time
-//! ([`id::generate`]), and SERVICE §2 makes it normative that a daemon never writes a service
-//! file: editing one by hand and calling reload is a first-class path (SCOPE §3.8), and a
-//! reload that rewrote the file would leave a git checkout dirty after every deploy.
+//! Not a host. Ids are minted by tooling at authoring time ([`id::generate`]), and SERVICE §2
+//! makes it normative that a daemon never writes a service file: editing one by hand and
+//! calling reload is a first-class path (SCOPE §3.8), and a reload that rewrote the file would
+//! leave a git checkout dirty after every deploy.
+//!
+//! The tooling that *does* write one writes it through [`edit`], which is this crate's second
+//! half and SERVICE §9's contract: an edit changes what it was asked to change and leaves the
+//! comments, formatting and `[ui]` of the rest of the file alone. One implementation, because
+//! a Designer canvas whose idea of what a service file may say differed from the CLI's would be
+//! two formats (DESIGNER §4).
 //!
 //! # Two stages, because they need different things
 //!
@@ -67,9 +73,11 @@ mod parse;
 mod schema;
 mod validate;
 
+pub mod edit;
 pub mod id;
 
 pub use connection::{Connection, Terminal};
+pub use edit::{Document, EditError};
 pub use error::{ConnectionError, Error, ResolvedError, Span};
 pub use parse::{Parsed, parse};
 pub use schema::{Instance, Service};

@@ -1,0 +1,395 @@
+//! A preserving edit changes what it was asked to change, and nothing else (SERVICE-SPEC §9).
+//!
+//! Every test here is a variation on one assertion: take a file that a person clearly wrote by
+//! hand — aligned `=`, comments in awkward places, a multi-line array, a `[ui]` table — edit it,
+//! and check that the diff is the edit. That is DESIGNER §4's hard requirement, and it is not
+//! provable by reading the implementation, because the property belongs to the parser
+//! underneath it.
+
+use eio_service::edit::{Document, EditError};
+
+/// A file with every kind of trivia a preserving edit has to carry through.
+///
+/// Deliberately not tidy: two spaces before an `=`, a comment inside the array, a comment
+/// trailing a value, single quotes on one string, and a `[ui]` table with a nested inline
+/// table. Each of them is something a value-tree round trip would silently destroy.
+const HAND_WRITTEN: &str = r#"# the kitchen service, edited by a person
+name = "kitchen"
+autostart  = true
+
+connections = [
+  # the sensor feeds the filter
+  "b7k2.out -> f3m9.in",
+  'f3m9.err -> k1p8.in',
+]
+
+[blocks.b7k2]
+name  = "Thermometer"   # by the window
+block = "ghcr.io/tlugger/temp-sensor:1.0.0"
+
+[blocks.b7k2.props]
+interval_ms = "5000"
+
+[blocks.f3m9]
+block = "filter:1.2.0"
+
+[blocks.f3m9.props]
+reading   = "(float $temp)"
+threshold = "18.0"
+
+[blocks.k1p8]
+block = "publisher:1.0.0"
+
+[ui]
+viewport = { x = 0, y = 0, zoom = 1.0 }
+
+[ui.blocks.b7k2]
+x = 148
+y = 234
+"#;
+
+/// The lines an edit added, removed or changed — the diff, as a person would read it.
+///
+/// Line-based and order-insensitive on purpose: what these tests assert is that *nothing else*
+/// moved, and a test that also pinned where the new lines went would fail on a formatting
+/// choice rather than on a regression.
+fn touched(before: &str, after: &str) -> (Vec<String>, Vec<String>) {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let removed = old
+        .iter()
+        .filter(|line| !new.contains(line))
+        .map(|line| String::from(*line))
+        .collect();
+    let added = new
+        .iter()
+        .filter(|line| !old.contains(line))
+        .map(|line| String::from(*line))
+        .collect();
+    (removed, added)
+}
+
+/// Opens the fixture, applies `edit`, and returns what changed — asserting throughout that the
+/// result is still a service file the reader accepts.
+fn edited(edit: impl FnOnce(&mut Document)) -> (String, Vec<String>, Vec<String>) {
+    let mut doc = Document::parse(HAND_WRITTEN).expect("the fixture is a valid service file");
+    edit(&mut doc);
+    let after = doc.render();
+    doc.check()
+        .expect("still a valid service file after the edit");
+    let (removed, added) = touched(HAND_WRITTEN, &after);
+    (after, removed, added)
+}
+
+#[test]
+fn the_fixture_survives_a_read_modify_write_with_no_edit() {
+    let doc = Document::parse(HAND_WRITTEN).expect("valid");
+    assert_eq!(
+        doc.render(),
+        HAND_WRITTEN,
+        "an edit-free round trip is a no-op"
+    );
+}
+
+#[test]
+fn adding_a_block_touches_only_the_block() {
+    let (after, removed, added) = edited(|doc| {
+        doc.add_block("m4v7", Some("Logger"), "logger:2.0.0")
+            .expect("a fresh id");
+    });
+    assert!(removed.is_empty(), "nothing was lost: {removed:?}");
+    assert_eq!(
+        added,
+        [
+            "[blocks.m4v7]",
+            "name = \"Logger\"",
+            "block = \"logger:2.0.0\""
+        ],
+        "and only the block arrived"
+    );
+    // SERVICE §5: a new table header must not land above a top-level key.
+    assert!(after.find("connections").unwrap() < after.find("[blocks.m4v7]").unwrap());
+}
+
+#[test]
+fn a_property_edit_leaves_its_neighbours_aligned() {
+    let (_, removed, added) = edited(|doc| {
+        doc.set_prop("f3m9", "threshold", "20.0")
+            .expect("f3m9 has props");
+    });
+    assert_eq!(removed, ["threshold = \"18.0\""]);
+    assert_eq!(added, ["threshold = \"20.0\""]);
+    // `reading   = ...`'s three spaces are somebody's alignment, and are not this crate's to
+    // normalise just because the line below it changed.
+}
+
+#[test]
+fn a_new_property_joins_an_existing_props_table() {
+    let (after, removed, added) = edited(|doc| {
+        doc.set_prop("k1p8", "topic", "\"kitchen.cold\"")
+            .expect("k1p8 exists");
+    });
+    assert!(removed.is_empty(), "{removed:?}");
+    // SERVICE §4's example spells this `topic = "\"kitchen.cold\""`; a value written by this
+    // crate comes out single-quoted instead, because a string property's value is a *quoted*
+    // expression and a TOML literal string is the spelling that needs no escapes. The two are
+    // the same string, which is what `check` below asserts — and a crate that forced the
+    // escaped spelling would be owning an escaper to make a file look like an example.
+    assert_eq!(added, ["[blocks.k1p8.props]", "topic = '\"kitchen.cold\"'"]);
+    assert_eq!(
+        doc_prop(&after, "k1p8", "topic"),
+        "\"kitchen.cold\"",
+        "and it reads back as the expression that was written"
+    );
+    assert!(after.contains("[ui]"), "and `[ui]` is still there");
+}
+
+/// What the *reader* makes of a property, which is the only thing its spelling has to preserve.
+fn doc_prop(text: &str, id: &str, property: &str) -> String {
+    let parsed = eio_service::parse(text).expect("valid");
+    parsed.service.blocks[id].props[property].clone()
+}
+
+#[test]
+fn a_connection_is_appended_in_the_arrays_own_style() {
+    let (_, removed, added) = edited(|doc| {
+        doc.connect("f3m9.out", "k1p8.in").expect("both exist");
+    });
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(
+        added,
+        ["  \"f3m9.out -> k1p8.in\","],
+        "the two-space indent came from the array, not from a default"
+    );
+}
+
+#[test]
+fn removing_a_block_takes_its_connections_and_leaves_its_layout() {
+    let (after, removed, added) = edited(|doc| {
+        let dropped = doc.remove_block("f3m9").expect("f3m9 exists");
+        assert_eq!(
+            dropped,
+            ["b7k2.out -> f3m9.in", "f3m9.err -> k1p8.in"],
+            "both edges naming it, reported so a caller can say so"
+        );
+    });
+    assert!(added.is_empty(), "{added:?}");
+    assert_eq!(
+        removed,
+        [
+            // The comment sat above the edge it describes and goes with it. A comment inside an
+            // array is trivia belonging to the element beneath it, so keeping it would leave a
+            // sentence about a connection this file no longer has.
+            "  # the sensor feeds the filter",
+            "  \"b7k2.out -> f3m9.in\",",
+            "  'f3m9.err -> k1p8.in',",
+            "[blocks.f3m9]",
+            "block = \"filter:1.2.0\"",
+            "[blocks.f3m9.props]",
+            "reading   = \"(float $temp)\"",
+            "threshold = \"18.0\"",
+        ]
+    );
+    // SERVICE §6: a stale annotation is inert, and tidying it would be this crate deciding
+    // that `[ui]`'s keys are block ids.
+    assert!(after.contains("[ui.blocks.b7k2]"));
+    // The file's own leading comment is untouched: nothing outside the edit moved.
+    assert!(after.starts_with("# the kitchen service, edited by a person\n"));
+}
+
+#[test]
+fn a_ui_annotation_is_written_without_a_schema_for_it() {
+    let (after, removed, added) = edited(|doc| {
+        doc.set_ui(&["blocks", "f3m9"], "{ x = 300, y = 96 }")
+            .expect("a TOML value");
+    });
+    assert!(removed.is_empty(), "{removed:?}");
+    // `[ui.blocks]` is implicit in the fixture — it exists only through `[ui.blocks.b7k2]` —
+    // and materialises here because a key now sits directly in it. That is TOML's doing and
+    // not a reformatting: the header is part of expressing the new value.
+    assert_eq!(added, ["[ui.blocks]", "f3m9 = { x = 300, y = 96 }"]);
+    assert!(after.contains("viewport = { x = 0, y = 0, zoom = 1.0 }"));
+}
+
+#[test]
+fn removing_a_ui_annotation_that_is_not_there_is_not_an_error() {
+    let (_, removed, added) = edited(|doc| {
+        doc.remove_ui(&["blocks", "nobody"])
+            .expect("absent is fine");
+        doc.remove_ui(&["nothing", "here"]).expect("so is the path");
+    });
+    assert!(removed.is_empty() && added.is_empty());
+}
+
+#[test]
+fn autostart_is_set_in_place() {
+    let (_, removed, added) = edited(|doc| doc.set_autostart(false));
+    assert_eq!(removed, ["autostart  = true"]);
+    // Two spaces before the `=`, still. The whitespace belongs to the key rather than to the
+    // value, so changing the value leaves somebody's alignment where they put it.
+    assert_eq!(added, ["autostart  = false"]);
+}
+
+#[test]
+fn disconnect_matches_what_the_edge_means_not_how_it_was_spelled() {
+    let text = "name = \"k\"\nconnections = [\"a.out->b.in\"]\n\n[blocks.a]\nblock = \"x:1\"\n\n[blocks.b]\nblock = \"y:1\"\n";
+    let mut doc = Document::parse(text).expect("valid");
+    // SERVICE §5 permits any amount of whitespace around the arrow, so a textual search for
+    // the canonical spelling would miss this edge entirely.
+    doc.disconnect("a.out", "b.in").expect("the same edge");
+    assert!(!doc.render().contains("a.out"));
+    assert_eq!(
+        doc.disconnect("a.out", "b.in"),
+        Err(EditError::NoSuchConnection {
+            edge: String::from("a.out -> b.in")
+        })
+    );
+}
+
+#[test]
+fn connecting_a_second_time_is_a_duplicate_whatever_the_spelling() {
+    let mut doc = Document::parse(HAND_WRITTEN).expect("valid");
+    assert_eq!(
+        doc.connect("b7k2.out", "f3m9.in"),
+        Err(EditError::DuplicateConnection {
+            edge: String::from("b7k2.out -> f3m9.in")
+        }),
+        "SERVICE §5: the same edge twice would deliver each batch twice"
+    );
+    assert_eq!(doc.render(), HAND_WRITTEN, "and nothing was written");
+}
+
+/// SERVICE §5's hazard, and the reason `connections_or_insert` needs no defensive code.
+///
+/// A top-level key written below a table header belongs to that table. This pins that
+/// `toml_edit` renders a root key-value above every sub-table whatever order it was inserted
+/// in — a property of the library, so it is asserted rather than assumed.
+#[test]
+fn a_created_connections_array_lands_above_the_first_table_header() {
+    let mut doc = Document::parse(
+        "name = \"k\"\n\n[blocks.a]\nblock = \"x:1\"\n\n[blocks.b]\nblock = \"y:1\"\n",
+    )
+    .expect("valid");
+    doc.connect("a.out", "b.in").expect("both exist");
+
+    let text = doc.render();
+    assert!(
+        text.find("connections").unwrap() < text.find("[blocks.a]").unwrap(),
+        "it would otherwise be a key of `blocks.b`:\n{text}"
+    );
+    let parsed = doc.check().expect("and it reads back as the service's");
+    assert_eq!(parsed.connections.len(), 1);
+}
+
+#[test]
+fn a_new_file_is_a_valid_service_with_no_blocks() {
+    let doc = Document::create("kitchen").expect("a valid name");
+    assert_eq!(doc.render(), "name = \"kitchen\"\n");
+    // SERVICE §3: a service with no blocks runs nothing, which is what it says.
+    doc.check().expect("valid");
+    assert_eq!(
+        Document::create("Kitchen").err(),
+        Some(EditError::BadServiceName {
+            name: String::from("Kitchen")
+        })
+    );
+}
+
+#[test]
+fn a_refused_edit_changes_nothing() {
+    let mut doc = Document::parse(HAND_WRITTEN).expect("valid");
+    let refusals: Vec<EditError> = vec![
+        doc.add_block("B7K2", None, "x:1").unwrap_err(),
+        doc.add_block("b7k2", None, "x:1").unwrap_err(),
+        doc.add_block("new1", None, "   ").unwrap_err(),
+        doc.remove_block("nope").unwrap_err(),
+        doc.set_prop("nope", "a", "1").unwrap_err(),
+        doc.set_prop("b7k2", "Interval", "1").unwrap_err(),
+        doc.remove_prop("b7k2", "nope").unwrap_err(),
+        doc.connect("b7k2.out", "nope.in").unwrap_err(),
+        doc.connect("b7k2.out", "f3m9.err").unwrap_err(),
+        doc.connect("b7k2out", "f3m9.in").unwrap_err(),
+        doc.connect("b7k2.out", "f3m9.IN").unwrap_err(),
+        doc.set_ui(&["blocks", "b7k2"], "{ x = ").unwrap_err(),
+        doc.set_ui(&[], "1").unwrap_err(),
+    ];
+
+    assert_eq!(
+        refusals,
+        [
+            EditError::BadId {
+                id: String::from("B7K2")
+            },
+            EditError::DuplicateInstance {
+                id: String::from("b7k2")
+            },
+            EditError::EmptyBlockRef,
+            EditError::NoSuchInstance {
+                id: String::from("nope")
+            },
+            EditError::NoSuchInstance {
+                id: String::from("nope")
+            },
+            EditError::BadName {
+                name: String::from("Interval")
+            },
+            EditError::NoSuchProperty {
+                id: String::from("b7k2"),
+                property: String::from("nope"),
+            },
+            EditError::NoSuchInstance {
+                id: String::from("nope")
+            },
+            EditError::ErrorPortDestination,
+            EditError::BadTerminal {
+                terminal: String::from("b7k2out"),
+                error: eio_service::ConnectionError::NoPort {
+                    side: "source",
+                    span: eio_service::Span::new(0, 7),
+                },
+            },
+            EditError::BadTerminal {
+                terminal: String::from("f3m9.IN"),
+                error: eio_service::ConnectionError::BadPort {
+                    side: "destination",
+                    span: eio_service::Span::new(17, 2),
+                },
+            },
+            EditError::BadUiValue {
+                detail: doc_ui_error(),
+            },
+            EditError::BadUiPath,
+        ]
+    );
+
+    // SERVICE §9: an edit that would make the file invalid fails and changes nothing.
+    assert_eq!(doc.render(), HAND_WRITTEN);
+}
+
+/// Whatever `toml_edit` says about `"{ x = "`. Pinned by construction rather than by a literal,
+/// because the message is the parser's and not this crate's contract.
+fn doc_ui_error() -> String {
+    "{ x = "
+        .parse::<toml_edit::Value>()
+        .expect_err("not a value")
+        .to_string()
+}
+
+#[test]
+fn an_invalid_file_cannot_be_opened_for_editing() {
+    // Stage 1 on the way in: a caller that cannot parse a file cannot be told which of its
+    // edits failed, and the list it gets is the reader's list.
+    let errors = Document::parse("name = \"Kitchen\"\n").expect_err("a bad service name");
+    assert_eq!(errors.len(), 1);
+    assert!(matches!(errors[0], eio_service::Error::ServiceName { .. }));
+}
+
+#[test]
+fn an_id_is_minted_around_what_the_file_already_uses() {
+    let doc = Document::parse(HAND_WRITTEN).expect("valid");
+    // `b7k2` is taken, so the first four bytes are skipped and the next chunk answers.
+    let random = [11, 55, 18, 1, 7, 7, 7, 7];
+    let taken = doc.mint_id(&random[..4]).expect("some id");
+    assert_ne!(taken, "b7k2");
+    assert!(eio_service::id::is_id(&taken));
+}

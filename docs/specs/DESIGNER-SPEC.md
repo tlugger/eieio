@@ -40,7 +40,7 @@ Notably absent: services, blocks-in-services, connections, layout — all of tha
 
 ## 4. Service editing model
 
-- **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit (**PROPOSED:** toml_edit-style preserving parser on the backend).
+- **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer — the same WASM trick §1 uses for `expr`, and the same reason. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.
 - **Layout lives in the service file** under the daemon-ignored `[ui]` table (DAEMON-SPEC §2): node positions, canvas viewport, notes. Rationale: the service file stays the single portable artifact — git-clone a service onto a fresh node and the Designer renders it laid out; agents can read/write layout like anything else. The daemon's ignore-contract keeps this honest.
 - Conflict handling (file changed on disk / by an agent since read): compare content hash on PUT, surface a diff, never silent-overwrite. Agents and humans editing the same files is the _expected_ condition, not an edge case (SCOPE §4).
 

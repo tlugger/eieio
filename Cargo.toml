@@ -72,16 +72,30 @@ regex = "1.11"
 # Rust parsers accept and reject, so the schema and the types cannot drift apart.
 boon = "0.6"
 
-# The service file format (SERVICE-SPEC §1). `parse` and `serde`; deliberately not `display`,
-# because SERVICE §2 makes the daemon a reader and never a writer. Pinned here rather than in
-# `crates/service` because the Designer's backend and the CLI will read the same files, and
-# what a service file *means* must not vary by which crate read it.
+# The service file format (SERVICE-SPEC §1). `parse` and `serde`; deliberately not `display`.
+# Nothing renders a service file from a value tree — SERVICE §9 requires an edit to preserve
+# the comments and formatting of what it did not change, which `toml_edit` does below and a
+# value tree cannot. Pinned here rather than in `crates/service` because the Designer's backend
+# and the CLI read the same files, and what a service file *means* must not vary by which crate
+# read it.
 #
 # It is also why `eio-service` is not a ★ crate: measured on rustc 1.97.1, this fails to
 # compile for `riscv32imc-unknown-none-elf` — `alloc::sync` is gated behind
 # `target_has_atomic = "ptr"` and rv32imc has no A extension. It builds fine for
 # `thumbv7em-none-eabihf`, so the constraint is atomics rather than `std`.
 toml = { version = "0.9", default-features = false, features = ["parse", "serde"] }
+
+# The *writer* (SERVICE §9). A second TOML implementation beside `toml` on purpose, and the
+# split is the one the reader/writer distinction asks for: `toml` produces a value tree, which
+# is what stage 1 validates and what has no trivia in it; `toml_edit` keeps the trivia, which is
+# the whole of what a preserving edit is. Neither is authoritative about the other — `eio-service`
+# re-runs stage 1 through `toml` over what `toml_edit` rendered, so the two cannot drift about
+# what a service file means without a test failing.
+#
+# Measured against `eio-service`'s tree: +5 crates (`indexmap`, `equivalent`, `hashbrown`,
+# `toml_datetime` 1.1, `toml_writer`), all pure Rust, so the arm cross-build in
+# `just release-daemon` pays nothing new for it.
+toml_edit = "0.25"
 
 # Module fixtures are checked in as `.wat` so a reviewer can see what each one is testing,
 # and assembled at read time. Version-matched to wasmparser because both come from the
@@ -219,6 +233,7 @@ utoipa = { version = "5", features = ["axum_extras"] }
 # neither of them re-exports. Both are tiny and pure Rust.
 async-stream = "0.3"
 futures-core = "0.3"
+
 
 # ── the state store's dependency (DAEMON §10) ────────────────────────────────
 #
