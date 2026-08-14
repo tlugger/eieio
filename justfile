@@ -161,6 +161,10 @@ ci: fmt-check lint build test test-golden check-nostd check-guest
 run-daemon *args:
     cargo run --package eio-daemon -- {{ args }}
 
+# Run the CLI. Arguments are passed through, so `just eio service show kitchen.toml` works.
+eio *args:
+    cargo run --quiet --package eio-cli -- {{ args }}
+
 # Run the Designer (not built yet).
 run-designer:
     #!/usr/bin/env bash
