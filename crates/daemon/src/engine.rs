@@ -1156,6 +1156,10 @@ mod tests {
         // implements, and admitting one of those would be the two-hosts divergence with
         // nothing to catch it.
         //
+        // Tail call, memory64 and threads are outside [`ACCEPTED`] too and are not here:
+        // wasm3 *runs* all three, so they are refused in the loader as well and are asserted
+        // in both layers at once by `what_the_leaf_engine_will_not_refuse_the_loader_does`.
+        //
         // Matching the message is the point rather than an incidental strictness: ABI §4.3
         // requires the rejection to *name* the proposal, because a deployer holding a valid
         // manifest and a refused block has nothing else to act on. Each expectation is the
@@ -1167,12 +1171,6 @@ mod tests {
                 "simd",
                 r#"(module (func (export "f") (result i32)
                      (i32x4.extract_lane 0 (v128.const i32x4 1 2 3 4))))"#,
-            ),
-            (
-                "tail call",
-                "tail call",
-                r#"(module (func $g (result i32) (i32.const 1))
-                     (func (export "f") (result i32) (return_call $g)))"#,
             ),
             // A second linear memory needs no instruction to be past MVP: declaring it is
             // already the proposal.
@@ -1191,6 +1189,64 @@ mod tests {
             assert!(
                 message.contains(needle),
                 "refusing {proposal} has to say so, and said: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_the_leaf_engine_will_not_refuse_the_loader_does() {
+        // The other pairing §4.3 requires, and the mirror of the one below it. Three proposals
+        // outside the six are refused by *this* engine and run by wasm3 — it loads, compiles
+        // and executes a `return_call`, an `i64`-indexed memory and a shared memory
+        // (`crates/conformance/tests/wasm3.rs`, eieio-7d8.26). A gap in an engine's refusals is
+        // not a gap in the platform, so the loader closes it.
+        //
+        // Both halves here, because neither alone is the requirement: the engine's refusal is
+        // what keeps this host from having to trust the loader, and the loader's is what keeps
+        // the leaf tier from flashing a block this host would have rejected. These three are
+        // also the only refusals in the suite that assert the proposal name on *every* host,
+        // which is what a loader-written message buys over an engine's.
+        let runtime = Runtime::new(Budgets::default()).expect("an engine");
+        for (proposal, needle, wat) in [
+            (
+                "tail call",
+                "return_call",
+                r#"(module (func $g (result i32) (i32.const 1))
+                     (func (export "f") (result i32) (return_call $g)))"#,
+            ),
+            (
+                "memory64",
+                "i64 index",
+                r#"(module (memory (export "memory") i64 1))"#,
+            ),
+            (
+                "threads",
+                "shared memory",
+                r#"(module (memory (export "memory") 1 1 shared))"#,
+            ),
+        ] {
+            let error = compile(&runtime, wat)
+                .expect_err(&format!("{proposal} is outside the accepted set"));
+            let message = format!("{error:?}").to_lowercase();
+            assert!(
+                message.contains(proposal),
+                "refusing {proposal} has to say so, and said: {message}"
+            );
+
+            // No manifest section, so validation would fail for that reason too — which is
+            // exactly why the variant is matched rather than the fact of an error.
+            let wasm = wat::parse_str(wat).expect("the snippet assembles");
+            let error = eio_manifest::validate(&wasm, None)
+                .err()
+                .unwrap_or_else(|| panic!("the loader has to refuse {proposal}: wasm3 will not"));
+            assert!(
+                matches!(error, eio_manifest::ModuleError::PostMvp { .. }),
+                "{proposal} must be refused as post-MVP, and was: {error}"
+            );
+            let message = error.to_string();
+            assert!(
+                message.contains(proposal) && message.contains(needle),
+                "the loader's refusal of {proposal} must name it and {needle}, and said: {message}"
             );
         }
     }

@@ -440,11 +440,12 @@ fn a_capability_this_host_does_not_implement_is_refused_by_name() {
 
 #[test]
 fn a_post_mvp_module_is_refused_and_the_message_names_the_proposal() {
-    // ABI §1.1 and §4.3: MVP conformance is the engine's, and `post_mvp.wat` is otherwise a
-    // valid block — `eio_manifest` accepts it, as the assertion below insists. Deploying it
-    // would produce a block that runs here and is refused by wasm3 at flash time.
+    // ABI §1.1 and §4.3: SIMD is one of the six proposals whose refusal is the engine's alone,
+    // and `post_mvp.wat` is otherwise a valid block — `eio_manifest` accepts it, as the
+    // assertion below insists. Deploying it would produce a block that runs here and is
+    // refused by wasm3 at flash time.
     eio_manifest::validate(&wasm("post_mvp.wat"), None)
-        .expect("the loader has no opinion about WASM features — only the engine does");
+        .expect("the loader has no opinion about SIMD — both engines refuse it by name");
 
     let error = run_block(&args("post_mvp.wat")).expect_err("SIMD is past MVP");
     // `{:?}` rather than `{}`, because that is what a deployer sees: the daemon returns this
