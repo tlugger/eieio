@@ -64,6 +64,19 @@ impl VectorValue {
     }
 }
 
+/// Writes bytes in the suite's lowercase-hex notation.
+///
+/// The inverse of [`unhex`], and here beside it because `expr-tests/cbor/`'s runner compares
+/// a re-encoded batch against a vector's `bytes` (ABI §6.3.1): one of the two directions
+/// living somewhere else is how a notation acquires two readings.
+pub fn hex(bytes: &[u8]) -> String {
+    use core::fmt::Write;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
 /// Decodes the suite's lowercase-hex byte notation.
 pub fn unhex(hex: &str) -> Vec<u8> {
     assert!(

@@ -1,0 +1,36 @@
+{
+  "vectors": [
+    {
+      "name": "deviation-float-binary64-not-shortest-accepted",
+      "bytes": "81a16161fb3ff8000000000000",
+      "expect": [{ "a": { "float": 1.5 } }],
+      "rule": [4],
+      "spec": "§6.3.1 rule 4",
+      "note": "1.5 as binary64, which §6.3.1 requires. RFC 8949 §4.2.1's shortest-float rule requires binary16 here — so a stock canonical encoder never produces these bytes for this value, and a host built on one fails this vector."
+    },
+    {
+      "name": "deviation-float-shortest-form-refused",
+      "bytes": "81a16161f93e00",
+      "reject": true,
+      "rule": [4],
+      "spec": "§6.3.1 rule 4",
+      "note": "The same 1.5, encoded exactly as RFC 8949 §4.2.1 mandates. A host that decodes with a stock canonical CBOR library accepts this and diverges from every conforming host on the first float it sees. The data model has one float type, and shortest-float would make a value's encoded width depend on its magnitude."
+    },
+    {
+      "name": "deviation-keys-ordered-by-content-accepted",
+      "bytes": "81a262616101617a02",
+      "expect": [{ "aa": { "int": 1 }, "z": { "int": 2 } }],
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "\"aa\" before \"z\", which is content order: 0x6161 < 0x7a. RFC 8949 §4.2.1 orders keys by their *encoded* bytes, where the length byte leads — 0x617a (\"z\") < 0x626161 (\"aa\") — so a stock canonical encoder emits the other order and a host built on one rejects these bytes as unsorted."
+    },
+    {
+      "name": "deviation-keys-ordered-by-encoding-refused",
+      "bytes": "81a2617a0262616101",
+      "reject": true,
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "The same signal in RFC 8949 §4.2.1's order. Ordering by content gives the platform one ordering — the same one EXPR §2 exposes as map iteration order and §7.5's (keys m) returns — so a value's key order does not change between the wire and the language."
+    }
+  ]
+}

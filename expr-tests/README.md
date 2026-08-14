@@ -40,6 +40,22 @@ runs it, because `host-core` is the only crate that depends on both halves of th
 |---|---|
 |`properties/types.json`|ABI §11.1 property types: what each satisfies, the int → float promotion and its exactness boundaries, and `RESULT_TYPE`|
 
+`cbor/` is a **third suite**, and further from the expression language still: it is the
+canonical encoding of a batch on the wire (ABI §6.3.1), which every host must agree on
+byte for byte before anything above it can be compared. It is here rather than in a
+directory of its own for the reason the whole tree exists — these are the platform's
+host-agnostic vectors, and a host in another language reads them all from one place —
+and it is a subdirectory for the same mechanical reason `properties/` is: its vectors
+carry fields the language runner would reject, and that runner reads top-level files
+only. `crates/signal/tests/cbor_vectors.rs` runs it, `eio_signal` being the one crate
+that defines the encoding. Its format is [below](#a-cbor-vector).
+
+|File|Covers|
+|---|---|
+|`cbor/batches.json`|ABI §6.3.1: batches that decode, and re-encode to the bytes they came from|
+|`cbor/reject.json`|Bytes each of the eleven rules refuses|
+|`cbor/deviations.json`|The two departures from RFC 8949 §4.2.1, in both directions|
+
 ## A vector
 
 ```json
@@ -127,6 +143,56 @@ None are needed: every float in the suite is either exactly representable in dec
 a documented boundary (`5e-324`, `1.7976931348623157e308`) that round-trips through JSON's
 number grammar.
 
+## A CBOR vector
+
+`cbor/`'s vectors are about bytes rather than expressions, so they share the [value
+notation](#values) and nothing else.
+
+```json
+{
+  "name": "negative-zero-is-preserved",
+  "bytes": "81a1617afb8000000000000000",
+  "expect": [{ "z": { "float": -0.0 } }],
+  "rule": [6],
+  "spec": "§6.3.1 rule 6"
+}
+```
+
+|Field|Required|Meaning|
+|---|---|---|
+|`name`|yes|Unique across the whole `cbor/` corpus, not merely within its file.|
+|`bytes`|yes|The encoded batch, lowercase hex, two digits per byte. `""` is a legal input — and is not the empty batch, which is `"80"`.|
+|`expect`|one of|The batch these bytes decode to: an array of signals, each an object of attribute name → [value](#values). `[]` is the empty batch.|
+|`reject`|one of|`true`, asserting the bytes are refused. It carries **no reason** — see below.|
+|`rule`|yes|Which of §6.3.1's eleven rules this vector exercises, as an array of numbers. Read by the coverage audit and by people; never asserted.|
+|`depth`|no|The nesting bound to decode under, for vectors about rule 9. A host clamps a request below EXPR §9's `MAX_DEPTH` floor *up*, so `1` asserts behaviour at the floor rather than at 1.|
+|`spec`, `note`|no|Documentation for the reader, as in the language suite.|
+
+Exactly one of `expect` and `reject` must be present, and an unknown field is a malformed
+file — the same rule, for the same reason, as the language corpus.
+
+**A rejecting vector says only that the bytes are refused.** It cannot say why, because
+§6.3.1 does not let it: "which rule a host rejects under is diagnostic, not normative…
+a conformance suite MUST NOT require identical rejection reasons". Two hosts must agree on
+*whether* input is canonical and need not agree on how they classify a violation, so a
+vector naming an error would fail a conforming host that words its diagnostics differently.
+`rule` records which rule the vector is *about*, which is a statement about the corpus
+rather than about any host's output.
+
+**Every accepting vector also asserts that re-encoding reproduces `bytes` exactly.** That
+is §6.3.1's own requirement — "for every input a decoder accepts, re-encoding the decoded
+batch MUST reproduce that input byte for byte" — and it is the half that catches a decoder
+which accepts the right values and normalises them on the way in. Negative zero is the
+sharpest case: `-0.0` and `+0.0` compare equal under IEEE semantics, so a decoder that
+normalised one to the other would satisfy any value assertion and fail only here.
+
+**The two deviations get vectors in both directions.** For each, the corpus carries the
+encoding this platform accepts *and* the encoding RFC 8949 §4.2.1 mandates, which this
+platform must refuse. A suite carrying only the first would be passed by a host built on a
+stock canonical-CBOR library, which is the exact failure the deviations exist to make
+visible: shortest-float would write `1.5` as `f93e00`, and encoded-bytes key ordering would
+put `"z"` before `"aa"`.
+
 ## Coverage
 
 The suite is exhaustive by spec mandate (§11), and the runner enforces that rather than
@@ -141,9 +207,25 @@ It is covered instead by `properties/`, which has an audit of its own: every ABI
 property type must have a vector showing what satisfies it and, `any` excepted, one showing
 what it refuses. Adding a property type without vectors breaks the build too.
 
+`cbor/` is audited the same way, in both directions: every one of §6.3.1's eleven rules
+must have a vector it accepts and a vector it refuses, and each of the two RFC 8949
+departures must have both forms. **Rule 6 is the one exemption**, and cannot be otherwise:
+it mandates that negative zero is *preserved*, so there are no bytes it forbids and no
+rejecting vector to write. What would catch a host breaking it is the re-encode assertion
+on its accepting vector, which is why that assertion is not optional.
+
 ## Adding vectors
 
 Derive the expected result from the **specification**, then run the suite. If the
 implementation disagrees, one of the two is wrong and that is a finding to resolve — never
 edit the vector to match what the code did. A conformance suite written by observing the
 implementation asserts only that the implementation is self-consistent.
+
+In `cbor/`, one step more, because a rejecting vector asserts only *that* bytes are refused
+and so passes whatever it is refused for. **Check by hand that the bytes are well-formed
+CBOR and that the rule the vector names is the only thing wrong with them.** The failure
+this prevents is silent and permanent: a vector for rule 8 arrived in the first corpus with
+a text head claiming 24 bytes and carrying 20, so every decoder refused it as truncated and
+nothing was ever asserted about tags. Nothing mechanical catches that — it would take a
+second, permissive CBOR reader, and a check built on the strict decoder's first complaint
+would depend on the order that decoder happens to look in.

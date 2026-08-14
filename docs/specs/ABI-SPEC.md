@@ -254,6 +254,10 @@ Rules 4 and 7 are the only two deviations from RFC 8949 §4.2.1's core determini
 
 **Which** rule a host rejects under is diagnostic, not normative. Two implementations MUST agree on *whether* input is canonical; they need not agree on how they classify or describe a violation, and a conformance suite MUST NOT require identical rejection reasons. Hosts SHOULD nonetheless make the reason machine-readable, because it is what a deploy-time error message and a signal tap have to show.
 
+**The rules above are pinned by vectors, and every host MUST pass them identically.** `expr-tests/cbor/` carries them: encoded bytes paired either with the batch they decode to or with the fact that they are refused, covering each of the eleven rules in both directions — rule 6 excepted, which mandates preservation and so forbids no bytes — and both deviations in both forms. They are data files rather than a test written in any host's language, for the reason EXPR §11 gives about its own corpus — a suite written in Rust could only ever measure the Rust implementation, and it is a host reaching for a *stock* canonical-CBOR library that rules 4 and 7 exist to catch. **`expr-tests/README.md` is the vector format's normative description.**
+
+Two properties of that corpus follow from this section rather than from convenience. A rejecting vector asserts only that the bytes are refused, never a reason, because of the paragraph above. And every accepting vector additionally asserts that re-encoding the decoded batch reproduces its input byte for byte, because that is this section's second sentence — and because it is the only thing that catches a decoder which reads the right values and normalises them, negative zero being the case where no value comparison can.
+
 ### 6.4 Error port
 
 `PORT_ERR` is a reserved output port on every block, absent from the manifest's `outputs` list. A guest MAY `emit(PORT_ERR, ...)` signals it cannot process. Routing of the error port is a service-level concern (host/Designer); unrouted error emissions are logged and counted. This gives failure a data path without inventing new mechanisms.

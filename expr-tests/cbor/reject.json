@@ -1,0 +1,212 @@
+{
+  "vectors": [
+    {
+      "name": "indefinite-length-batch",
+      "bytes": "9fa0ff",
+      "reject": true,
+      "rule": [1],
+      "spec": "§6.3.1 rule 1",
+      "note": "An indefinite-length array of one empty map. Well-formed CBOR, and the same batch a definite-length encoder writes as 81a0 — which is why accepting it would mean two encodings of one batch."
+    },
+    {
+      "name": "indefinite-length-text-key",
+      "bytes": "81a17f6161ff00",
+      "reject": true,
+      "rule": [1],
+      "spec": "§6.3.1 rule 1",
+      "note": "Chunked text, here one chunk spelling \"a\". Rule 1 covers strings as well as containers; a decoder that only checked array and map heads accepts this."
+    },
+    {
+      "name": "non-shortest-integer-head",
+      "bytes": "81a161611800",
+      "reject": true,
+      "rule": [2],
+      "spec": "§6.3.1 rule 2",
+      "note": "Zero written with a one-byte head instead of the immediate 0x00."
+    },
+    {
+      "name": "non-shortest-length-head",
+      "bytes": "9801a0",
+      "reject": true,
+      "rule": [2],
+      "spec": "§6.3.1 rule 2",
+      "note": "Rule 2 covers lengths of major types 2-5, not only integer values: a one-signal batch whose array length is written 0x9801 rather than 0x81."
+    },
+    {
+      "name": "integer-above-i64-max",
+      "bytes": "81a161611b8000000000000000",
+      "reject": true,
+      "rule": [3],
+      "spec": "§6.3.1 rule 3",
+      "note": "2^63, the first unsigned CBOR integer outside i64. Shortest-head and definite-length: only rule 3 refuses it."
+    },
+    {
+      "name": "integer-below-i64-min",
+      "bytes": "81a161613b8000000000000000",
+      "reject": true,
+      "rule": [3],
+      "spec": "§6.3.1 rule 3",
+      "note": "Major type 1 encodes -1-n, so this is -2^63-1: one below i64::MIN, whose own encoding is 0x3b7fffffffffffffff."
+    },
+    {
+      "name": "binary16-float",
+      "bytes": "81a16161f93e00",
+      "reject": true,
+      "rule": [4],
+      "spec": "§6.3.1 rule 4",
+      "note": "1.5 as binary16. Exactly what RFC 8949 §4.2.1's shortest-float rule requires, and what §6.3.1 deviates from — see deviations.json."
+    },
+    {
+      "name": "binary32-float",
+      "bytes": "81a16161fa3fc00000",
+      "reject": true,
+      "rule": [4],
+      "spec": "§6.3.1 rule 4",
+      "note": "1.5 as binary32, the same value again. A decoder that widened either of these to binary64 would accept three encodings of one float."
+    },
+    {
+      "name": "nan",
+      "bytes": "81a16161fb7ff8000000000000",
+      "reject": true,
+      "rule": [5],
+      "spec": "§6.3.1 rule 5",
+      "note": "A quiet NaN. Rejected on arrival so that EXPR §9's \"no NaN escapes\" is a property of the type rather than an obligation on every builtin."
+    },
+    {
+      "name": "positive-infinity",
+      "bytes": "81a16161fb7ff0000000000000",
+      "reject": true,
+      "rule": [5],
+      "spec": "§6.3.1 rule 5"
+    },
+    {
+      "name": "negative-infinity",
+      "bytes": "81a16161fbfff0000000000000",
+      "reject": true,
+      "rule": [5],
+      "spec": "§6.3.1 rule 5",
+      "note": "Both infinities, because a sign-blind check on the exponent catches one and not the other."
+    },
+    {
+      "name": "signalling-nan",
+      "bytes": "81a16161fb7ff4000000000000",
+      "reject": true,
+      "rule": [5],
+      "spec": "§6.3.1 rule 5",
+      "note": "A signalling NaN has a different payload from a quiet one, and a check comparing against one NaN bit pattern rather than testing finiteness lets it through."
+    },
+    {
+      "name": "map-key-not-text",
+      "bytes": "81a10000",
+      "reject": true,
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "An integer key. CBOR permits any type; a signal is a map of text to value (§6.3)."
+    },
+    {
+      "name": "map-keys-unsorted",
+      "bytes": "81a2616201616100",
+      "reject": true,
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "\"b\" before \"a\". Descending is the easy case; the ordering deviation is in deviations.json."
+    },
+    {
+      "name": "map-keys-duplicated",
+      "bytes": "81a2616100616101",
+      "reject": true,
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "Rejected rather than collapsed to the first or last: either choice re-encodes to bytes that did not arrive, which rule 7 says in as many words."
+    },
+    {
+      "name": "tagged-value",
+      "bytes": "81a16161c074323032362d30382d31345431323a30303a30305a",
+      "reject": true,
+      "rule": [8],
+      "spec": "§6.3.1 rule 8",
+      "note": "Tag 0 over a complete, canonical text string, so the tag is the only thing wrong with it. A decoder that skipped tags would accept two encodings of one string."
+    },
+    {
+      "name": "undefined",
+      "bytes": "81a16161f7",
+      "reject": true,
+      "rule": [8],
+      "spec": "§6.3.1 rule 8",
+      "note": "`undefined` is a simple value next to `null`, and the data model has one absent-ish value, not two."
+    },
+    {
+      "name": "unassigned-simple-value",
+      "bytes": "81a16161f0",
+      "reject": true,
+      "rule": [8],
+      "spec": "§6.3.1 rule 8",
+      "note": "Simple value 16, which is neither false, true nor null."
+    },
+    {
+      "name": "nesting-beyond-any-conforming-bound",
+      "bytes": "81a1616181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818181818101",
+      "reject": true,
+      "rule": [9],
+      "depth": 1,
+      "spec": "§6.3.1 rule 9",
+      "note": "Two hundred levels of nested array, asked of a decoder bounded at EXPR §9's floor. A host configured higher would accept it, so the vector states the bound it asserts at rather than assuming one; `depth` is clamped up to the floor, never down, so the floor is what this exercises."
+    },
+    {
+      "name": "trailing-bytes",
+      "bytes": "8000",
+      "reject": true,
+      "rule": [10],
+      "spec": "§6.3.1 rule 10",
+      "note": "The empty batch, complete and valid, followed by one byte. Corruption rather than a batch carrying extra data."
+    },
+    {
+      "name": "truncated-batch",
+      "bytes": "81a16161",
+      "reject": true,
+      "rule": [10],
+      "spec": "§6.3.1 rule 10",
+      "note": "A map promising one entry, a key, and no value. The other half of rule 10: a payload that ends early is corruption too."
+    },
+    {
+      "name": "array-length-claims-what-is-not-there",
+      "bytes": "81a161619bffffffffffffffff",
+      "reject": true,
+      "rule": [11],
+      "spec": "§6.3.1 rule 11",
+      "note": "A nine-byte head claiming u64::MAX elements in a thirteen-byte payload. The assertion a runner cannot make from bytes alone is that this fails *without* allocating; what the vector pins is that it fails rather than hanging or dying."
+    },
+    {
+      "name": "byte-string-length-claims-what-is-not-there",
+      "bytes": "81a161615bffffffffffffffff",
+      "reject": true,
+      "rule": [11],
+      "spec": "§6.3.1 rule 11",
+      "note": "The same hostile head on a byte string, where a decoder is most tempted to reserve the declared size up front."
+    },
+    {
+      "name": "batch-is-not-an-array",
+      "bytes": "a0",
+      "reject": true,
+      "rule": [1],
+      "spec": "§6.3",
+      "note": "A bare map. A batch is an array of signals even when it holds one."
+    },
+    {
+      "name": "signal-is-not-a-map",
+      "bytes": "8100",
+      "reject": true,
+      "rule": [1],
+      "spec": "§6.3",
+      "note": "An array of one integer. Signals are dict-shaped by definition (§6.3), so this is not a batch of one signal."
+    },
+    {
+      "name": "empty-input",
+      "bytes": "",
+      "reject": true,
+      "rule": [10],
+      "spec": "§6.3.1 rule 10",
+      "note": "No bytes at all is not the empty batch; the empty batch is 0x80."
+    }
+  ]
+}

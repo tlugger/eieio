@@ -1,0 +1,129 @@
+{
+  "vectors": [
+    {
+      "name": "empty-batch",
+      "bytes": "80",
+      "expect": [],
+      "rule": [1, 2, 10],
+      "spec": "§6.3.1",
+      "note": "A batch is an array of signals, so the empty batch is the empty array — one byte, and nothing after it."
+    },
+    {
+      "name": "one-empty-signal",
+      "bytes": "81a0",
+      "expect": [{}],
+      "rule": [1, 2],
+      "spec": "§6.3.1",
+      "note": "A signal with no attributes is a legal signal, and distinct from a batch with no signals."
+    },
+    {
+      "name": "two-signals-keep-their-order",
+      "bytes": "82a1616100a1616101",
+      "expect": [{"a": {"int": 0}}, {"a": {"int": 1}}],
+      "rule": [1],
+      "spec": "§6.3, §6.3.1",
+      "note": "A batch is ordered (§6.3); only map keys are sorted, and only within a signal."
+    },
+    {
+      "name": "every-scalar-type",
+      "bytes": "81a66162f56166fb3ff8000000000000616926616ef6617362686961794261ff",
+      "expect": [{"b": {"bool": true}, "f": {"float": 1.5}, "i": {"int": -7}, "n": {"null": null}, "s": {"str": "hi"}, "y": {"bytes": "61ff"}}],
+      "rule": [2, 4, 7, 8],
+      "spec": "§6.3.1",
+      "note": "The whole scalar half of the §6.3 data model in one signal: the three admitted simple values, a binary64 float, a negative integer, text, and a byte string."
+    },
+    {
+      "name": "negative-zero-is-preserved",
+      "bytes": "81a1617afb8000000000000000",
+      "expect": [{"z": {"float": -0.0}}],
+      "rule": [6],
+      "spec": "§6.3.1 rule 6",
+      "note": "Rule 6 is a MUST in both directions: a decoder may neither reject this nor normalise it to +0.0, and re-encoding has to give back 0xfb8000000000000000 rather than 0xfb0000000000000000. A host that normalised would pass a value assertion and fail the re-encode."
+    },
+    {
+      "name": "i64-max",
+      "bytes": "81a1616e1b7fffffffffffffff",
+      "expect": [{"n": {"int": 9223372036854775807}}],
+      "rule": [3],
+      "spec": "§6.3.1 rule 3"
+    },
+    {
+      "name": "i64-min",
+      "bytes": "81a1616e3b7fffffffffffffff",
+      "expect": [{"n": {"int": -9223372036854775808}}],
+      "rule": [3],
+      "spec": "§6.3.1 rule 3",
+      "note": "Major type 1 encodes -1-n, so i64::MIN is 0x3b followed by i64::MAX's bytes. A decoder that negated after widening to i64 overflows exactly here."
+    },
+    {
+      "name": "int-head-boundaries",
+      "bytes": "81a661611761621818616318ff616419010061651a0001000061661b0000000100000000",
+      "expect": [{"a": {"int": 23}, "b": {"int": 24}, "c": {"int": 255}, "d": {"int": 256}, "e": {"int": 65536}, "f": {"int": 4294967296}}],
+      "rule": [2],
+      "spec": "§6.3.1 rule 2",
+      "note": "The first value at each head width: 23 is the last immediate, 24 the first one-byte, 256 the first two-byte, 65536 the first four-byte, 2^32 the first eight-byte. One off-by-one in a shortest-head check fails here and nowhere else."
+    },
+    {
+      "name": "nested-containers",
+      "bytes": "81a161618201a1616b6176",
+      "expect": [{"a": {"arr": [{"int": 1}, {"map": {"k": {"str": "v"}}}]}}],
+      "rule": [9],
+      "spec": "§6.3, §6.3.1"
+    },
+    {
+      "name": "declared-length-is-delivered",
+      "bytes": "81a161619818000000000000000000000000000000000000000000000000",
+      "expect": [{"a": {"arr": [{"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}, {"int": 0}]}}],
+      "rule": [2, 11],
+      "spec": "§6.3.1 rule 11",
+      "note": "Rule 11's accepting side: 24 elements need a one-byte length head, and every one of them is present. The rejecting side is the same head shape claiming what is not there."
+    },
+    {
+      "name": "keys-sort-by-content-not-encoding",
+      "bytes": "81a262616101617a02",
+      "expect": [{"aa": {"int": 1}, "z": {"int": 2}}],
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "The first RFC 8949 §4.2.1 deviation, from the accepting side. See deviations.json for the encoding a stock canonical encoder produces for this same signal."
+    },
+    {
+      "name": "non-ascii-key-sorts-by-utf8-bytes",
+      "bytes": "81a261610162c3a402",
+      "expect": [{"a": {"int": 1}, "ä": {"int": 2}}],
+      "rule": [7],
+      "spec": "§6.3.1 rule 7",
+      "note": "Content bytes, not scalar values and not a collation: \"ä\" is 0xc3a4, so it follows \"a\". A host sorting by code point agrees here; one sorting by locale need not."
+    },
+    {
+      "name": "empty-string-and-empty-bytes",
+      "bytes": "81a2617360617940",
+      "expect": [{"s": {"str": ""}, "y": {"bytes": ""}}],
+      "rule": [2],
+      "spec": "§6.3.1"
+    },
+    {
+      "name": "control-characters-are-ordinary-text",
+      "bytes": "81a1617362001f",
+      "expect": [{"s": {"str": "\u0000\u001f"}}],
+      "rule": [2],
+      "spec": "§6.3",
+      "note": "Text is a Unicode scalar sequence; nothing in §6.3 excludes the C0 range, and a decoder that escaped or refused it would not round-trip."
+    },
+    {
+      "name": "float-fraction-and-large-magnitude",
+      "bytes": "81a26161fb3fe00000000000006162fb7fe1ccf385ebc8a0",
+      "expect": [{"a": {"float": 0.5}, "b": {"float": 1e+308}}],
+      "rule": [4, 5],
+      "spec": "§6.3.1 rules 4, 5",
+      "note": "Rule 5's accepting side: every finite binary64 is admitted, including magnitudes a binary32 could not carry — which is also why rule 4 cannot be met by narrowing."
+    },
+    {
+      "name": "nesting-within-any-conforming-bound",
+      "bytes": "81a161618181818181818181818181818181818101",
+      "expect": [{"a": {"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"int": 1}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}],
+      "rule": [9],
+      "spec": "§6.3.1 rule 9",
+      "note": "Sixteen levels, well inside EXPR §9's MAX_DEPTH floor, so every conforming host accepts this whatever bound it configures. The vector deliberately does not sit at the bound: §6.3.1 fixes that the depth is bounded, not where one level is counted, and a vector pinning that off-by-one would fail a host counting the batch array as a level."
+    }
+  ]
+}

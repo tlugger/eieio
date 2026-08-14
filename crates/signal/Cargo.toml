@@ -12,6 +12,11 @@ minicbor.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+# The `expr-tests/cbor/` vectors are JSON (ABI §6.3.1), read by
+# `tests/cbor_vectors.rs`. Dev-only, so `check-nostd` never sees them — the same
+# reason proptest above is not a problem for a ★ crate.
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
