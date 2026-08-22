@@ -22,6 +22,7 @@
 mod api;
 mod blocks;
 mod boot;
+mod bridge;
 mod core_fns;
 mod engine;
 mod executor;
@@ -29,6 +30,7 @@ mod instance;
 mod json_batch;
 mod node;
 mod observe;
+mod pubsub;
 mod registry;
 mod router;
 mod run;
@@ -275,10 +277,26 @@ async fn run_node(
     // find out about than a refusal to start.
     let store = state::Store::open(&node.layout().state_store())?;
 
-    let executor =
+    let mut executor =
         executor::Executor::caching(node.budgets, node.mailbox, node.layout().precompiled())?
             .observing(std::sync::Arc::clone(&bus))
             .storing(store);
+
+    // `pubsub.toml` (DAEMON §7.1): absent is the normal case, and leaves the executor with
+    // `Executor::build`'s already-disconnected bridge — a node that has never heard of
+    // pub/sub still runs every other kind of block. Present, it names the bus every
+    // `publisher`/`subscriber` built here publishes and subscribes under; the bridge is still
+    // `InProcessBridge::disconnected` (eieio-2vm.2's scope decision — no real transport yet),
+    // so every publish still drops, logged and counted, rather than the block failing to
+    // load. Swapping in a real MQTT client behind `Bridge` is the only line that changes
+    // (DAEMON §7).
+    if let Some(pubsub) = pubsub::read(&node.layout().pubsub())? {
+        executor = executor.bridging(
+            std::sync::Arc::new(bridge::InProcessBridge::disconnected()),
+            pubsub.bus,
+        );
+    }
+
     let services = boot::boot(&node, &executor).await;
     let counts = services.counts();
     tracing::info!(

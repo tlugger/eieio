@@ -57,6 +57,7 @@ use eio_host_core::{Descriptor, PropFailure, Status, Trap};
 use eio_signal::Batch;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::bridge::{Bridge, InProcessBridge};
 use crate::core_fns::{Detail, Emission};
 use crate::engine::{Budgets, Runtime};
 use crate::instance::{InstanceSpec, Loaded, Prepared, run_instance};
@@ -232,6 +233,14 @@ pub enum Event {
         /// What was refused, and why, for the operator.
         reason: String,
     },
+    /// A `publisher` system block could not hand a batch to the bridge (DAEMON §6.2, §6.3,
+    /// §7). Not a callback result — a system block has no callback — but the same obligation
+    /// ABI §6.4 states for any other discard: logged and counted, here and again inside the
+    /// bridge itself.
+    BridgeDropped {
+        /// The full wire topic the batch was dropped on (DAEMON §7).
+        topic: String,
+    },
     /// The instance died (ABI §5.1 step 6). The last event; the thread is ending.
     Died(Trap),
     /// The instance stopped cleanly (ABI §5.1 step 5), having returned this many non-zero
@@ -260,6 +269,20 @@ pub struct Executor {
     /// executor that might not have one would make that a runtime question. A node's is the
     /// file under `state/`; everything else gets an in-memory one — see [`Executor::storing`].
     state: crate::state::Store,
+    /// What a `publisher`/`subscriber` instance built here talks to (DAEMON §6.3, §7).
+    ///
+    /// Not an `Option`, for the same reason `state` is not one: a system block is
+    /// discoverable and loadable on every executor, so every executor needs an answer.
+    /// [`InProcessBridge::disconnected`] is that answer until something wires a real one in
+    /// (see [`Executor::bridging`]) — every publish on it drops, logged and counted, rather
+    /// than the block failing to load at all.
+    bridge: Arc<dyn Bridge>,
+    /// The bus this executor's instances publish and subscribe under (DAEMON §7, §7.1).
+    ///
+    /// Named `pubsub_bus` rather than `bus`: this struct already has one — the observability
+    /// bus above — and DAEMON §7.1's bus and DAEMON §11's are unrelated concepts that happen
+    /// to share a common English word.
+    pubsub_bus: String,
 }
 
 impl Executor {
@@ -310,6 +333,22 @@ impl Executor {
         self.bus.as_ref()
     }
 
+    /// Wires `bridge` in for every `publisher`/`subscriber` built here from now on, scoped
+    /// under `bus` (DAEMON §6.3, §7, §7.1).
+    ///
+    /// This is the one line a real transport replaces: swap the argument for an `Arc` around
+    /// a real MQTT client's connection and nothing else in this crate changes, which is
+    /// DAEMON §7's boundary claim made concrete. A node's `run` calls this once, at
+    /// construction — after reading `pubsub.toml` (`crate::pubsub::read`), and only if that
+    /// file exists (§7.1: a node with none runs no bridge) — like
+    /// [`observing`](Executor::observing) and [`storing`](Executor::storing); a process that
+    /// never calls this keeps [`build`](Executor::build)'s [`InProcessBridge::disconnected`].
+    pub fn bridging(mut self, bridge: Arc<dyn Bridge>, bus: String) -> Executor {
+        self.bridge = bridge;
+        self.pubsub_bus = bus;
+        self
+    }
+
     /// What backs `eio:state` for the instances this executor builds (DAEMON §10).
     ///
     /// Reached by the management API's inspection endpoint (DAEMON §9) as well as by the
@@ -333,6 +372,10 @@ impl Executor {
             // would mean every caller that never thought about state producing instances whose
             // `state_put` fails, and a stateful block is the normal case for the fast loop.
             state: crate::state::Store::in_memory()?,
+            // No connection until `bridging` gives one. Every publish on this drops rather
+            // than panicking or failing to load — see `bridging`'s docs.
+            bridge: Arc::new(InProcessBridge::disconnected()),
+            pubsub_bus: String::from(crate::bridge::UNCONFIGURED_BUS),
         })
     }
 
@@ -404,6 +447,8 @@ impl Executor {
             .namespace(prepared.service(), &descriptor.instance_id);
 
         let runtime = Arc::clone(&self.runtime);
+        let bridge = Arc::clone(&self.bridge);
+        let bus = self.pubsub_bus.clone();
         let thread = std::thread::Builder::new()
             // Visible in `top`, in a core file, and in a profiler — which is where an
             // operator asks "which block is eating this machine" (DAEMON §11).
@@ -414,7 +459,7 @@ impl Executor {
             ))
             .spawn(move || {
                 run_instance(
-                    runtime, prepared, inbox.rx, event_tx, started_tx, outlet, state,
+                    runtime, prepared, inbox.rx, event_tx, started_tx, outlet, state, bridge, bus,
                 )
             })?;
 

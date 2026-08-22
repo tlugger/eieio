@@ -46,6 +46,10 @@ pub struct PullRequest {
 /// The catalogue a service can be built from here without pulling anything. An entry whose
 /// bytes will not validate against ABI §4 is omitted and logged rather than failing the
 /// listing — one corrupt cache entry should not hide the rest of the node's blocks.
+///
+/// `publisher` and `subscriber` (DAEMON §6.3) are always in it, whether or not anything has
+/// ever been cached: they are host-native, so being on this node at all is being available,
+/// and an agent or the Designer's palette (SCOPE §4) has no other way to learn they exist.
 #[utoipa::path(
     get,
     path = "/blocks",
@@ -58,7 +62,7 @@ pub struct PullRequest {
 pub async fn list(State(shared): State<crate::api::State>) -> Json<Vec<CachedBlock>> {
     let root = shared.node.layout().blocks();
     let cache = Cache::new(root.clone());
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<CachedBlock> = system_blocks();
 
     // `blocks/<name>/<version>/block.wasm` (DAEMON §2), walked rather than indexed: the
     // filesystem is the index, and an index beside it would be state the API holds that the
@@ -89,6 +93,30 @@ pub async fn list(State(shared): State<crate::api::State>) -> Json<Vec<CachedBlo
         }
     }
     Json(blocks)
+}
+
+/// `publisher` and `subscriber`, as this endpoint reports any other block (DAEMON §6.3).
+///
+/// Built in memory rather than read from the cache — there is nothing on disk to read — but
+/// otherwise indistinguishable from an entry `GET /blocks` found there: same shape, same
+/// manifest schema, a `reference` a service file can put straight into a `block` key.
+fn system_blocks() -> Vec<CachedBlock> {
+    [
+        crate::bridge::SystemBlockKind::Publisher,
+        crate::bridge::SystemBlockKind::Subscriber,
+    ]
+    .into_iter()
+    .map(|kind| {
+        let manifest = crate::bridge::manifest_for(kind);
+        let reference = format!("{}:{}", manifest.name, manifest.version);
+        CachedBlock {
+            name: manifest.name.clone(),
+            version: manifest.version.clone(),
+            reference,
+            manifest: serde_json::to_value(&manifest).unwrap_or(serde_json::Value::Null),
+        }
+    })
+    .collect()
 }
 
 /// Pulls a block into this node's cache.

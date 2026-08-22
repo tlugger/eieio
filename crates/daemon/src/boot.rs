@@ -35,8 +35,9 @@ use eio_host_core::{Connection, Limits, Overflow, Port};
 use eio_manifest::Manifest;
 
 use crate::blocks::{Cache, Unresolvable};
+use crate::bridge::{self, SystemBlockKind};
 use crate::executor::Executor;
-use crate::instance::{InstanceSpec, refuse_unimplemented_capabilities};
+use crate::instance::{InstanceSpec, Origin, refuse_unimplemented_capabilities};
 use crate::node::Node;
 use crate::registry::{PullError, Registry};
 use crate::router::Service;
@@ -465,11 +466,14 @@ pub async fn apply(executor: &Executor, valid: Valid, start: Start) -> State {
             // Cloned rather than moved, because two instances may name one block and each
             // owns its bytes until they are compiled. Cloning what was read once is what
             // resolving by cache entry bought: the alternative was reading the file again.
-            wasm: blocks.of(id).expect("every block resolved above").0.clone(),
+            // For a system block (DAEMON §6.3) this clones a `SystemBlockKind` — a `Copy`,
+            // not a second read of anything.
+            origin: blocks.of(id).expect("every block resolved above").0.clone(),
             // The embedded `eio:manifest` section describes the block (ABI §4.4). Supplying
             // the manifest read from those same bytes as a *registry* manifest would make
             // §4.4's cross-check compare a document with itself; a real registry manifest
-            // arrives with the pull that fetched it (eieio-8yq.3).
+            // arrives with the pull that fetched it (eieio-8yq.3). Meaningless for a system
+            // block, which has no module to cross-check against at all.
             registry: None,
             props: instance.props.clone(),
             instance: Some(id.clone()),
@@ -521,18 +525,20 @@ fn connections_for(parsed: &eio_service::Parsed) -> Vec<Connection> {
 ///
 /// Held as entries plus an index per instance rather than a block per instance, because two
 /// instances may name one block: a service with four thermometers on one `.wasm` reads and
-/// validates it once and points four ids at it.
+/// validates it once and points four ids at it — and a service with four publishers points
+/// four ids at the one in-memory `publisher` manifest the same way (DAEMON §6.3).
 #[derive(Debug, Default)]
 struct Resolved {
-    /// One per distinct cache entry the service names.
-    entries: Vec<(Vec<u8>, Manifest)>,
+    /// One per distinct cache entry the service names — a distinct `(name, version)` for a
+    /// system block too, even though nothing is ever read from the cache for one.
+    entries: Vec<(Origin, Manifest)>,
     /// Which entry each instance id uses.
     by_id: BTreeMap<String, usize>,
 }
 
 impl Resolved {
     /// The block instance `id` was configured with.
-    fn of(&self, id: &str) -> Option<&(Vec<u8>, Manifest)> {
+    fn of(&self, id: &str) -> Option<&(Origin, Manifest)> {
         self.entries.get(*self.by_id.get(id)?)
     }
 }
@@ -578,6 +584,13 @@ fn fetch(
 ///
 /// Runs before SERVICE §7 stage 2 because stage 2 takes the manifests as its input: what a
 /// port or a property is called is the *block's* answer, not the file's.
+///
+/// A `publisher`/`subscriber` reference resolves without ever touching the cache or a
+/// registry (DAEMON §6.3): [`SystemBlockKind::of`] recognizes the name the same way
+/// [`Cache::entry`] would parse any other reference's name, and a match short-circuits
+/// straight to [`bridge::manifest_for`]. `[Cache::path]` still keys the dedup table below —
+/// it never touches the filesystem to compute one — so a service with four publishers still
+/// resolves one entry, same as four thermometers on one `.wasm` (see [`Resolved`]'s docs).
 fn resolve(
     node: &Node,
     registry: &Registry,
@@ -595,29 +608,40 @@ fn resolve(
             reference: instance.block.clone(),
             reason,
         };
+        let system_block = cache
+            .entry(&instance.block)
+            .ok()
+            .and_then(|entry| SystemBlockKind::of(&entry.name));
         let path = cache.path(&instance.block).map_err(unresolvable)?;
 
         let index = match entries.get(&path) {
             Some(index) => *index,
             None => {
-                let wasm = fetch(&cache, registry, &path, id, &instance.block)?;
-                let manifest =
-                    eio_manifest::validate(&wasm, None).map_err(|error| Failure::Unloadable {
-                        id: id.clone(),
-                        reference: instance.block.clone(),
-                        error: error.to_string(),
-                    })?;
-                // SCOPE §3.3's deploy-time question, asked here rather than left to the
-                // start: a block wanting a device this node does not have belongs on another
-                // node, which is a different thing for an operator to do about it than a
-                // service that would not come up.
-                refuse_unimplemented_capabilities(&manifest).map_err(|error| {
-                    Failure::Uncapable {
-                        id: id.clone(),
-                        error: format!("{error:#}"),
+                let resolved_entry = match system_block {
+                    Some(kind) => (Origin::HostNative(kind), bridge::manifest_for(kind)),
+                    None => {
+                        let wasm = fetch(&cache, registry, &path, id, &instance.block)?;
+                        let manifest = eio_manifest::validate(&wasm, None).map_err(|error| {
+                            Failure::Unloadable {
+                                id: id.clone(),
+                                reference: instance.block.clone(),
+                                error: error.to_string(),
+                            }
+                        })?;
+                        // SCOPE §3.3's deploy-time question, asked here rather than left to
+                        // the start: a block wanting a device this node does not have belongs
+                        // on another node, which is a different thing for an operator to do
+                        // about it than a service that would not come up.
+                        refuse_unimplemented_capabilities(&manifest).map_err(|error| {
+                            Failure::Uncapable {
+                                id: id.clone(),
+                                error: format!("{error:#}"),
+                            }
+                        })?;
+                        (Origin::Wasm(wasm), manifest)
                     }
-                })?;
-                resolved.entries.push((wasm, manifest));
+                };
+                resolved.entries.push(resolved_entry);
                 let index = resolved.entries.len() - 1;
                 entries.insert(path, index);
                 index

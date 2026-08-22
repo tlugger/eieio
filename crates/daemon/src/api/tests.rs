@@ -412,12 +412,30 @@ async fn a_node_reports_what_a_service_can_be_built_against() {
     );
 
     let blocks = harness.get("/blocks").await.json();
-    assert_eq!(blocks[0]["reference"], "transform:1.0.0");
+    let transform = blocks
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|block| block["reference"] == "transform:1.0.0")
+        .unwrap_or_else(|| panic!("transform:1.0.0 is not in {blocks}"));
     assert!(
-        blocks[0]["manifest"]["ports"].is_object() || blocks[0]["manifest"]["name"].is_string(),
+        transform["manifest"]["ports"].is_object() || transform["manifest"]["name"].is_string(),
         "the manifest travels with the block: {}",
-        blocks[0]["manifest"]
+        transform["manifest"]
     );
+
+    // `publisher`/`subscriber` are always in the catalogue, cached or not (DAEMON §6.3): a
+    // node with no other block ever pulled can still build a service out of them.
+    for name in ["publisher", "subscriber"] {
+        assert!(
+            blocks
+                .as_array()
+                .expect("a list")
+                .iter()
+                .any(|block| block["name"] == name),
+            "{name} is host-native and must be discoverable regardless of the cache: {blocks}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -456,9 +474,18 @@ async fn a_cached_block_whose_body_stops_decoding_is_not_listed_as_good() {
     std::fs::write(&path, &corrupted).expect("the cache entry is writable");
 
     let blocks = harness.get("/blocks").await.json();
+    let names: Vec<&str> = blocks
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|block| block["name"].as_str().expect("a name"))
+        .collect();
+    // `publisher`/`subscriber` are host-native and never read from the cache at all (DAEMON
+    // §6.3), so nothing about a corrupted `transform` touches them — they are the only two
+    // names left once the corrupted one is not reported loadable.
     assert_eq!(
-        blocks.as_array().map(Vec::len),
-        Some(0),
+        names,
+        ["publisher", "subscriber"],
         "a block the loader cannot finish reading is not reported loadable: {blocks}"
     );
 }

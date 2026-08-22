@@ -20,7 +20,7 @@ use eio_host_core::{Limits, PropFailure, Status};
 use crate::core_fns::{Detail, Emission};
 use crate::engine::Budgets;
 use crate::executor::{Event, Executor, Instance, Work};
-use crate::instance::InstanceSpec;
+use crate::instance::{InstanceSpec, Origin};
 use crate::json_batch::batch_from_json;
 use crate::router::Discard;
 
@@ -102,7 +102,7 @@ pub async fn run_block(args: &RunBlock) -> anyhow::Result<RunReport> {
     let executor = Executor::new(args.budgets, args.mailbox)?;
     let (instance, mut events) = executor
         .spawn(InstanceSpec {
-            wasm,
+            origin: Origin::Wasm(wasm),
             registry,
             props: args.props.clone(),
             instance: args.instance.clone(),
@@ -147,6 +147,13 @@ pub async fn run_block(args: &RunBlock) -> anyhow::Result<RunReport> {
             // Keep the first, because the later ones are usually consequences of it.
             Event::Refused { reason } => refused = refused.or(Some(reason)),
             Event::Died(trap) => bail!("the block died: {trap}"),
+            // Unreachable in practice: `dev run-block` loads a `.wasm` file by path
+            // (DAEMON §12), and a system block has none to load (DAEMON §6.3). Handled
+            // anyway, because `Event` is a set this command observes and not one it gets to
+            // assume a shape for.
+            Event::BridgeDropped { topic } => {
+                println!("dropped a publish on {topic}: the bridge could not send it");
+            }
             Event::Stopped { .. } => {}
         }
     }

@@ -231,6 +231,17 @@ impl Layout<'_> {
         self.root.join("services")
     }
 
+    /// `pubsub.toml`: bus name, broker candidates, optional pin (DAEMON §2, §7.1).
+    ///
+    /// Its own file and not a `node.toml` table, on purpose: `node.toml` is the operator's
+    /// once written — the daemon creates it and never rewrites or normalizes it (§2.1) — and
+    /// a bus pin has to be settable by the Designer through §9's API the way a service file
+    /// is. A node with nothing at this path runs no bridge (§7.1), which is the normal case
+    /// and not a boot failure.
+    pub fn pubsub(&self) -> PathBuf {
+        self.root.join("pubsub.toml")
+    }
+
     /// `blocks/`: the pull cache, `<name>/<version>/block.wasm` (DAEMON §4).
     pub fn blocks(&self) -> PathBuf {
         self.root.join("blocks")

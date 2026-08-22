@@ -472,7 +472,7 @@ fn a_module_exporting_an_abi_this_host_does_not_implement_is_refused() {
 use std::time::{Duration, Instant};
 
 use crate::executor::{Event, Executor, Instance, Work};
-use crate::instance::InstanceSpec;
+use crate::instance::{InstanceSpec, Origin};
 
 /// The block `name`, as the executor takes it, with no properties and generous limits.
 fn spec(name: &str) -> InstanceSpec {
@@ -482,7 +482,7 @@ fn spec(name: &str) -> InstanceSpec {
 /// The same, from bytes: a golden block is built, not assembled from a fixture here.
 fn spec_from(wasm: Vec<u8>) -> InstanceSpec {
     InstanceSpec {
-        wasm,
+        origin: Origin::Wasm(wasm),
         registry: None,
         props: BTreeMap::new(),
         instance: None,

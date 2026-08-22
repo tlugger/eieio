@@ -35,6 +35,7 @@ use eio_manifest::{Abi, Capability, Manifest};
 use eio_signal::Batch;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::bridge::{self, Bridge, Delivery, SystemBlockKind};
 use crate::core_fns::{Core, Emission};
 use crate::engine::{Guest, Runtime};
 use crate::executor::{Event, Work};
@@ -42,15 +43,32 @@ use crate::router::{Discard, Outlet};
 use crate::state::Namespace;
 use wasmtime::Module;
 
+/// Where one instance's behavior comes from, as a caller supplies it.
+///
+/// The two are ABI peers to everything above [`InstanceSpec`] — one manifest, one descriptor,
+/// one place in a service's connection table — and diverge only here and in
+/// [`run_instance`], which is where DAEMON §6.3's precedent lives in code: nothing outside
+/// this file knows a `publisher` or a `subscriber` is not a `.wasm`.
+#[derive(Debug, Clone)]
+pub enum Origin {
+    /// An ordinary block: the `.wasm` module (ABI §4).
+    Wasm(Vec<u8>),
+    /// A host-native system block (DAEMON §6.3): its behavior is the router's pub/sub bridge
+    /// (DAEMON §7), not a compiled module.
+    HostNative(SystemBlockKind),
+}
+
 /// Everything needed to build one instance, as a caller supplies it.
 ///
 /// All of it `Send`: this is what crosses onto the instance's thread.
 #[derive(Debug)]
 pub struct InstanceSpec {
-    /// The `.wasm` module.
-    pub wasm: Vec<u8>,
+    /// The block's behavior (see [`Origin`]).
+    pub origin: Origin,
     /// A registry manifest to validate the module against (ABI §4.4). Optional: a module
-    /// carrying an `eio:manifest` section is self-describing.
+    /// carrying an `eio:manifest` section is self-describing. Meaningless for
+    /// [`Origin::HostNative`], which validates against a manifest built in memory
+    /// ([`bridge::manifest_for`]) and never against a module at all.
     pub registry: Option<Manifest>,
     /// Property expressions by name, as the deployment supplies them (ABI §11.1).
     pub props: BTreeMap<String, String>,
@@ -63,25 +81,55 @@ pub struct InstanceSpec {
 }
 
 impl InstanceSpec {
-    /// Validates the module and builds its descriptor — everything that needs no engine.
+    /// Validates the block and builds its descriptor — everything that needs no engine.
     ///
-    /// ABI §4, in full, before anything is compiled: exports present with the right
-    /// signatures, imports within `eio:*` and within the declared capabilities, paired
-    /// callbacks in both directions, embedded and registry manifests in agreement.
+    /// For [`Origin::Wasm`]: ABI §4, in full, before anything is compiled — exports present
+    /// with the right signatures, imports within `eio:*` and within the declared
+    /// capabilities, paired callbacks in both directions, embedded and registry manifests in
+    /// agreement. For [`Origin::HostNative`]: the manifest is already valid by construction
+    /// (`bridge`'s own test pins that), so what happens here is resolving and evaluating the
+    /// `topic` property once — the same "fail before a thread exists" shape, for the one
+    /// thing a system block's configuration can get wrong.
     pub fn validate(self) -> anyhow::Result<Loaded> {
-        let manifest = eio_manifest::validate(&self.wasm, self.registry.as_ref())
-            .map_err(|error| anyhow::anyhow!("this block is not loadable: {error}"))?;
-        refuse_unimplemented_capabilities(&manifest)?;
+        match self.origin {
+            Origin::Wasm(wasm) => {
+                let manifest = eio_manifest::validate(&wasm, self.registry.as_ref())
+                    .map_err(|error| anyhow::anyhow!("this block is not loadable: {error}"))?;
+                refuse_unimplemented_capabilities(&manifest)?;
 
-        let descriptor = Descriptor::from_manifest(&manifest, self.instance, self.limits);
-        Ok(Loaded {
-            manifest,
-            descriptor,
-            wasm: self.wasm,
-            props: self.props,
-            service: self.service,
-        })
+                let descriptor = Descriptor::from_manifest(&manifest, self.instance, self.limits);
+                Ok(Loaded {
+                    manifest,
+                    descriptor,
+                    body: Body::Wasm(wasm),
+                    props: self.props,
+                    service: self.service,
+                })
+            }
+            Origin::HostNative(kind) => {
+                let manifest = bridge::manifest_for(kind);
+                let descriptor = Descriptor::from_manifest(&manifest, self.instance, self.limits);
+                let topic = bridge::resolve_topic(&manifest, &self.props)?;
+                Ok(Loaded {
+                    manifest,
+                    descriptor,
+                    body: Body::HostNative { kind, topic },
+                    props: self.props,
+                    service: self.service,
+                })
+            }
+        }
     }
+}
+
+/// [`Loaded`]'s uncompiled body: what [`Loaded::compile`] turns into a [`PreparedBody`].
+#[derive(Debug)]
+enum Body {
+    Wasm(Vec<u8>),
+    HostNative {
+        kind: SystemBlockKind,
+        topic: String,
+    },
 }
 
 /// A validated block, ready to be compiled.
@@ -89,7 +137,7 @@ impl InstanceSpec {
 pub struct Loaded {
     manifest: Manifest,
     descriptor: Descriptor,
-    wasm: Vec<u8>,
+    body: Body,
     props: BTreeMap<String, String>,
     service: String,
 }
@@ -107,19 +155,40 @@ impl Loaded {
     ///
     /// Off the instance's thread, deliberately: compilation runs no guest code, so it needs
     /// no budget and no `Rc`, and a module that will not compile fails before a thread is
-    /// spawned — the same shape as ABI §4's validation above.
+    /// spawned — the same shape as ABI §4's validation above. A host-native block has no
+    /// module and nothing to compile; its "preparation" already happened in
+    /// [`InstanceSpec::validate`], so this is just a relabeling.
     pub fn compile(self, runtime: &Runtime) -> anyhow::Result<Prepared> {
-        let module = runtime
-            .compile(&self.wasm)
-            .with_context(|| format!("compiling {}", self.manifest.name))?;
+        let body = match self.body {
+            Body::Wasm(wasm) => {
+                let module = runtime
+                    .compile(&wasm)
+                    .with_context(|| format!("compiling {}", self.manifest.name))?;
+                PreparedBody::Wasm(module)
+            }
+            Body::HostNative { kind, topic } => PreparedBody::HostNative { kind, topic },
+        };
         Ok(Prepared {
             manifest: self.manifest,
             descriptor: self.descriptor,
-            module,
+            body,
             props: self.props,
             service: self.service,
         })
     }
+}
+
+/// [`Prepared`]'s body: a compiled module, or a system block's kind and resolved topic.
+///
+/// Cloning is cheap either way — the point [`Prepared`]'s own docs make about `Module`, and
+/// trivially true of the two `String`/`Copy` fields [`PreparedBody::HostNative`] carries.
+#[derive(Debug, Clone)]
+enum PreparedBody {
+    Wasm(Module),
+    HostNative {
+        kind: SystemBlockKind,
+        topic: String,
+    },
 }
 
 /// A compiled block, ready for a thread to configure and start — once, or again.
@@ -133,7 +202,7 @@ impl Loaded {
 pub struct Prepared {
     manifest: Manifest,
     descriptor: Descriptor,
-    module: Module,
+    body: PreparedBody,
     props: BTreeMap<String, String>,
     service: String,
 }
@@ -155,6 +224,17 @@ impl Prepared {
 /// A current-thread tokio runtime with a `LocalSet` carrying exactly one task, which is
 /// DAEMON §5's "one tokio task per block instance" — and the place the async capability
 /// completions of ABI §7.3 and §7.6 will be awaited when they exist.
+///
+/// `bridge` and `bus` are only ever read on the [`PreparedBody::HostNative`] path; an
+/// ordinary block's thread carries them and never touches them. Passed straight through
+/// rather than folded into a struct: every parameter here is already "what this instance is
+/// built from or reports through", and a wrapper type would not make that list shorter, only
+/// less visible at the one call site ([`crate::executor::Executor::spawn_wired`]) that has it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one instance's whole environment, at its one construction site; see the doc \
+              comment above"
+)]
 pub fn run_instance(
     runtime: Arc<Runtime>,
     prepared: Prepared,
@@ -163,6 +243,8 @@ pub fn run_instance(
     started: oneshot::Sender<anyhow::Result<()>>,
     outlet: Outlet,
     state: Namespace,
+    bridge: Arc<dyn Bridge>,
+    bus: String,
 ) {
     let local = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -171,15 +253,142 @@ pub fn run_instance(
     tasks.block_on(&local, async move {
         // Spawned rather than awaited inline so that the instance really is a task on a
         // `LocalSet` (DAEMON §5) — the place ABI §7.3's and §7.6's completions will be
-        // awaited alongside the mailbox when those capabilities exist.
-        let task = tokio::task::spawn_local(instance_task(
-            runtime, prepared, work, events, started, outlet, state,
-        ));
+        // awaited alongside the mailbox when those capabilities exist. Which body the task
+        // runs is decided once, here, on what `prepared` already is — the precedent DAEMON
+        // §6.3 draws stays exactly this narrow: a system block never reaches `instance_task`,
+        // and an ordinary block never reaches `system_block_task`.
+        let task = match &prepared.body {
+            PreparedBody::Wasm(_) => tokio::task::spawn_local(instance_task(
+                runtime, prepared, work, events, started, outlet, state,
+            )),
+            PreparedBody::HostNative { .. } => tokio::task::spawn_local(system_block_task(
+                prepared, work, events, started, outlet, bridge, bus,
+            )),
+        };
         // The task owns the instance, so nothing here can observe it half-dropped. A panic
         // inside it has already been logged by the panic hook; `Executor::spawn` and
         // `Instance::join` report it as a dead thread.
         let _ = task.await;
     });
+}
+
+/// The body of a host-native system block's thread (DAEMON §6.3, §7).
+///
+/// Structured like [`instance_task`] on purpose — one span, one `started` answer, a loop
+/// draining `work` until `Work::Stop`, the same [`Outlet`] and the same [`Event`] stream — an
+/// instance is an instance whether or not there is a `Store` behind it. What is missing is
+/// everything ABI §5.1 would recognise: no `eio_configure`, no callback, no trap. Nothing can
+/// fail once this is running — the manifest is valid by construction and the topic was already
+/// resolved in [`InstanceSpec::validate`], off this thread — so `started` always answers `Ok`.
+async fn system_block_task(
+    prepared: Prepared,
+    mut work: mpsc::Receiver<Work>,
+    events: mpsc::UnboundedSender<Event>,
+    started: oneshot::Sender<anyhow::Result<()>>,
+    mut outlet: Outlet,
+    bridge: Arc<dyn Bridge>,
+    bus: String,
+) {
+    let PreparedBody::HostNative { kind, topic } = &prepared.body else {
+        unreachable!("system_block_task only ever runs for a HostNative body")
+    };
+    let wire_topic = bridge::wire_topic(&bus, topic);
+
+    let span = tracing::info_span!(
+        "instance",
+        service = %prepared.service,
+        instance = %prepared.descriptor.instance_id,
+        block = %prepared.manifest.name,
+    );
+    span.in_scope(|| tracing::info!(topic = %wire_topic, "started"));
+
+    if started.send(Ok(())).is_err() {
+        // Nobody is waiting for this instance any more. There is no ABI §5.1 step 5 to run —
+        // a system block has no `eio_stop` — so ending here is the whole of stopping it.
+        return;
+    }
+
+    match kind {
+        SystemBlockKind::Publisher => {
+            while let Some(item) = work.recv().await {
+                match item {
+                    Work::Stop => break,
+                    Work::Deliver { batch, .. } => {
+                        // DAEMON §6.2's rule for every discard, applied to the one a bridge can
+                        // produce: logged, and counted — here, on the instance's own Events
+                        // stream, and again inside the bridge implementation's own counter.
+                        if let Delivery::Dropped = bridge.publish(&wire_topic, batch) {
+                            span.in_scope(|| {
+                                tracing::warn!(
+                                    topic = %wire_topic,
+                                    "dropped a batch: the bridge could not send it"
+                                )
+                            });
+                            let _ = events.send(Event::BridgeDropped {
+                                topic: wire_topic.clone(),
+                            });
+                        }
+                    }
+                    // A publisher declares no other input and no capability that could
+                    // produce these.
+                    Work::Timer { .. } | Work::GpioEdge { .. } | Work::HttpDone { .. } => {}
+                }
+            }
+        }
+        SystemBlockKind::Subscriber => {
+            let mut subscription = bridge.subscribe(&wire_topic);
+            loop {
+                tokio::select! {
+                    // Checked first and every time: a `Stop` must win a simultaneous arrival,
+                    // the same as `instance_task`'s loop checks its own mailbox before doing
+                    // anything else with what it took from it.
+                    biased;
+                    item = work.recv() => match item {
+                        None | Some(Work::Stop) => break,
+                        Some(_) => {}
+                    },
+                    batch = subscription.recv() => {
+                        let Some(batch) = batch else {
+                            // The bridge itself is gone. Nothing more will ever arrive.
+                            break;
+                        };
+                        // Reported on the Events stream the same way a WASM block's own
+                        // `emit` is (`Live::collect`): a subscriber received a batch off the
+                        // bridge and is about to route it on `out`, which is this instance's
+                        // whole analogue of a callback emitting one.
+                        let _ = events.send(Event::Emitted {
+                            callback: "subscribe",
+                            emission: Emission {
+                                port: 0,
+                                batch: batch.clone(),
+                            },
+                        });
+                        let mut discards = Vec::new();
+                        // Ahead of the new emission, so a batch a drop-oldest connection is
+                        // holding keeps its place — the same ordering `Live::route` uses.
+                        outlet.flush(&mut discards);
+                        outlet.route(0, batch, &mut discards).await;
+                        if !discards.is_empty() {
+                            let port = prepared.descriptor.output_name(0).unwrap_or("out");
+                            span.in_scope(|| {
+                                for discard in &discards {
+                                    tracing::warn!(
+                                        port,
+                                        "a batch was not delivered: {}",
+                                        discard.reason
+                                    );
+                                }
+                            });
+                            for discard in discards {
+                                let _ = events.send(Event::Discarded(discard));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = events.send(Event::Stopped { errors: 0 });
 }
 
 /// The one task the instance's `LocalSet` runs.
@@ -299,13 +508,19 @@ impl Live {
         // thing to remember: the two numbers cannot drift because there is one source of
         // them — the node's, stated in `node.toml` (DAEMON §2.1) and carried on the runtime
         // every instance on this node is built from.
+        let PreparedBody::Wasm(module) = &prepared.body else {
+            unreachable!(
+                "Live::start only ever runs for a Wasm body; a HostNative one runs \
+                 system_block_task instead (DAEMON §6.3)"
+            )
+        };
         let budgets = runtime.expr();
         let sources = resolve(&prepared.manifest, &prepared.props)?;
         let properties = PropContext::compile_with_limits(&sources, budgets.eval())
             .map_err(|error| anyhow::anyhow!("this configuration is invalid: {error}"))?;
 
         let mut guest = runtime
-            .instantiate(&prepared.module)
+            .instantiate(module)
             .with_context(|| format!("instantiating {}", prepared.manifest.name))?;
 
         // Wired before the first guest call of any kind. `eio_abi_version` is a constant in
