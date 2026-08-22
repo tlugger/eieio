@@ -6,7 +6,7 @@
 //! provable by reading the implementation, because the property belongs to the parser
 //! underneath it.
 
-use eio_service::edit::{Document, EditError};
+use eio_service::edit::{Document, EditError, WriteError};
 
 /// A file with every kind of trivia a preserving edit has to carry through.
 ///
@@ -392,4 +392,124 @@ fn an_id_is_minted_around_what_the_file_already_uses() {
     let taken = doc.mint_id(&random[..4]).expect("some id");
     assert_ne!(taken, "b7k2");
     assert!(eio_service::id::is_id(&taken));
+}
+
+// `Document::write` (SERVICE §9): the crate's own atomic write, which the CLI and — per
+// DESIGNER §4 — the Designer's backend both call rather than each carrying a temp-file-plus-
+// rename of their own. These tests are the ones that make "atomic" a checked property rather
+// than a claim: a happy path alone would not distinguish this from `std::fs::write`.
+
+/// A fresh directory under the OS temp dir, cleared first so a leftover from a killed run of
+/// this binary cannot make a later run pass by accident.
+fn scratch(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("eio-service-edit-write-{test}"));
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).expect("clearing the scratch directory");
+    }
+    std::fs::create_dir_all(&dir).expect("creating the scratch directory");
+    dir
+}
+
+#[test]
+fn write_replaces_the_file_with_the_checked_render() {
+    let dir = scratch("happy-path");
+    let path = dir.join("kitchen.toml");
+    std::fs::write(&path, "name = \"stale\"\n").expect("something already there");
+
+    let mut doc = Document::parse(HAND_WRITTEN).expect("valid");
+    doc.set_autostart(false);
+    doc.write(&path).expect("a valid edit");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("written"),
+        doc.render()
+    );
+    // And no temporary was left beside it once the rename succeeded.
+    let leftover: Vec<_> = std::fs::read_dir(&dir)
+        .expect("the scratch directory")
+        .map(|entry| entry.expect("a directory entry").file_name())
+        .collect();
+    assert_eq!(leftover, [std::ffi::OsString::from("kitchen.toml")]);
+}
+
+#[test]
+fn write_refuses_an_invalid_document_and_the_file_on_disk_is_untouched() {
+    // SERVICE §9: "An edit that would make the file invalid MUST fail and change nothing" —
+    // `check` alone proves the in-memory document is untouched; this proves the file is too.
+    let dir = scratch("invalid");
+    let path = dir.join("kitchen.toml");
+    std::fs::write(&path, HAND_WRITTEN).expect("the original");
+
+    let mut doc = Document::parse(HAND_WRITTEN).expect("valid");
+    doc.set_prop("b7k2", "interval_ms", "(nosuchfn 1)")
+        .expect("the property exists; the expression is nonsense");
+
+    let error = doc.write(&path).expect_err("check refuses it");
+    assert!(matches!(error, WriteError::Invalid(_)), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still there"),
+        HAND_WRITTEN,
+        "an edit `check` rejects must not reach disk under any name for `write`"
+    );
+}
+
+/// The test that proves atomicity rather than assuming it: a write that cannot finish must
+/// leave `path` exactly as it was, not truncated and not partially replaced.
+///
+/// A temp-file-plus-rename implementation truncates nothing *if* every step after the temporary
+/// file starts filling either finishes or is never reached — which a happy-path test cannot
+/// distinguish from `std::fs::write(path, text)` truncating `path` directly. This forces the
+/// first step, the temporary write, to fail by putting a directory exactly where the temporary
+/// needs to go, so `write` cannot finish, and then checks what a crash at that point would also
+/// have left behind: the original, byte for byte.
+#[test]
+fn a_write_that_cannot_finish_leaves_the_original_file_intact() {
+    let dir = scratch("write-fails");
+    let path = dir.join("kitchen.toml");
+    std::fs::write(&path, HAND_WRITTEN).expect("the original");
+
+    // `write_atomically`'s naming scheme, pinned here because this test only proves anything if
+    // it blocks the exact path the implementation uses.
+    let temporary = dir.join(".kitchen.toml.eio-tmp");
+    std::fs::create_dir(&temporary).expect("occupying the temporary's path");
+
+    let doc = Document::parse(HAND_WRITTEN).expect("valid");
+    let error = doc
+        .write(&path)
+        .expect_err("writing into a directory fails");
+    assert!(matches!(error, WriteError::Temporary { .. }), "{error}");
+
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("still there, still a file"),
+        HAND_WRITTEN,
+        "the original must survive a write that never got past the temporary"
+    );
+}
+
+/// The other half: a write whose temporary succeeds but whose rename cannot complete must still
+/// leave whatever was at `path` untouched, and must not leave the temporary behind either.
+#[test]
+fn a_rename_that_cannot_finish_leaves_the_original_in_place_and_cleans_up() {
+    let dir = scratch("rename-fails");
+    // `path` names a directory rather than a file, so the rename onto it fails on every
+    // platform this targets — the closest a test gets to "the process died between the write
+    // and the rename" without actually killing the process.
+    let path = dir.join("kitchen.toml");
+    std::fs::create_dir(&path).expect("a directory sits where the file would go");
+
+    let doc = Document::parse(HAND_WRITTEN).expect("valid");
+    let error = doc
+        .write(&path)
+        .expect_err("renaming onto a directory fails");
+    assert!(matches!(error, WriteError::Rename { .. }), "{error}");
+
+    assert!(
+        path.is_dir(),
+        "what was at `path` must be exactly what was there before"
+    );
+    let temporary = dir.join(".kitchen.toml.eio-tmp");
+    assert!(
+        !temporary.exists(),
+        "a failed rename must not leave its temporary behind"
+    );
 }

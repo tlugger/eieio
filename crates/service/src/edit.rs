@@ -56,6 +56,8 @@
 //! ```
 
 use core::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
@@ -181,6 +183,76 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+/// Why [`Document::write`] refused, or could not finish (SERVICE §9).
+///
+/// One editor, one place this can fail from — which is the point: a caller that reimplemented
+/// temp-file-plus-rename beside this crate would be free to get any of `NoFileName`, `Temporary`
+/// or `Rename` wrong in a way this type cannot be.
+#[derive(Debug)]
+pub enum WriteError {
+    /// What [`Document::render`] would have produced is not a valid service file. Carries
+    /// [`Document::check`]'s own errors; nothing was written.
+    ///
+    /// SERVICE §9's rule is unconditional — "An edit that would make the file invalid MUST fail
+    /// and change nothing" — so `write` runs `check` itself rather than trusting a caller to
+    /// have run it already.
+    Invalid(Vec<Error>),
+    /// `path` names no file (it is `/`, or a bare prefix), so there is nowhere to put a
+    /// temporary beside it. The original, if any, is untouched.
+    NoFileName {
+        /// The path that had none.
+        path: PathBuf,
+    },
+    /// The temporary file could not be written. The original at `path`, if any, is untouched.
+    Temporary {
+        /// The temporary file's own path — not `path`, which was never opened.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+    /// The temporary file was written but could not be renamed into place. The original at
+    /// `path` is untouched; the temporary is removed on a best-effort basis rather than left
+    /// beside it.
+    Rename {
+        /// The path the write was replacing.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WriteError::Invalid(errors) => {
+                write!(f, "not a valid service file")?;
+                for error in errors {
+                    write!(f, "\n  {error}")?;
+                }
+                Ok(())
+            }
+            WriteError::NoFileName { path } => write!(f, "{} names no file", path.display()),
+            WriteError::Temporary { path, source } => {
+                write!(f, "writing {}: {source}", path.display())
+            }
+            WriteError::Rename { path, source } => {
+                write!(f, "replacing {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for WriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WriteError::Temporary { source, .. } | WriteError::Rename { source, .. } => {
+                Some(source)
+            }
+            WriteError::Invalid(_) | WriteError::NoFileName { .. } => None,
+        }
+    }
+}
+
 /// A service file, open for editing (SERVICE §9).
 ///
 /// Holds the text's own formatting, so every mutator below changes what it was asked to change
@@ -237,6 +309,35 @@ impl Document {
     /// about this module's care.
     pub fn check(&self) -> Result<Parsed, Vec<Error>> {
         parse(&self.render())
+    }
+
+    /// Writes the file (SERVICE §9): checked, then replaced rather than truncated in place.
+    ///
+    /// Runs [`check`](Self::check) first, then writes the rendered text to a temporary file
+    /// beside `path` and renames it into place. A reader of `path` — including a person who has
+    /// it open in an editor — never observes a partially written file: the write is
+    /// all-or-nothing, on every platform this runs on, and a write that fails at any step
+    /// leaves `path` exactly as it was.
+    ///
+    /// This is the one place a writer gets SERVICE §9's guarantees from. The CLI and the
+    /// Designer's backend (DESIGNER §4) both call this rather than each carrying their own
+    /// temp-file-plus-rename, which is what keeps "the write is atomic" one implementation
+    /// instead of two that can quietly disagree.
+    ///
+    /// # Why `check` runs unconditionally
+    ///
+    /// SERVICE §9 states the rule with no exception: "An edit that would make the file invalid
+    /// MUST fail and change nothing." A caller that wants to inspect a possibly-invalid edit
+    /// without committing it to disk already has [`render`](Self::render) and
+    /// [`check`](Self::check) to do that with; `write` is the operation that puts the editor's
+    /// guarantee on disk, so it is the one place that guarantee is not optional. Skipping the
+    /// check for a caller that wanted to save a draft would mean a file `check` rejects can
+    /// still reach disk under some other name for "write", which is exactly the footgun §9
+    /// exists to close — a person's git checkout, or a node's autostart config, holding a
+    /// service file that is invalid on its face.
+    pub fn write(&self, path: &Path) -> Result<(), WriteError> {
+        self.check().map_err(WriteError::Invalid)?;
+        write_atomically(path, &self.render())
     }
 
     /// Mints an id this file does not already use ([`crate::id::generate`]).
@@ -559,6 +660,36 @@ impl Document {
                     })
             })
     }
+}
+
+/// Replaces `path`, rather than truncating and rewriting it (SERVICE §9.1).
+///
+/// The file often belongs to a person who has it open in an editor, and a service file
+/// half-written by a process that died partway through is worse than a write that failed
+/// outright. A temporary file beside it and a rename makes the change all-or-nothing: a rename
+/// is atomic on every filesystem this targets, and the temporary sits in the *same* directory
+/// as `path` because a rename across filesystems is a copy, not an atom.
+fn write_atomically(path: &Path, text: &str) -> Result<(), WriteError> {
+    let name = path.file_name().ok_or_else(|| WriteError::NoFileName {
+        path: path.to_path_buf(),
+    })?;
+    // A leading `.` and a suffix `toml_edit`'s own writer would never choose, so this can never
+    // collide with a real service file sitting in the same directory.
+    let temporary = path.with_file_name(format!(".{}.eio-tmp", name.to_string_lossy()));
+
+    std::fs::write(&temporary, text).map_err(|source| WriteError::Temporary {
+        path: temporary.clone(),
+        source,
+    })?;
+    std::fs::rename(&temporary, path).map_err(|source| {
+        // Best-effort: the rename already failed, and a stray temporary is a smaller problem
+        // than reporting the wrong one because cleanup itself failed.
+        let _ = std::fs::remove_file(&temporary);
+        WriteError::Rename {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
 }
 
 /// The `blocks` table, created implicit so a file with instances has no bare `[blocks]` header.

@@ -78,7 +78,7 @@ pub mod edit;
 pub mod id;
 
 pub use connection::{Connection, Terminal};
-pub use edit::{Document, EditError};
+pub use edit::{Document, EditError, WriteError};
 pub use error::{ConnectionError, Error, ResolvedError, Span};
 pub use overflow::Overflow;
 pub use parse::{Parsed, parse};

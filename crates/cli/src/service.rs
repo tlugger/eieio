@@ -390,30 +390,15 @@ fn read_text(path: &Path) -> Result<String> {
     std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Re-runs stage 1 over what the editor rendered, then replaces the file.
+/// Re-runs stage 1 over what the editor rendered, then replaces the file — both `eio-service`'s
+/// job now (SERVICE §9), so this command's atomicity is the crate's rather than a copy of it.
 fn save(path: &Path, document: &Document) -> Result<()> {
-    document.check().map_err(|errors| invalid(path, &errors))?;
-    write_atomically(path, &document.render())
-}
-
-/// Replaces `path`, rather than truncating and rewriting it.
-///
-/// The file belongs to a person who may well have it open, and a service file half-written by
-/// a command that died is worse than a command that failed. A temporary beside it and a rename
-/// makes the change all-or-nothing on every platform this runs on.
-fn write_atomically(path: &Path, text: &str) -> Result<()> {
-    let name = path
-        .file_name()
-        .with_context(|| format!("{} names no file", path.display()))?;
-    // In the same directory, because a rename across filesystems is a copy and not an atom.
-    let temporary = path.with_file_name(format!(".{}.eio-tmp", name.to_string_lossy()));
-
-    std::fs::write(&temporary, text).with_context(|| format!("writing {}", temporary.display()))?;
-    std::fs::rename(&temporary, path)
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temporary);
-        })
-        .with_context(|| format!("replacing {}", path.display()))
+    document.write(path).map_err(|error| match error {
+        // The same wording `edit` and `parse_file` refuse with below, so a caller sees one
+        // message for "not a valid service file" whichever command produced it.
+        eio_service::edit::WriteError::Invalid(errors) => invalid(path, &errors),
+        other => anyhow::anyhow!("{other}"),
+    })
 }
 
 /// Every stage-1 error, one per line, under the file that carries them.
