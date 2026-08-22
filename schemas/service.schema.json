@@ -18,6 +18,12 @@
       "type": "boolean",
       "default": false
     },
+    "overflow": {
+      "description": "What a full mailbox does to a sender, for every connection in the service (SERVICE-SPEC §5, DAEMON-SPEC §6.2) — one choice for the whole file, not a property of each edge. Absent means \"backpressure\".",
+      "type": "string",
+      "enum": ["backpressure", "drop-oldest"],
+      "default": "backpressure"
+    },
     "blocks": {
       "description": "Block instances, keyed by id. The key IS the identity (SERVICE-SPEC §2): `name` is a label, and connections, layout annotations and API paths all address the id.",
       "type": "object",

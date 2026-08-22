@@ -31,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use eio_host_core::{Connection, Limits, Port};
+use eio_host_core::{Connection, Limits, Overflow, Port};
 use eio_manifest::Manifest;
 
 use crate::blocks::{Cache, Unresolvable};
@@ -478,10 +478,33 @@ pub async fn apply(executor: &Executor, valid: Valid, start: Start) -> State {
         })
         .collect();
 
-    // Every connection takes DAEMON §6.2's default policy, because SERVICE §5 gives a file no
-    // way to say otherwise: drop-oldest is an implemented opt-in with no spelling, which is a
-    // service file question rather than a boot one (eieio-8yq.9).
-    let connections: Vec<Connection> = parsed
+    let connections = connections_for(&parsed);
+
+    match Service::spawn(executor, specs, &connections).await {
+        Ok(service) => State::Running(service),
+        Err(error) => State::Errored(Failure::Unstartable(format!("{error:#}"))),
+    }
+}
+
+/// Builds the router's connection table from a parsed service's wiring (SERVICE §5, DAEMON
+/// §6.2, eieio-8yq.9).
+///
+/// One overflow policy for the whole service: every connection takes what the file's
+/// top-level `overflow` key said, or backpressure if it said nothing — [`eio_service::parse`]
+/// has already resolved that to [`eio_service::Overflow`]. That type is not
+/// [`eio_host_core::Overflow`] — the service crate does not depend on the router — so the
+/// match below is the one place the two vocabularies meet.
+///
+/// A free function rather than inlined in [`apply`] so it can be tested without an executor:
+/// the router implementing drop-oldest is not the same claim as a service file's choice
+/// reaching the connections `apply` builds, and the field on each [`Connection`] here is what
+/// proves the second one.
+fn connections_for(parsed: &eio_service::Parsed) -> Vec<Connection> {
+    let overflow = match parsed.overflow {
+        eio_service::Overflow::Backpressure => Overflow::Backpressure,
+        eio_service::Overflow::DropOldest => Overflow::DropOldest,
+    };
+    parsed
         .connections
         .iter()
         .map(|connection| {
@@ -489,13 +512,9 @@ pub async fn apply(executor: &Executor, valid: Valid, start: Start) -> State {
                 Port::new(&*connection.from.instance, &*connection.from.port),
                 Port::new(&*connection.to.instance, &*connection.to.port),
             )
+            .with_overflow(overflow)
         })
-        .collect();
-
-    match Service::spawn(executor, specs, &connections).await {
-        Ok(service) => State::Running(service),
-        Err(error) => State::Errored(Failure::Unstartable(format!("{error:#}"))),
-    }
+        .collect()
 }
 
 /// Every block a service names, resolved against the cache and validated (DAEMON §3 step 2).
@@ -1317,5 +1336,68 @@ mod tests {
             }
         }
         count
+    }
+
+    /// A service with three connections into two destinations, so "every connection" is a
+    /// real claim and not one edge standing in for it.
+    const FAN_IN: &str = "\
+        name = \"fanin\"\n\
+        connections = [\n\
+        \x20\x20\"a.out -> c.in\",\n\
+        \x20\x20\"b.out -> c.in\",\n\
+        \x20\x20\"a.out -> d.in\",\n\
+        ]\n\n\
+        [blocks.a]\nblock = \"transform:1.0.0\"\n\
+        [blocks.b]\nblock = \"transform:1.0.0\"\n\
+        [blocks.c]\nblock = \"transform:1.0.0\"\n\
+        [blocks.d]\nblock = \"transform:1.0.0\"\n";
+
+    #[test]
+    fn a_service_with_no_overflow_key_builds_backpressure_connections() {
+        // eieio-8yq.9: absent means SERVICE §5's default, and it has to actually land on the
+        // connection the router receives — not merely describe the file.
+        let parsed = eio_service::parse(FAN_IN).expect("valid");
+        let connections = connections_for(&parsed);
+        assert_eq!(connections.len(), 3);
+        assert!(
+            connections
+                .iter()
+                .all(|c| c.overflow == Overflow::Backpressure),
+            "{connections:#?}"
+        );
+    }
+
+    #[test]
+    fn an_explicit_drop_oldest_reaches_every_connection_in_the_service() {
+        // The decision this bead makes normative: one policy for the whole service, not a
+        // property of each edge. Asserted on every one of the three connections above,
+        // including the two that share a destination — the case DAEMON §6.2 used to forbid.
+        let text = format!("overflow = \"drop-oldest\"\n{FAN_IN}");
+        let parsed = eio_service::parse(&text).expect("valid");
+        assert_eq!(parsed.overflow, eio_service::Overflow::DropOldest);
+
+        let connections = connections_for(&parsed);
+        assert_eq!(connections.len(), 3);
+        assert!(
+            connections
+                .iter()
+                .all(|c| c.overflow == Overflow::DropOldest),
+            "a service-level policy that failed to reach even one connection would leave the \
+             opt-in implemented and unreachable, which is the bug eieio-8yq.9 exists to close: \
+             {connections:#?}"
+        );
+    }
+
+    #[test]
+    fn an_unrecognised_overflow_value_is_refused_at_parse_not_at_boot() {
+        // SERVICE §5: a misspelled policy is a stage-1 validation error, not a silent
+        // fall-back to the default — boot never sees a `Parsed` for this file at all.
+        let errors =
+            eio_service::parse("name = \"fanin\"\noverflow = \"dropoldest\"\n").unwrap_err();
+        assert!(
+            errors.iter().any(|e| format!("{e}").contains("dropoldest")
+                && format!("{e}").contains("backpressure")),
+            "{errors:#?}"
+        );
     }
 }

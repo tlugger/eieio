@@ -121,6 +121,12 @@ pub enum Error {
         name: String,
     },
 
+    /// The top-level `overflow` key names a policy SERVICE §5 does not define.
+    Overflow {
+        /// What was written.
+        value: String,
+    },
+
     /// A block instance's id does not satisfy SERVICE §2.1.
     InstanceId {
         /// The offending key.
@@ -201,6 +207,11 @@ impl fmt::Display for Error {
                 f,
                 "the block instance id {id:?} does not match {} (SERVICE §2.1)",
                 crate::id::ID_PATTERN
+            ),
+            Error::Overflow { value } => write!(
+                f,
+                "overflow = {value:?} is not a recognised policy; expected one of {:?} (SERVICE §5)",
+                crate::overflow::Overflow::ACCEPTED
             ),
             Error::EmptyBlockRef { id } => {
                 write!(f, "block instance {id:?} names no block (SERVICE §4)")

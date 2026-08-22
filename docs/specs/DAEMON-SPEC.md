@@ -346,12 +346,12 @@ Two consequences worth stating:
 
 ### 6.2 Bounded mailboxes and the overflow policy
 
-**Bounded mailboxes; overflow policy per connection.** The default is to **block the emitter's queue-drain** — natural backpressure within a node. **Drop-oldest** is available as an opt-in for sensor-style flows. The cross-*device* question — delivery guarantees, ordering, and backpressure between nodes — is a different one and stays OPEN (SCOPE §3.4).
+**Bounded mailboxes; overflow policy per service.** The default is to **block the emitter's queue-drain** — natural backpressure within a node. **Drop-oldest** is available as an opt-in for sensor-style flows, selected once for the whole service by SERVICE §5's `overflow` key. It is not a property of each edge: a service is the unit a deployer reasons about here, and a file where two edges into one block behaved differently would be harder to read than the guarantee is worth. The cross-*device* question — delivery guarantees, ordering, and backpressure between nodes — is a different one and stays OPEN (SCOPE §3.4).
 
 The two policies are the two answers §5's mailbox offers a sender, and neither is free-standing:
 
 - **Backpressure** is the waiting send. Nothing is lost; a saturated graph slows down.
-- **Drop-oldest** is the refusing send plus a **one-batch slot on the connection**. When the destination is full the newest batch takes the slot, and the batch it finds there is the one dropped; the slot is retried ahead of the next round of emissions. The batch a connection discards is always one of *its own*: a per-connection policy MUST NOT discard work another connection put in the shared mailbox, so a control flow set to backpressure keeps its guarantee even when a sensor flow into the same block does not.
+- **Drop-oldest** is the refusing send plus a **one-batch slot on the connection**. When the destination is full the newest batch takes the slot, and the batch it finds there is the one dropped; the slot is retried ahead of the next round of emissions. The slot is per *connection* even though the policy is per service, and that is what makes the next rule true: the batch a connection discards is always one of *its own*. A connection MUST NOT discard work another connection put in the shared mailbox — a sender is answerable for its own backlog and for nothing else, whoever chose the policy.
 
 **A connection whose destination is its own source never waits**, however it is configured. An instance is the only drain of its own mailbox, so waiting there cannot succeed — it is a deadlock rather than backpressure, and the batch is discarded and counted instead. Longer cycles are not locally detectable: a saturated cycle of two or more instances stalls those instances, which is the cost of in-node backpressure and is stated here rather than papered over. Every discard — unrouted error emission, drop-oldest replacement, full self-connection, gone receiver — is logged and counted.
 

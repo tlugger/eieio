@@ -69,6 +69,7 @@
 
 mod connection;
 mod error;
+mod overflow;
 mod parse;
 mod schema;
 mod validate;
@@ -79,6 +80,7 @@ pub mod id;
 pub use connection::{Connection, Terminal};
 pub use edit::{Document, EditError};
 pub use error::{ConnectionError, Error, ResolvedError, Span};
+pub use overflow::Overflow;
 pub use parse::{Parsed, parse};
 pub use schema::{Instance, Service};
 pub use validate::validate;

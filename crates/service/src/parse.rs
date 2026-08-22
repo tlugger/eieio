@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use crate::connection::Connection;
 use crate::error::Error;
 use crate::id;
+use crate::overflow::Overflow;
 use crate::schema::Service;
 
 /// A service file, parsed and checked as far as the file alone allows (SERVICE §7 stage 1).
@@ -18,6 +19,13 @@ pub struct Parsed {
     pub service: Service,
     /// Its connections, in file order, each parsed (SERVICE §5).
     pub connections: Vec<Connection>,
+    /// The overflow policy every one of those connections is built with (SERVICE §5).
+    ///
+    /// Resolved from [`Service::overflow`] the same way `connections` is resolved from
+    /// `service.connections`: the raw field is what the file wrote, this is what it means,
+    /// and an absent key means [`Overflow::Backpressure`] rather than a third state a caller
+    /// would have to handle.
+    pub overflow: Overflow,
 }
 
 /// Parses and runs stage 1.
@@ -61,12 +69,26 @@ pub fn parse(text: &str) -> Result<Parsed, Vec<Error>> {
         check_properties(instance_id, &instance.props, &mut errors);
     }
 
+    let overflow = match service.overflow.as_deref() {
+        None => Overflow::Backpressure,
+        Some(value) => match Overflow::parse(value) {
+            Ok(overflow) => overflow,
+            Err(bad) => {
+                errors.push(Error::Overflow {
+                    value: bad.to_string(),
+                });
+                Overflow::Backpressure
+            }
+        },
+    };
+
     let connections = check_connections(&service, &mut errors);
 
     if errors.is_empty() {
         Ok(Parsed {
             service,
             connections,
+            overflow,
         })
     } else {
         Err(errors)

@@ -90,6 +90,7 @@ Ids are unique within a service file and mean nothing outside it. Two services o
 |`autostart`|bool|OPTIONAL, default `false`|Whether the daemon starts this service at boot (DAEMON §3)|
 |`blocks`|table|OPTIONAL, default empty|Block instances, keyed by id (§4)|
 |`connections`|array of strings|OPTIONAL, default empty|The wiring (§5)|
+|`overflow`|string|OPTIONAL, default `"backpressure"`|What a full mailbox does to a sender, for every connection in this service (§5, DAEMON §6.2)|
 |`ui`|table|OPTIONAL|Designer annotations the daemon MUST NOT interpret (§6)|
 
 `name` follows ABI §11.1's port-and-property pattern — `^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`, ≤64 bytes — because a service name is a path component in the management API and a filename on disk.
@@ -122,6 +123,10 @@ A property the block does not declare is an error (§7). A declared property abs
 ```toml
 connections = [ "<id>.<port> -> <id>.<port>" ]
 ```
+
+**One overflow policy, for the whole service.** `overflow` selects what a full mailbox does to a sender: `"backpressure"` (the default) makes the emitter wait, and `"drop-oldest"` makes it replace its own oldest queued batch. It is one choice for every connection in the file rather than a property of each edge — a service is the unit a deployer reasons about here, and a file where two edges into one block behaved differently would be harder to read than the guarantee is worth. A value that is neither is a §7 stage-1 error, not a silent fall back to the default: a misspelled policy is a deployer believing something about backpressure that is not true.
+
+It is a top-level key, so §5's rule below applies to it in full — an `overflow` written under a `[blocks.…]` header is that block's unknown field (§3), not the service's policy.
 
 One string per edge. The grammar, exactly:
 

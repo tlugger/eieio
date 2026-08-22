@@ -20,6 +20,17 @@ pub struct Service {
     #[serde(default)]
     pub autostart: bool,
 
+    /// The overflow policy for every connection in the service, as written (SERVICE §5).
+    ///
+    /// Held as the raw string, not [`crate::Overflow`]: the accepted spellings are this
+    /// crate's to validate at stage 1 with a message naming what was given and what is
+    /// accepted, not serde's to reject with whatever wording `toml` chooses for an enum it
+    /// deserialized itself. `None` means the key was absent, which [`crate::parse::parse`]
+    /// reads as [`crate::Overflow::Backpressure`] — the same outcome writing `"backpressure"`
+    /// out would produce, so the two are not distinguished past stage 1.
+    #[serde(default)]
+    pub overflow: Option<String>,
+
     /// Block instances, keyed by **id** (SERVICE §2).
     ///
     /// A [`BTreeMap`] rather than a `Vec`: the key *is* the identity, so the map is the

@@ -92,6 +92,7 @@ fn the_schema_rejects_what_it_can_and_the_rest_is_documented() {
         "empty-block-ref.toml",
         "bad-connection-syntax.toml",
         "non-string-property.toml",
+        "bad-overflow.toml",
     ] {
         let text = read("tests/invalid", name);
         assert!(

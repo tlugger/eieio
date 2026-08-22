@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use eio_service::{ConnectionError, Error, parse};
+use eio_service::{ConnectionError, Error, Overflow, parse};
 
 /// `examples/services/`, from this crate.
 fn examples() -> PathBuf {
@@ -68,6 +68,7 @@ fn the_kitchen_example_says_what_it_looks_like() {
 
     assert_eq!(parsed.service.name, "kitchen");
     assert!(parsed.service.autostart);
+    assert_eq!(parsed.overflow, Overflow::DropOldest);
     assert_eq!(parsed.service.blocks.len(), 4);
     assert_eq!(parsed.connections.len(), 4);
 
@@ -251,6 +252,74 @@ fn an_expression_static_analysis_rejects_is_rejected() {
     );
 }
 
+// ── the overflow policy (SERVICE §5, DAEMON §6.2, eieio-8yq.9) ──────────────
+
+#[test]
+fn an_absent_overflow_key_resolves_to_backpressure() {
+    let parsed = parse("name = \"minimal\"\n").expect("valid");
+    assert_eq!(parsed.overflow, Overflow::Backpressure);
+    // Undistinguished from writing the default out explicitly (SERVICE §5).
+    let explicit = parse("name = \"minimal\"\noverflow = \"backpressure\"\n").expect("valid");
+    assert_eq!(explicit.overflow, Overflow::Backpressure);
+}
+
+#[test]
+fn an_explicit_drop_oldest_is_one_choice_for_the_whole_file() {
+    // SERVICE §5: `overflow` is a top-level key, a sibling of `name`, and it says nothing
+    // about any one connection — it is asserted here as a single field on `Parsed`, not as a
+    // property of an individual edge.
+    let text = "name = \"kitchen\"\noverflow = \"drop-oldest\"\n\
+                 connections = [ \"a.out -> c.in\", \"b.out -> c.in\" ]\n\n\
+                 [blocks.a]\nblock = \"transform:1.0.0\"\n\
+                 [blocks.b]\nblock = \"transform:1.0.0\"\n\
+                 [blocks.c]\nblock = \"transform:1.0.0\"\n";
+    let parsed = parse(text).expect("valid");
+    assert_eq!(parsed.overflow, Overflow::DropOldest);
+    assert_eq!(parsed.connections.len(), 2, "both edges into `c` are read");
+}
+
+#[test]
+fn an_overflow_value_outside_the_accepted_set_is_rejected() {
+    let errors = errors("bad-overflow.toml");
+    let [Error::Overflow { value }] = &errors[..] else {
+        panic!("{errors:#?}");
+    };
+    assert_eq!(value, "dropoldest");
+    let message = format!("{}", errors[0]);
+    // Names what was given and what is accepted (SERVICE §7) — not a generic TOML error.
+    assert!(message.contains("dropoldest"), "{message}");
+    assert!(message.contains("backpressure"), "{message}");
+    assert!(message.contains("drop-oldest"), "{message}");
+}
+
+#[test]
+fn an_underscored_spelling_is_also_rejected() {
+    // The verification this bead calls for by name: `drop_oldest` is not `drop-oldest`, and
+    // a deployer who typed it should be told, not silently backpressured.
+    let errors = match parse("name = \"kitchen\"\noverflow = \"drop_oldest\"\n") {
+        Ok(_) => panic!("\"drop_oldest\" parsed, and it is not an accepted spelling"),
+        Err(errors) => errors,
+    };
+    let [Error::Overflow { value }] = &errors[..] else {
+        panic!("{errors:#?}");
+    };
+    assert_eq!(value, "drop_oldest");
+}
+
+#[test]
+fn an_overflow_key_inside_a_block_table_is_an_unknown_field_not_the_service_policy() {
+    // SERVICE §5's existing TOML rule: a top-level key belongs to the table it follows. An
+    // `overflow` written after `[blocks.a]` is that block's field, and `deny_unknown_fields`
+    // must say so rather than silently reading it as nothing or as the service's policy.
+    let text = "name = \"kitchen\"\n\n[blocks.a]\nblock = \"transform:1.0.0\"\noverflow = \"drop-oldest\"\n";
+    let errors = match parse(text) {
+        Ok(_) => panic!("an `overflow` inside a block table parsed"),
+        Err(errors) => errors,
+    };
+    assert!(matches!(errors[..], [Error::Toml(_)]), "{errors:#?}");
+    assert!(format!("{}", errors[0]).contains("overflow"));
+}
+
 #[test]
 fn every_error_class_has_a_fixture() {
     // The corpus is the claim that §7's table is implemented, so a class added to the spec
@@ -271,5 +340,5 @@ fn every_error_class_has_a_fixture() {
         );
         count += 1;
     }
-    assert_eq!(count, 12, "one fixture per SERVICE §7 stage-1 error class");
+    assert_eq!(count, 13, "one fixture per SERVICE §7 stage-1 error class");
 }

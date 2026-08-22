@@ -6,6 +6,10 @@
 
 name = "kitchen"
 autostart = true
+# One overflow policy for the whole service (§5, DAEMON §6.2), not a property of each edge —
+# `q4tv` below is exactly the two-connections-into-one-block case that made per-connection
+# policy a real question, and both take this one. Optional; omitting it means "backpressure".
+overflow = "drop-oldest"
 
 connections = [
   "b7k2.out -> f3m9.in",
