@@ -1,0 +1,30 @@
+{
+  "name": "http-on-http-delivers-the-inbound-body",
+  "spec": "§4.2, §6.1, §7.6, §13.1",
+  "note": "eio_on_http is the only optional callback carrying an inbound payload, so it is the only place ABI §6.1's host-allocates/guest-frees convention is exercised outside process_signals and configure. The scripted id (7) is the async req_id pattern: nothing ties http_request's answer to the later response but the scenario itself, the same as gpio_watch's id in 14_gpio_echo. The body the scenario hands eio_on_http is a real ABI §7.6 {headers, body} map, and the block emits back the exact bytes it was given -- a host that delivered an empty or truncated payload would emit a different, and visibly wrong, batch. eio_stop's balance check is what proves the guest actually freed it: eio_free is an export no engine surfaces to its embedder (§13.1), so the fixture counts its own allocs and frees and refuses to stop unbalanced.",
+  "module": "blocks/http_harness.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    {
+      "action": "start",
+      "script": [ { "function": "http_request", "id": 7 } ],
+      "expect": { "status": 0, "calls": [ "http_request" ], "emissions": [] }
+    },
+    {
+      "action": { "http": { "req": 7, "status": 200, "body": "a264626f647945deadbeef126768656164657273a0" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "emit" ],
+        "emissions": [
+          {
+            "port": "out",
+            "batch": "81a164626f647955a264626f647945deadbeef126768656164657273a0"
+          }
+        ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

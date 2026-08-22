@@ -1,0 +1,25 @@
+{
+  "name": "i2c-write-read-and-write-read",
+  "spec": "§7.5, §8, §13.1",
+  "note": "eio:i2c's only conformance coverage: no golden block imports it (ABI §13.2 lists none), so this is capability.rs's out_buffer table exercised for real rather than by inspection. i2c_write_read's (buf, cap) sits at argument index 4, unlike state_get and i2c_read's index 2, and its answer lands directly in the emitted template's own slot -- a host consulting the wrong argument position writes into the write-half payload's memory instead and this slot stays four zero bytes, which is not the scripted answer.",
+  "module": "blocks/i2c_harness.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "script": [
+        { "function": "i2c_read", "value": "aabbccdd" },
+        { "function": "i2c_write_read", "value": "11223344" }
+      ],
+      "expect": {
+        "status": 0,
+        "calls": [ "i2c_write", "i2c_read", "i2c_write_read", "emit" ],
+        "emissions": [ { "port": "out", "batch": "81a2617244aabbccdd6277724411223344" } ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}
