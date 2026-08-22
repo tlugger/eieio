@@ -453,8 +453,18 @@ gap in either layer.
 
 The ABI permits any language; the SDK does not chase this in v1. The conformance harness + golden blocks are the de facto spec for future SDKs (TinyGo, AssemblyScript, componentized Python for legacy nio-blocks migration). No design work now beyond keeping the harness language-agnostic — which ABI §13.1 makes structural rather than aspirational: it consumes a `.wasm` and a manifest, its scenarios are data, and `eio-conformance` does not depend on `eio-sdk`.
 
-## 8. Expansion list (for the in-depth pass)
+## 8. Versioning
 
-SDK versioning vs ABI versioning policy.
+**`eio-sdk` versions on its own Rust API surface, independently of ABI §12's number.** A breaking change to `Ctx`, to `Prop<T>`, or to what `#[block]` accepts bumps the crate the way any Rust crate bumps: it is what a cargo user reads a version as, and a scheme where wrapper breakage could not move major would be lying to `cargo update`.
+
+The ABI number is not the wrapper's to carry. §12 already owns the compatibility rule — reject a `major` mismatch, accept a `minor` at or below the host's — and that number describes the *boundary*, not the crate that happens to wrap it. Two blocks built against different `eio-sdk` versions are interchangeable to a host if they declare the same ABI, and that is the property worth keeping legible.
+
+**Which ABI a block declares is derived, never declared twice.** `#[block]` emits `abi: Abi::CURRENT`, read from `eio_manifest`, so the manifest's ABI version is a fact about the `eio-manifest` the SDK was compiled against rather than a number someone maintains in prose. There is therefore nothing for a release to get wrong here and no check to add: the drift this section would otherwise have to guard against is unconstructible, which is a better answer than a test.
+
+What a release *can* get wrong is the dependency order. The crates published under one `sdk-vX.Y.Z` tag share a version because crates.io publishes them together (SCOPE §7.2), and `cargo publish` needs each crate's `eio-*` dependencies already on the registry — so the order is normative, not alphabetical, and `just publish-dry-run` is where it is stated once for both the release workflow and ordinary CI. Note what a pre-first-publish dry run cannot do: packaging resolves a path dependency against the live registry, so only the crates with no `eio-*` dependency of their own can be dry-run until the first tag ships.
+
+## 9. Expansion list (for the in-depth pass)
+
+Nothing outstanding.
 
 Done since Draft 1: the macro attribute grammar and `Prop<T>`'s type mapping are normative in §1.1 and §1.2; the `HttpRequest`/`HttpResponse` types are normative in §3.3, which also records the `request_tagged` decision; the `TestHost` API is normative in §6.1; the template's contents are normative in §5.1 and the size-optimization defaults in §5.2, which also records the `wasm-opt` decision; §2, §3, §4 and §6 are expanded.

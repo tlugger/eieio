@@ -46,6 +46,20 @@ nostd_targets := target_cortex_m4f + " " + target_esp32c3
 # depend on and was invisible from the guest target.
 nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk"
 
+# The crates a `sdk-vX.Y.Z` tag publishes, in dependency order — `cargo publish` needs each
+# crate's `eio-*` dependencies already on the registry, so this is the publish order and not
+# an alphabetical list. It lives here because both `release-sdk.yml` and `publish-dry-run.yml`
+# need it, and a set duplicated across two workflows is one that drifts. `eio-conformance` is
+# in it because `cargo-eio` depends on it for `cargo eio test`, which SDK §5's prose does not
+# make obvious.
+publish_set := "eio-abi eio-signal eio-expr eio-manifest eio-sdk-macros eio-host-core eio-sdk eio-conformance eio-test-host cargo-eio"
+
+# The subset with no `eio-*` dependency of its own. Before the first publish these are the only
+# crates `cargo publish --dry-run` can reach: packaging resolves a path dependency against the
+# live registry, so a crate whose `eio-*` dependency is unpublished fails there, before any
+# build, and no flag avoids it. Widen this to `publish_set` once the first `sdk-v` tag ships.
+dry_runnable := "eio-abi eio-signal"
+
 # The guest target (ABI §1). Blocks are core WASM modules and nothing else.
 guest_target := "wasm32-unknown-unknown"
 
@@ -148,6 +162,23 @@ check-guest:
 # ── the gate ─────────────────────────────────────────────────────────────────
 
 # The one command CI runs. Dependencies run in order; the first failure aborts.
+# Prove the publish set is publishable, as far as that can be proven before the first publish.
+#
+# Two checks, because neither covers the other. `cargo publish --dry-run` is the real thing but
+# reaches only `dry_runnable`; `cargo metadata` needs no network and so covers every crate,
+# confirming the three fields crates.io requires are present. Publishability then rots loudly
+# here rather than at release time, which is the point (SCOPE §7.2).
+publish-dry-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo metadata --no-deps --format-version 1 > /tmp/eio-publish-meta.json
+    python3 -c 'import json,sys; m=json.load(open("/tmp/eio-publish-meta.json")); want=sys.argv[1].split(); pk={p["name"]:p for p in m["packages"]}; bad=[(n,f) for n in want for f in ("description","license","repository") if not pk.get(n,{}).get(f)]; missing=[n for n in want if n not in pk]; [sys.stderr.write("not in this workspace: %s\n" % n) for n in missing]; [sys.stderr.write("%s has no %s\n" % (n,f)) for n,f in bad]; sys.exit(1 if (bad or missing) else 0)' "{{ publish_set }}"
+    echo "  registry metadata present for every crate in the publish set"
+    for crate in {{ dry_runnable }}; do
+        echo "  $crate → cargo publish --dry-run"
+        cargo publish --dry-run -p "$crate"
+    done
+
 ci: fmt-check lint build test test-golden check-nostd check-guest
     @echo "ci: all gates passed"
 

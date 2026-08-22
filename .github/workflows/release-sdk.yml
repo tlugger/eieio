@@ -1,0 +1,153 @@
+# The SDK surface's release pipeline (SCOPE §7.2).
+#
+# One of several: §7.2 puts a pipeline per deployable component, each tag-triggered and
+# independent, and the tag names the component. `sdk-v0.2.1` publishes the crate set block
+# authors consume and nothing else; a bare `v0.2.1` would fire every pipeline in the
+# repository and leave each one to filter itself back out, which is not independence.
+#
+# What "the crate set" is, and why it is ten crates and not two:
+#
+#   `eio-sdk` and `cargo-eio` are the two crates the issue names, but `cargo eio new`
+#   generates a template whose Cargo.toml depends on `eio-sdk` and `eio-test-host` from
+#   crates.io at `cargo-eio`'s own version (SDK-SPEC §5.1) — so `eio-test-host` has to be
+#   published too, as a template dev-dependency, not just an internal test tool. `cargo-eio`
+#   itself also links `eio-conformance` for `cargo eio test`'s second layer (SDK §5.3), which
+#   pulls that crate in as well. Everything below is what the workspace manifests force once
+#   those four are fixed as the roots — read off `cargo metadata`, not guessed:
+#
+#     eio-abi          (no eio-* deps)
+#     eio-signal        -> (none)
+#     eio-expr          -> eio-signal
+#     eio-manifest      -> eio-expr, eio-signal
+#     eio-sdk-macros    -> eio-manifest
+#     eio-host-core     -> eio-abi, eio-signal, eio-expr, eio-manifest
+#     eio-sdk           -> eio-abi, eio-signal, eio-sdk-macros
+#     eio-conformance   -> eio-host-core, eio-manifest, eio-signal
+#     eio-test-host     -> eio-host-core, eio-sdk, eio-manifest, eio-signal
+#     cargo-eio         -> eio-manifest, eio-conformance
+#
+#   PUBLISH_ORDER below is one valid topological sort of that graph: every crate is listed
+#   after everything it depends on. All ten share the workspace's version (SCOPE §7.2: "the
+#   ★ crates and eio-sdk keep a shared one, because crates.io publishes them together
+#   anyway" — `eio-sdk-macros`, `eio-conformance`, `eio-test-host` and `cargo-eio` are
+#   `version.workspace = true` for the same reason), so one tag names one version for the
+#   whole set. `eio-daemon` and `eio-cli` are deliberately NOT here: they carry their own
+#   `version` precisely so a daemon release does not have to republish crates nothing in
+#   them changed, and neither is in this dependency closure regardless.
+#
+# Three things about the shape are deliberate, matching release-daemon.yml:
+#
+#   - **CI is a prerequisite job, reused rather than restated.** §7.2 requires it, and
+#     `workflow_call` makes it the *same* gate `main` runs.
+#   - **There is no separate build/smoke stage.** The daemon's pipeline has one because a
+#     cross-compiled binary is an artifact that has to be produced, uploaded and run before
+#     anyone should trust it. A crates.io crate has no equivalent intermediate: `just ci`
+#     already builds and tests every crate in this set, so the publish job's only job is the
+#     publish itself, in order.
+#   - **Write permission is scoped to nothing wider than it already is.** Publishing to
+#     crates.io needs `CARGO_REGISTRY_TOKEN` (a repository secret, consumed as an env var on
+#     the publish job only, per the credential note on eieio-p0k.3 — no `cargo login` step,
+#     because cargo reads the env var directly) and no GitHub API write of any kind, so
+#     `contents: read` is correct for the whole workflow and there is no job to widen.
+name: release-sdk
+
+on:
+  push:
+    tags: ["sdk-v*"]
+  # For a rehearsal against a branch: `ci` runs, `publish` does not, because it has no tag
+  # to attach a version to and nothing here should touch crates.io without one.
+  workflow_dispatch:
+
+# Not cancel-in-progress: a superseded CI run is a stale answer about code nobody is
+# looking at, but a superseded *release* is a half-published crate set.
+concurrency:
+  group: release-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+# Reads the repository. The publish job talks to crates.io with a registry token, which is
+# not a GitHub permission — nothing in this workflow writes to the repository or its API.
+permissions:
+  contents: read
+
+jobs:
+  # SCOPE §7.2: "all require CI as a prerequisite job". The tag is not released if the
+  # commit it names does not pass the gate.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-latest
+    # Only a tag is a release. A `workflow_dispatch` rehearsal stops at `ci`, which is what
+    # makes it safe to run against a branch — there is no tag here for a published version
+    # to be named after.
+    if: startsWith(github.ref, 'refs/tags/sdk-v')
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # Read from the justfile rather than restated here: `publish-dry-run.yml` needs the
+      # same order, and a topological sort written out in two workflows is one that drifts.
+      # Populated by the `Read the publish order` step below.
+    steps:
+      - name: Check out the repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+
+      - name: Read the publish order
+        # `just` owns the list (see `publish_set`), so the order the release publishes in and
+        # the order ordinary CI dry-runs against are the same string, not two copies of it.
+        run: echo "PUBLISH_ORDER=$(just --evaluate publish_set)" >> "$GITHUB_ENV"
+
+      - name: Install the pinned Rust toolchain
+        # `rust-toolchain.toml` decides the compiler; nothing here needs a target beyond
+        # what it already declares, because `cargo publish` builds for the host to verify.
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup show
+
+      - name: Check the tag names the version actually in the manifests
+        # `cargo publish` reads the version from each crate's Cargo.toml, not from the tag —
+        # so a tag that does not match would publish silently under the wrong number, which
+        # is exactly the drift a tag-named release exists to prevent. Checked against every
+        # crate in PUBLISH_ORDER via `cargo metadata` rather than trusting that
+        # `version.workspace = true` holds for all of them forever.
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#sdk-v}"
+          if [ "$version" = "$tag" ]; then
+            echo "::error::tag '$tag' does not start with 'sdk-v'" >&2
+            exit 1
+          fi
+          for crate in $PUBLISH_ORDER; do
+            actual=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg name "$crate" '.packages[] | select(.name == $name) | .version')
+            if [ -z "$actual" ]; then
+              echo "::error::no package named '$crate' in this workspace" >&2
+              exit 1
+            fi
+            if [ "$actual" != "$version" ]; then
+              echo "::error::$crate is at version $actual, but tag $tag names $version" >&2
+              exit 1
+            fi
+          done
+          echo "tag $tag matches every crate in the publish set"
+
+      - name: Publish the crate set, in dependency order
+        # Each crate is listed after everything it depends on (see the header comment for
+        # the graph this was read off). `cargo publish` uploads and then waits for the new
+        # version to become visible on the index before returning — documented cargo
+        # behaviour, not scripted here — which is what lets the very next crate in this list
+        # depend on the one before it without a manually-inserted delay. A failure on any
+        # crate stops the script (`set -e`) rather than publishing the rest of the set with
+        # a hole in the middle of its dependency graph.
+        run: |
+          set -euo pipefail
+          for crate in $PUBLISH_ORDER; do
+            echo "::group::cargo publish -p $crate"
+            cargo publish -p "$crate"
+            echo "::endgroup::"
+          done

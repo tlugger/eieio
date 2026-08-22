@@ -1,0 +1,97 @@
+# Publishability for the SDK release set (eieio-p0k.3), checked on every push and PR so it
+# rots loudly instead of at `sdk-v` release time. This is a genuinely different gate from
+# `ci.yml` — it is a question about the crates.io registry, not about the workspace build —
+# which is why it is its own workflow rather than a job bolted onto `ci.yml`: that file's own
+# header says it runs `just ci` and nothing else substantive, on the grounds that a check
+# only CI can perform is a check nobody can reproduce locally. `cargo publish --dry-run`
+# fits that same description (see below), so it stays out of `just ci` too and lives here
+# instead, on the same triggers `ci.yml` uses.
+#
+# Two checks, because one tool cannot cover the whole release-sdk.yml crate set:
+#
+#   1. `cargo publish --dry-run` for `eio-abi` and `eio-signal` only. These are the two
+#      crates in the publish set with no `eio-*` dependency of their own. Measured directly
+#      (2026-08-22): `cargo publish --dry-run` on any of the other eight — say `eio-expr`,
+#      which depends on path-only `eio-signal` — fails immediately with
+#
+#        error: failed to prepare local package for uploading
+#        Caused by:
+#          no matching package named `eio-signal` found
+#          location searched: crates.io index
+#
+#      `--no-verify` does not help; the failure happens while cargo rewrites the packaged
+#      manifest's path dependency to a registry requirement and then resolves it against the
+#      live index, before any build step runs. That is a real constraint, not a flag to find:
+#      a crate cannot be dry-run published against a dependency that has never been
+#      published for real. It resolves itself the moment `eio-signal` exists on crates.io —
+#      after the first `sdk-v` tag, `eio-expr`'s dry run (and the rest of the chain's) should
+#      start succeeding, and this job's crate list should grow to match. Tracked so that
+#      widening does not get forgotten: file a follow-up bead when the first tag ships.
+#
+#   2. A static metadata check across the full ten-crate publish set (kept in sync with
+#      release-sdk.yml's PUBLISH_ORDER by hand — there is nowhere shared to define it once,
+#      since a workspace-level constant would live in the justfile or a crate manifest and
+#      both are outside this file's ownership). `cargo metadata --no-deps` reads the local
+#      workspace graph and needs no registry access at all, so it works for every crate
+#      regardless of whether its dependencies have ever been published — which is what makes
+#      it able to cover the eight the dry run above cannot reach. It confirms `description`,
+#      `license` and `repository` are non-empty, which is what crates.io's own publish
+#      endpoint requires (and what `cargo publish --dry-run` would otherwise be the one to
+#      catch, for the crates it can reach at all).
+#
+# Deliberately token-free: neither check needs `CARGO_REGISTRY_TOKEN`, so this workflow runs
+# on pull requests from forks the same as any other. `--dry-run` uploads nothing (it aborts
+# before the network call that would need credentials), and `cargo metadata` never leaves
+# the workspace.
+name: publish-dry-run
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup show
+
+      - name: Cache the cargo registry and build artifacts
+        # actions/cache v6.1.0. Same key `ci.yml` uses: this job compiles the same crates
+        # `just ci` already built, so there is no reason for it to pay for that twice.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6
+
+      - name: just publish-dry-run
+        # The publish set, its dependency order, and the dry-runnable subset all live in the
+        # justfile — `release-sdk.yml` needs the same list, and a set written out in two
+        # workflows is a set that drifts. Same rule as `ci.yml`: a step a contributor cannot
+        # run locally is a step nobody can debug.
+        run: just publish-dry-run
