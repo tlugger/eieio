@@ -165,6 +165,41 @@ fn unbound_symbols_are_reported() {
     one_error("(startswith? $a $b)", ErrorCode::Unbound, "startswith?");
 }
 
+/// eieio-7d8.15: the span is enough for an editor, but a deployer reading a rejection
+/// off a log line should not have to slice the expression text by hand to learn which
+/// name did not resolve.
+#[test]
+fn unbound_symbol_names_the_symbol() {
+    for source in ["nope", "(+ 1 nope)", "(lenght $x)"] {
+        let result = analysis(source);
+        let error = result
+            .diagnostics
+            .first()
+            .unwrap_or_else(|| panic!("expected {source:?} to have a diagnostic"));
+        let span_text = error.span.text(source);
+        assert_eq!(
+            error.unbound_symbol(source),
+            span_text,
+            "{source:?}: unbound_symbol should agree with the span it blames"
+        );
+    }
+}
+
+/// `unbound_symbol` names only EXPR §4's unbound-symbol rejection — a special form used
+/// as a value shares `ErrorCode::Unbound` but is a different mistake, and its message
+/// says so rather than naming an unresolved symbol.
+#[test]
+fn unbound_symbol_is_none_for_a_special_form_as_value() {
+    let source = "if";
+    let result = analysis(source);
+    let error = result
+        .diagnostics
+        .first()
+        .expect("a bare special form is a diagnostic");
+    assert_eq!(error.code, ErrorCode::Unbound);
+    assert_eq!(error.unbound_symbol(source), None);
+}
+
 /// Every diagnostic is collected, not just the first (DESIGNER §5).
 #[test]
 fn all_diagnostics_are_collected() {

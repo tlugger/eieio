@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use crate::form;
 use crate::span::Span;
 
 /// The normative error-code table of EXPR §8.
@@ -111,6 +112,23 @@ impl Error {
     /// currently raises.
     pub const fn parse(span: Span, message: &'static str) -> Self {
         Self::new(ErrorCode::Parse, span, message)
+    }
+
+    /// The symbol this error names, when it is EXPR §4's unbound-symbol rejection —
+    /// `None` for every other error, [`ErrorCode::Unbound`]'s special-form-as-value
+    /// case included: that message names a special form used where a value was
+    /// expected, not an unresolved symbol, and eieio-7d8.15 asks only for the latter.
+    ///
+    /// `message` stays `&'static str` (see the struct docs) precisely so this method
+    /// has to exist: the symbol itself is never in the fixed message, only in the
+    /// source text the span points into. `source` must be the same string the
+    /// expression was parsed from — the one `self.span`'s offsets were computed
+    /// against — or the slice returned means nothing.
+    pub fn unbound_symbol<'src>(&self, source: &'src str) -> Option<&'src str> {
+        if self.message != form::UNBOUND_SYMBOL {
+            return None;
+        }
+        self.span.text(source)
     }
 }
 

@@ -81,6 +81,26 @@ fn an_unbound_symbol_rejects_the_configuration() {
 }
 
 #[test]
+fn an_unbound_symbol_names_the_symbol() {
+    // eieio-7d8.15: a span into the expression text makes a deployer count characters
+    // to learn which name did not resolve. The analyser already knows the symbol, so
+    // the rejection should say it rather than only pointing at it.
+    let error = PropContext::compile(&[PropertySource::new(
+        "predicate",
+        PropertyType::Bool,
+        "(frobnicate 1)",
+    )])
+    .expect_err("frobnicate is not a builtin");
+
+    assert_eq!(error.first().symbol.as_deref(), Some("frobnicate"));
+    assert!(
+        error.to_string().contains("unbound symbol 'frobnicate'"),
+        "{}",
+        error.to_string()
+    );
+}
+
+#[test]
 fn a_malformed_special_form_rejects_the_configuration() {
     // EXPR §10's shape rules: a `let` binding that is not a `(name expr)` pair binds
     // nothing, and a host that guessed would accept an expression that cannot evaluate.

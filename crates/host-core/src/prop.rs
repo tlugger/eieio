@@ -123,6 +123,14 @@ pub struct PropertyError {
     pub name: String,
     /// What was wrong: an EXPR §8 code, a span into `source`, and a message.
     pub error: eio_expr::Error,
+    /// The unbound symbol `error` names, sliced from the property's own source text
+    /// (eieio-7d8.15). `None` for every rejection but EXPR §4's unbound-symbol one —
+    /// see [`eio_expr::Error::unbound_symbol`].
+    ///
+    /// Owned rather than borrowed: the source text this was sliced from is a
+    /// `PropertySource` argument that does not outlive [`PropContext::compile`], the
+    /// same reason `name` above is a `String` rather than a `&str`.
+    pub symbol: Option<String>,
 }
 
 impl fmt::Display for PropertyError {
@@ -131,7 +139,14 @@ impl fmt::Display for PropertyError {
             f,
             "property {} ({}): {}",
             self.name, self.prop_id, self.error
-        )
+        )?;
+        // The span is enough for an editor; a deployer reading this line should not
+        // have to count characters into it to learn which name did not resolve
+        // (eieio-7d8.15).
+        if let Some(symbol) = &self.symbol {
+            write!(f, " '{symbol}'")?;
+        }
+        Ok(())
     }
 }
 
@@ -377,11 +392,21 @@ impl PropContext {
                 }),
                 // Collected, not returned: EXPR §10 asks for every diagnostic at once, so
                 // three bad expressions cost one deploy attempt rather than three.
-                Err(error) => rejected.push(PropertyError {
-                    prop_id,
-                    name: property.name.to_owned(),
-                    error,
-                }),
+                Err(error) => {
+                    // `property.source` is `Some` whenever `body` can be `Err`: the `None`
+                    // arm above never calls `compile_one`, which is the only source of
+                    // this error (see the match on `property.source` just above).
+                    let symbol = property
+                        .source
+                        .and_then(|source| error.unbound_symbol(source))
+                        .map(ToOwned::to_owned);
+                    rejected.push(PropertyError {
+                        prop_id,
+                        name: property.name.to_owned(),
+                        error,
+                        symbol,
+                    });
+                }
             }
         }
 

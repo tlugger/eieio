@@ -121,10 +121,11 @@ fn a_property_that_does_not_compile_is_a_configuration_failure() {
         .err()
         .expect("the expression does not compile");
 
-    // The message names the property and EXPR §8's code. It does *not* name the offending
-    // symbol — it carries a span (`1..11`) instead, which a deployer would have to count
-    // characters to use. Filed as eieio-7d8.15; asserted here as it actually behaves,
-    // because a test that asserted the message it wished for would fail on the fix.
+    // The message names the property, EXPR §8's code, the span and — since eieio-7d8.15 —
+    // the symbol it could not bind, which is the part a deployer actually needs. Only the
+    // first two are asserted here: this test is about a property that fails to compile
+    // being a *configuration* rejection, and `crates/host-core/tests/prop.rs` is where the
+    // message's own content is pinned.
     let BlockError::Config(message) = &error else {
         panic!("expected a configuration rejection: {error:?}");
     };
