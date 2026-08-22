@@ -222,10 +222,17 @@ edit the vector to match what the code did. A conformance suite written by obser
 implementation asserts only that the implementation is self-consistent.
 
 In `cbor/`, one step more, because a rejecting vector asserts only *that* bytes are refused
-and so passes whatever it is refused for. **Check by hand that the bytes are well-formed
-CBOR and that the rule the vector names is the only thing wrong with them.** The failure
-this prevents is silent and permanent: a vector for rule 8 arrived in the first corpus with
-a text head claiming 24 bytes and carrying 20, so every decoder refused it as truncated and
-nothing was ever asserted about tags. Nothing mechanical catches that — it would take a
-second, permissive CBOR reader, and a check built on the strict decoder's first complaint
-would depend on the order that decoder happens to look in.
+and so passes whatever it is refused for. For a vector naming one of rules 1-9, **the bytes
+must be well-formed CBOR with nothing left over**, so that the rule named is the only thing
+wrong with them; rules 10 and 11 are exempt, being themselves rules about ill-formed and
+hostile-length bytes. This is checked mechanically, not by hand:
+`crates/signal/tests/support/permissive_cbor.rs` is a structural-only CBOR reader — it does
+not decode values or enforce a single canonical rule, so it cannot itself reject a vector
+for the thing the vector is testing — and `cbor_vectors.rs` runs it against every rejecting
+vector in scope. The failure this catches is silent and permanent otherwise: a vector for
+rule 8 arrived in the first corpus with a text head claiming 24 bytes and carrying 20, so
+every decoder refused it as truncated and nothing was ever asserted about tags. A check
+built on the strict decoder's own rejection reason would not have caught it either — that
+would depend on the order the strict decoder happens to look in — which is why the check is
+a second, narrowly-scoped reader rather than an assertion on `eio_signal`'s own error
+(eieio-7d8.30).

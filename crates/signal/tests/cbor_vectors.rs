@@ -27,6 +27,8 @@
 //! Two tests, kept apart for the reason the language runner gives: while a corpus is being
 //! written, a missing area should not drown out a real failure.
 
+#[path = "support/permissive_cbor.rs"]
+mod permissive_cbor;
 #[path = "../../expr/tests/support/vector_format.rs"]
 mod vector_format;
 
@@ -39,6 +41,16 @@ use vector_format::{VectorValue, hex, unhex};
 
 /// The eleven rules of §6.3.1, as the corpus numbers them.
 const RULES: std::ops::RangeInclusive<u8> = 1..=11;
+
+/// The rules whose rejecting vectors are *exempt* from the well-formedness check
+/// (eieio-7d8.30). Rules 10 and 11 are themselves rules about ill-formed and
+/// hostile-length bytes, so a vector written for one of them is supposed to fail
+/// `permissive_cbor::well_formed_single_item`, not pass it.
+///
+/// Stated as what is exempt rather than what is checked, because [`RULES`] is meant to
+/// grow: a twelfth rule is then guarded the moment it has a vector, where an inclusive
+/// range would have stopped short of it and said nothing.
+const ILL_FORMED_BY_DESIGN: [u8; 2] = [10, 11];
 
 /// Rule 6 — negative zero MUST be preserved — has no rejecting vector, and cannot.
 ///
@@ -159,12 +171,25 @@ fn vectors_pass() {
                 );
             }
             // What is deliberately *not* asserted here is why it was refused — §6.3.1 puts
-            // that beyond a conformance suite's reach. The corpus's own discipline, that a
-            // vector for a canonicity rule holds bytes well-formed enough that only the named
-            // rule is wrong with them, therefore has no mechanical guard: checking it needs a
-            // permissive CBOR reader this crate does not have and should not grow, and a check
-            // built on this decoder's *first* complaint would be a guarantee it cannot give
-            // (see `expr-tests/README.md`, "Adding vectors", and eieio-7d8.30).
+            // that beyond a conformance suite's reach. What *is* asserted, for every vector
+            // naming one of rules 1-9, is the corpus's other discipline: that the bytes are
+            // well-formed CBOR with nothing left over, so the named rule is the only thing
+            // wrong with them. A check built on this decoder's own rejection reason could not
+            // give that guarantee — it would depend on the order this particular decoder
+            // happens to look in — so it is `permissive_cbor`'s job instead (see that module's
+            // doc comment, `expr-tests/README.md`'s "Adding vectors", and eieio-7d8.30).
+            if vector
+                .rule
+                .iter()
+                .any(|rule| !ILL_FORMED_BY_DESIGN.contains(rule))
+                && let Err(reason) = permissive_cbor::well_formed_single_item(&bytes)
+            {
+                panic!(
+                    "{at}: bytes are not well-formed CBOR, so this vector asserts nothing \
+                     about rule {:?}: {reason}",
+                    vector.rule,
+                );
+            }
             continue;
         };
 
