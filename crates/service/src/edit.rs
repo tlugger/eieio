@@ -203,19 +203,36 @@ pub enum WriteError {
         /// The path that had none.
         path: PathBuf,
     },
-    /// The temporary file could not be written. The original at `path`, if any, is untouched.
+    /// The temporary file could not be written, or written but not made durable. The original
+    /// at `path`, if any, is untouched.
+    ///
+    /// Covers both a failure to create or write the temporary and a failure of the `sync_data`
+    /// that follows it (see [`write_and_sync_temporary`]) — from a caller's point of view both
+    /// mean the same thing: the bytes that were supposed to end up on the device before the
+    /// rename never got there, so the rename must not run.
     Temporary {
         /// The temporary file's own path — not `path`, which was never opened.
         path: PathBuf,
         /// What the filesystem said.
         source: io::Error,
     },
-    /// The temporary file was written but could not be renamed into place. The original at
-    /// `path` is untouched; the temporary is removed on a best-effort basis rather than left
-    /// beside it.
+    /// The temporary file was written and synced but could not be renamed into place. The
+    /// original at `path` is untouched; the temporary is removed on a best-effort basis rather
+    /// than left beside it.
     Rename {
         /// The path the write was replacing.
         path: PathBuf,
+        /// What the filesystem said.
+        source: io::Error,
+    },
+    /// The rename completed — `path` already holds the new content, and a reader opening it now
+    /// sees it — but syncing the directory that holds it afterward failed, so the *directory
+    /// entry* pointing at that content is not confirmed durable. Unlike every other variant
+    /// here, this one does not mean "nothing changed": there is nothing left to roll back, only
+    /// a caller who should know the crash guarantee did not fully land.
+    DirSync {
+        /// The directory `path` sits in — not `path` itself, which was never reopened.
+        dir: PathBuf,
         /// What the filesystem said.
         source: io::Error,
     },
@@ -238,6 +255,11 @@ impl fmt::Display for WriteError {
             WriteError::Rename { path, source } => {
                 write!(f, "replacing {}: {source}", path.display())
             }
+            WriteError::DirSync { dir, source } => write!(
+                f,
+                "the write replaced the file, but syncing {} to make that durable failed: {source}",
+                dir.display()
+            ),
         }
     }
 }
@@ -245,9 +267,9 @@ impl fmt::Display for WriteError {
 impl std::error::Error for WriteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            WriteError::Temporary { source, .. } | WriteError::Rename { source, .. } => {
-                Some(source)
-            }
+            WriteError::Temporary { source, .. }
+            | WriteError::Rename { source, .. }
+            | WriteError::DirSync { source, .. } => Some(source),
             WriteError::Invalid(_) | WriteError::NoFileName { .. } => None,
         }
     }
@@ -311,7 +333,8 @@ impl Document {
         parse(&self.render())
     }
 
-    /// Writes the file (SERVICE §9): checked, then replaced rather than truncated in place.
+    /// Writes the file (SERVICE §9): checked, then replaced rather than truncated in place, then
+    /// made durable.
     ///
     /// Runs [`check`](Self::check) first, then writes the rendered text to a temporary file
     /// beside `path` and renames it into place. A reader of `path` — including a person who has
@@ -323,6 +346,35 @@ impl Document {
     /// Designer's backend (DESIGNER §4) both call this rather than each carrying their own
     /// temp-file-plus-rename, which is what keeps "the write is atomic" one implementation
     /// instead of two that can quietly disagree.
+    ///
+    /// # Durability
+    ///
+    /// Atomicity alone says a reader sees the old file or the new one, never a half-written
+    /// one. It says nothing about a *crash*: POSIX does not guarantee that a renamed file's
+    /// content, or the rename itself, is on the device just because the calls returned, so an
+    /// OS-level crash or power failure between the write and the next flush can leave the
+    /// rename visible with truncated or empty content, or leave the rename undone entirely.
+    /// `write` closes both gaps, in this order:
+    ///
+    /// 1. The temporary file is synced (see [`write_and_sync_temporary`]) **before** the rename,
+    ///    so the new content is on the device before anything on disk can point at it.
+    /// 2. The temporary's parent directory is synced (see [`fsync_dir`]) **after** the rename,
+    ///    so the directory entry the rename just changed — the fact that `path` now names the
+    ///    new inode rather than the old one — is on the device too.
+    ///
+    /// The order is the whole guarantee, not an implementation detail: syncing the directory
+    /// first would let a crash before the temporary's own sync expose truncated content through
+    /// an already-durable name, and never syncing the directory at all would let a crash undo
+    /// the rename even though the content it pointed at was safely on disk. With both, in this
+    /// order, **`write` returning `Ok` implies the new content survives a crash** — the file at
+    /// `path` reads back exactly as `render()` produced it, or `write` had not returned yet.
+    ///
+    /// This last property is not something a unit test can force: simulating an OS crash
+    /// mid-syscall is out of reach for a test process, so nothing here proves durability the way
+    /// `tests/edit.rs`'s `a_write_that_cannot_finish_leaves_the_original_file_intact` proves
+    /// atomicity. The guarantee rests on `sync_data` and the directory `fsync` doing what they
+    /// are documented to do, not on a test — asserting otherwise would be exactly the vacuous
+    /// kind of test this codebase does not want.
     ///
     /// # Why `check` runs unconditionally
     ///
@@ -662,13 +714,17 @@ impl Document {
     }
 }
 
-/// Replaces `path`, rather than truncating and rewriting it (SERVICE §9.1).
+/// Replaces `path`, rather than truncating and rewriting it (SERVICE §9.1), durably.
 ///
 /// The file often belongs to a person who has it open in an editor, and a service file
 /// half-written by a process that died partway through is worse than a write that failed
 /// outright. A temporary file beside it and a rename makes the change all-or-nothing: a rename
 /// is atomic on every filesystem this targets, and the temporary sits in the *same* directory
 /// as `path` because a rename across filesystems is a copy, not an atom.
+///
+/// That much is atomicity. Durability across a crash is the two syncs bracketing the rename —
+/// [`write_and_sync_temporary`] before it, [`fsync_dir`] after — and `Document::write`'s doc
+/// comment is where the ordering is argued; this function is just where it is carried out.
 fn write_atomically(path: &Path, text: &str) -> Result<(), WriteError> {
     let name = path.file_name().ok_or_else(|| WriteError::NoFileName {
         path: path.to_path_buf(),
@@ -677,10 +733,12 @@ fn write_atomically(path: &Path, text: &str) -> Result<(), WriteError> {
     // collide with a real service file sitting in the same directory.
     let temporary = path.with_file_name(format!(".{}.eio-tmp", name.to_string_lossy()));
 
-    std::fs::write(&temporary, text).map_err(|source| WriteError::Temporary {
+    // 1. Get the new content onto the device before anything on disk can point at it.
+    write_and_sync_temporary(&temporary, text).map_err(|source| WriteError::Temporary {
         path: temporary.clone(),
         source,
     })?;
+
     std::fs::rename(&temporary, path).map_err(|source| {
         // Best-effort: the rename already failed, and a stray temporary is a smaller problem
         // than reporting the wrong one because cleanup itself failed.
@@ -689,7 +747,75 @@ fn write_atomically(path: &Path, text: &str) -> Result<(), WriteError> {
             path: path.to_path_buf(),
             source,
         }
+    })?;
+
+    // 2. The rename above already took effect — a reader of `path` sees the new content from
+    // this point on, whatever happens next. What is not yet durable is the directory entry
+    // itself, so this syncs `path`'s parent rather than `path`: `path` is a regular file with
+    // no data of its own left to flush, and a plain `File::open(path).sync_all()` would not
+    // touch the directory's entry at all.
+    //
+    // `Path::parent` on a bare filename like `"kitchen.toml"` returns `Some("")` rather than
+    // `None` — `""` is not a directory a `File::open` accepts, so an empty parent is treated as
+    // "here" (`.`) instead.
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fsync_dir(parent).map_err(|source| WriteError::DirSync {
+        dir: parent.to_path_buf(),
+        source,
     })
+}
+
+/// Writes `text` to `temporary`, replacing whatever was there, and syncs it before returning.
+///
+/// # `sync_data`, not `sync_all`
+///
+/// [`std::fs::File::sync_data`] (POSIX `fdatasync`) flushes the file's content and whatever
+/// metadata is needed to read that content back correctly — for a file whose size just changed,
+/// that includes the size. [`std::fs::File::sync_all`] (`fsync`) would additionally flush
+/// metadata nothing here ever reads back: the temporary's own timestamps and permission bits are
+/// never consulted — the file is renamed over `path` immediately after this returns, at which
+/// point only its content matters (the directory entry the rename changes is synced separately,
+/// see [`fsync_dir`]). `write` runs on every mutating `eio service` command (SERVICE §9.1), so
+/// skipping a metadata flush nothing downstream reads is a real, if platform-dependent, saving
+/// with no loss of the guarantee this function exists to provide.
+fn write_and_sync_temporary(temporary: &Path, text: &str) -> io::Result<()> {
+    let mut file = std::fs::File::create(temporary)?;
+    io::Write::write_all(&mut file, text.as_bytes())?;
+    file.sync_data()
+}
+
+/// Fsyncs the directory at `dir` itself, so a rename that changed one of its entries is durable
+/// and not just visible.
+///
+/// A rename is atomic — a reader never sees a half-written file — but the *entry* it changed
+/// lives in the directory's own on-disk data, not the renamed file's, and a filesystem is free
+/// to make the entry change durable on its own schedule unless asked. Without this, a crash
+/// after [`write_and_sync_temporary`]'s sync and the rename can still lose the rename itself,
+/// leaving `path` pointing at the old content (or, on some filesystems, at nothing) once the
+/// device comes back up — exactly the gap this issue was filed about.
+///
+/// Unix only. Opening a directory as a [`std::fs::File`] purely to call `sync_all` on its
+/// descriptor is a standard POSIX idiom and `std::fs::File::open` supports it on unix targets;
+/// Windows' `CreateFileW` refuses a directory handle without `FILE_FLAG_BACKUP_SEMANTICS`, which
+/// `std` does not set and which this crate has no `std`-only way to request without a
+/// third-party dependency. Rather than let a Windows build either fail every write on an
+/// unopenable handle or fake success, this is a **documented** no-op there: on a non-unix
+/// target, `Document::write`'s durability guarantee narrows to "the temporary file's own
+/// content is durable before the rename" and the directory-entry half is not covered. That is
+/// the same gap this issue exists to close, scoped explicitly to a platform this crate cannot
+/// close it on without adding a dependency — not silently absent, which is what made the
+/// original bug worth filing.
+#[cfg(unix)]
+fn fsync_dir(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn fsync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// The `blocks` table, created implicit so a file with instances has no bare `[blocks]` header.
