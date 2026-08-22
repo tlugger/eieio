@@ -195,7 +195,7 @@ The CBOR document passed to `eio_configure`. Properties are NOT included (they a
   "props":   [tstr],            ; property names; index in array = prop_id
   "limits": {
     "max_payload": uint,        ; largest (ptr,len) the host will accept or deliver
-    "max_batch": uint           ; largest signal count per batch
+    "max_batch": uint           ; largest signal count in a DELIVERED batch
   }
 }
 ```
@@ -395,6 +395,7 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 5. `eio_alloc` returning 0 = allocation failure; a guest failing to allocate SHOULD return an error status rather than trap where possible. The same applies in the other direction: a host that cannot allocate an **inbound** payload because the guest refused MUST NOT kill the instance. The delivery fails and is reported as `ERR_LIMIT`, counted like any other block-level error (§8) — a guest that is briefly out of memory has told the truth about itself, and killing it for that would make a transient memory spike fatal.
 6. Alignment: `eio_alloc` MUST return 8-byte-aligned pointers. A pointer that is misaligned, zero-but-nonzero-length, or outside linear memory is a *different* matter from a refusal: the guest has told the host something untrue about its own memory, nothing the host does next is trustworthy, and the instance MUST be discarded.
 7. `max_payload` (instance descriptor): host rejects `emit` beyond it with `ERR_LIMIT` and never delivers batches beyond it. Discoverable, so MCU limits are visible to blocks and to deploy-time validation. Both it and `max_batch` are host configuration with **no floor**: a block reads them from its descriptor and may assume nothing about their size (SCOPE §3.4 OPEN).
+8. `max_batch` bounds the batches a host **delivers** to a guest, and only those. It does **not** bound emission: a block MAY emit a batch carrying more signals than `max_batch`, and the host routes it. §6.2's three refusals stay the whole list — a fourth would make the one answer §6.2 fixes vary by host, and a guest-side check would report a code no host produced. The asymmetry is deliberate: `max_payload` is about bytes the host must hold, which it must refuse in both directions, while a signal *count* costs the host nothing on the way out. Pinned by `30_emit_exceeds_max_batch`.
 
 ---
 
