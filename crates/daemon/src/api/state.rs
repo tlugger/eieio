@@ -23,12 +23,14 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use base64::Engine as _;
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::api::error::{ApiError, Kind};
 use crate::boot;
+use crate::node::Node;
 
 /// What one block instance has in `eio:state` (DAEMON §9, ABI §7.2).
 #[derive(Debug, Serialize, ToSchema)]
@@ -146,4 +148,217 @@ fn entry((key, value): (Vec<u8>, Vec<u8>)) -> Entry {
         value_base64: base64.encode(&value),
         size: value.len(),
     }
+}
+
+/// A namespace DAEMON §10's "nothing garbage-collects a namespace" has left behind.
+///
+/// A pair the store holds that no service file on this node currently declares — an id
+/// removed from a file that is still here, or a whole file that is not, either way state a
+/// block can no longer reach through `eio:state`. Listed, never touched: `GET /state/orphans`
+/// only ever reports; `DELETE /state/orphans/{namespace}` is the one operation that reclaims,
+/// and it is never implicit (DAEMON §10, eieio-8yq.13).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct Orphan {
+    /// The service half of the namespace — the name state was written under, whether or not a
+    /// file by that name exists on this node any more.
+    pub service: String,
+    /// The instance id that wrote this state, no longer declared by any current service file.
+    pub instance: String,
+    /// The `{namespace}` segment `DELETE /state/orphans/{namespace}` takes to reclaim exactly
+    /// this one.
+    pub namespace: String,
+    /// How many keys this namespace holds.
+    pub keys: usize,
+}
+
+/// The separator [`encode_namespace`] and [`decode_namespace`] agree on.
+///
+/// SERVICE §2.1's id pattern — which both a service's name and a block instance's id follow
+/// (`eio_service::id::ID_PATTERN`) — is `[a-z0-9][a-z0-9_-]*`: lowercase, digits, `_` and `-`
+/// only. `:` is outside that alphabet on both sides of it, so it cannot appear inside a
+/// service name or an instance id, which is what makes splitting on the *first* one
+/// unambiguous rather than a guess.
+const NAMESPACE_SEPARATOR: char = ':';
+
+/// Composes the `{namespace}` path segment for a `(service, instance)` pair.
+fn encode_namespace(service: &str, instance: &str) -> String {
+    format!("{service}{NAMESPACE_SEPARATOR}{instance}")
+}
+
+/// The inverse of [`encode_namespace`], and the path's only line of defence.
+///
+/// Both halves are checked against SERVICE §2.1's id pattern before either is trusted with a
+/// filesystem lookup — the same rule [`crate::blocks::Cache`]'s `is_component` enforces for a
+/// block reference's path components, applied here because a namespace segment ends up in
+/// exactly the same place: joined onto a directory. The id pattern is stricter than
+/// `is_component` needs to be (lowercase only, no `.` at all), so nothing resembling `.`,
+/// `..`, a path separator, a NUL byte or a shell-meaningful character survives it — a `service`
+/// or `instance` this returns is always safe to hand to [`boot::service_path`] and to
+/// [`crate::state::Store`]'s namespace composition.
+///
+/// Rejects a segment with no separator, an empty half, or a half that is not one valid id —
+/// which also rejects a segment carrying a *second* separator, since the trailing half of a
+/// `split_once` includes everything after the first `:` and a `:` is not a character either
+/// half's pattern admits.
+fn decode_namespace(namespace: &str) -> Option<(&str, &str)> {
+    let (service, instance) = namespace.split_once(NAMESPACE_SEPARATOR)?;
+    (eio_service::id::is_id(service) && eio_service::id::is_id(instance))
+        .then_some((service, instance))
+}
+
+/// Whether `service`'s *current* file on this node declares `instance` (DAEMON §10's orphan
+/// rule).
+///
+/// Reads the file straight off disk, exactly as [`instance_state`] does, rather than asking
+/// the running graph: a stopped service still has its file, and its file still declares its
+/// instances, so "not running" must never read as "not declared". Three answers, in order of
+/// how sure they are:
+///
+/// - **No file at all** — the service has been deleted, or renamed. Nothing declares this
+///   instance, so this is the clear, positive half of "orphan".
+/// - **A file that will not parse** — this daemon cannot currently say what it declares. That
+///   is not the same as declaring nothing, so this reports "declared" rather than guess: an
+///   operator mid-typo should not have this offer to delete state out from under them the
+///   moment their editor autosaves.
+/// - **A file that parses** — the file's own `blocks` table is the answer.
+fn declared(node: &Node, service: &str, instance: &str) -> bool {
+    let Some(path) = boot::service_path(node, service) else {
+        // Not a valid service name (should not happen: only ids that were once valid ever made
+        // it into the store) — unknown, so conservatively "declared".
+        return true;
+    };
+    match std::fs::read_to_string(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+        Ok(definition) => match eio_service::parse(&definition) {
+            Ok(parsed) => parsed.service.blocks.contains_key(instance),
+            Err(_) => true,
+        },
+    }
+}
+
+/// Every namespace this node's state store holds that no service file currently declares.
+///
+/// DAEMON §10's safe default — nothing ever garbage-collects a namespace on its own — means a
+/// node accumulates these with no way to see them short of reading `state.redb` directly. This
+/// is that way: a scan of the store, each pair checked against the service files actually on
+/// disk right now, the same read [`instance_state`] performs one instance at a time.
+///
+/// A namespace a *stopped* service declares does not appear here — stopping does not undeclare
+/// an instance, only running does that, so its state is exactly as reachable as it was before
+/// it stopped. What appears here is state an id removed from its file, or a deleted service,
+/// has stranded.
+#[utoipa::path(
+    get,
+    path = "/state/orphans",
+    tag = "state",
+    responses(
+        (status = 200, description = "Namespaces claimed by no service file this node currently has", body = Vec<Orphan>),
+        (status = 401, description = "Missing or wrong bearer token", body = ApiError),
+        (status = 500, description = "The state store could not be read", body = ApiError),
+    ),
+)]
+pub async fn orphans(
+    State(shared): State<crate::api::State>,
+) -> Result<Json<Vec<Orphan>>, ApiError> {
+    let namespaces = shared.executor.state().namespaces().map_err(|error| {
+        ApiError::new(
+            Kind::Internal,
+            format!("scanning the state store: {error:#}"),
+        )
+    })?;
+
+    let mut orphans = Vec::new();
+    for (service, instance) in namespaces {
+        if declared(&shared.node, &service, &instance) {
+            continue;
+        }
+        let keys = shared
+            .executor
+            .state()
+            .entries(&service, &instance)
+            .map_err(|error| {
+                ApiError::new(
+                    Kind::Internal,
+                    format!("reading the state of `{service}:{instance}`: {error:#}"),
+                )
+            })?
+            .len();
+        orphans.push(Orphan {
+            namespace: encode_namespace(&service, &instance),
+            service,
+            instance,
+            keys,
+        });
+    }
+    Ok(Json(orphans))
+}
+
+/// Reclaims exactly one orphaned namespace — the escape hatch for DAEMON §10's safe default.
+///
+/// **This is the only operation that ever deletes a namespace.** Deleting a service, editing
+/// its file to drop an instance, restarting, and rebooting the node all leave state where it
+/// is; only this endpoint, named at exactly one namespace, removes anything. That is the whole
+/// point of eieio-8yq.13: the default stays safe, and reclaiming becomes possible instead of
+/// requiring a hand edit of `state.redb`.
+///
+/// Refuses — deleting nothing — when `{namespace}` does not parse into a `service:instance`
+/// pair of valid ids, and refuses again, for a different reason, when it does but a service
+/// file on this node currently declares that instance: that is live state, not an orphan, and
+/// an API that let a typo delete it would be exactly the accident this default exists to
+/// prevent.
+#[utoipa::path(
+    delete,
+    path = "/state/orphans/{namespace}",
+    tag = "state",
+    params(
+        ("namespace" = String, Path, description = "A namespace from GET /state/orphans, as `service:instance`"),
+    ),
+    responses(
+        (status = 204, description = "The namespace's keys are gone"),
+        (status = 401, description = "Missing or wrong bearer token", body = ApiError),
+        (status = 404, description = "Not a namespace this store holds", body = ApiError),
+        (status = 422, description = "A service file on this node declares that instance; it is not an orphan", body = ApiError),
+        (status = 500, description = "The state store could not be written", body = ApiError),
+    ),
+)]
+pub async fn reclaim(
+    State(shared): State<crate::api::State>,
+    Path(namespace): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let Some((service, instance)) = decode_namespace(&namespace) else {
+        return Err(ApiError::new(
+            Kind::NotFound,
+            format!("`{namespace}` is not a `service:instance` namespace"),
+        ));
+    };
+
+    if declared(&shared.node, service, instance) {
+        return Err(ApiError::new(
+            Kind::Invalid,
+            format!(
+                "`{namespace}` is declared by service `{service}`'s current file; it is live \
+                 state, not an orphan, and this endpoint only reclaims orphans"
+            ),
+        ));
+    }
+
+    let removed = shared
+        .executor
+        .state()
+        .clear_namespace(service, instance)
+        .map_err(|error| {
+            ApiError::new(
+                Kind::Internal,
+                format!("reclaiming `{namespace}`: {error:#}"),
+            )
+        })?;
+
+    if removed == 0 {
+        return Err(ApiError::new(
+            Kind::NotFound,
+            format!("this node's state store holds no namespace `{namespace}`"),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }

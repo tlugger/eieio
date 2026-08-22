@@ -31,7 +31,10 @@ pub enum Kind {
     NotFound,
     /// The request body is not what the endpoint takes.
     BadRequest,
-    /// A service definition did not validate (SERVICE §7, §9.3).
+    /// The request is understood and well-formed, but what it asks for cannot be granted: a
+    /// service definition that did not validate (SERVICE §7, §9.3), a tap naming a connection
+    /// its service does not declare, a `DELETE /state/orphans/{namespace}` naming one a
+    /// service still declares (DAEMON §10) — refused rather than silently ignored or applied.
     Invalid,
     /// A block reference did not resolve and could not be pulled (§4.1).
     Unresolvable,

@@ -37,7 +37,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use eio_host_core::{StateError, StateStore};
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 /// The one table, keyed `(service, instance, key)` (DAEMON §10).
 ///
@@ -139,6 +139,77 @@ impl Store {
             entries.push((row_key.to_vec(), value.value().to_vec()));
         }
         Ok(entries)
+    }
+
+    /// Every distinct `(service, instance)` namespace this node's store holds, in key order.
+    ///
+    /// DAEMON §9's orphan-discovery endpoint scans this and asks, for each pair, whether any
+    /// service file on the node still declares it — a question this method does not answer:
+    /// it reports what the store *has*, not what is orphaned, so that "what does the store
+    /// hold" and "what is still declared" stay two separate, separately testable questions.
+    ///
+    /// One pass over the whole table: rows for one namespace are contiguous (the same
+    /// property [`Store::entries`]'s scan relies on), so consecutive duplicates are the only
+    /// ones to fold, and a `HashSet` would buy nothing a comparison against the last pushed
+    /// pair does not already give for free.
+    pub fn namespaces(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let read = self.db.begin_read()?;
+        let table = match read.open_table(STATE) {
+            Ok(table) => table,
+            // Nothing has ever been written on this node: no namespaces at all.
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut namespaces: Vec<(String, String)> = Vec::new();
+        for row in table.range::<(&str, &str, &[u8])>(..)? {
+            let (key, _value) = row?;
+            let (service, instance, _key) = key.value();
+            let is_new = !matches!(
+                namespaces.last(),
+                Some((last_service, last_instance))
+                    if last_service == service && last_instance == instance
+            );
+            if is_new {
+                namespaces.push((String::from(service), String::from(instance)));
+            }
+        }
+        Ok(namespaces)
+    }
+
+    /// Deletes every key in one namespace, in a single write transaction, and reports how many
+    /// there were (DAEMON §9's `DELETE /state/orphans/{namespace}`, §10).
+    ///
+    /// **This performs no check that the namespace is safe to reclaim.** DAEMON §10 is explicit
+    /// that reclaiming a namespace is never a side effect of anything else, so the one place
+    /// that decides "is this actually orphaned" is the API handler, before it calls this — the
+    /// same separation [`Store::namespaces`] keeps between "what exists" and "what is orphaned".
+    /// A caller reaching this method has already made that call.
+    pub fn clear_namespace(&self, service: &str, instance: &str) -> anyhow::Result<usize> {
+        let transaction = self.db.begin_write()?;
+        let removed;
+        {
+            let mut table = transaction.open_table(STATE)?;
+            // Collected before any removal, for the reason `entries` collects rather than
+            // deletes while iterating: the range's borrow of `table` has to end before
+            // `remove` can borrow it mutably.
+            let mut keys: Vec<Vec<u8>> = Vec::new();
+            let from = (service, instance, [].as_slice());
+            for row in table.range(from..)? {
+                let (key, _value) = row?;
+                let (row_service, row_instance, row_key) = key.value();
+                if row_service != service || row_instance != instance {
+                    break;
+                }
+                keys.push(row_key.to_vec());
+            }
+            removed = keys.len();
+            for key in &keys {
+                table.remove((service, instance, key.as_slice()))?;
+            }
+        }
+        transaction.commit()?;
+        Ok(removed)
     }
 }
 
@@ -422,6 +493,107 @@ mod tests {
             std::fs::read(&path).expect("still there"),
             b"this is not a redb file",
             "and the file was left alone"
+        );
+    }
+
+    #[test]
+    fn namespaces_lists_every_distinct_pair_once() {
+        // The scan DAEMON §9's orphan-discovery endpoint runs. Two keys under one namespace
+        // fold into one entry; a service with no state contributes none.
+        let (_, store) = on_disk("state-namespaces");
+        store
+            .namespace("kitchen", "a1")
+            .put(b"count", b"1")
+            .expect("write");
+        store
+            .namespace("kitchen", "a1")
+            .put(b"other", b"2")
+            .expect("write");
+        store
+            .namespace("kitchen", "a2")
+            .put(b"count", b"3")
+            .expect("write");
+        store
+            .namespace("garage", "b1")
+            .put(b"count", b"4")
+            .expect("write");
+
+        assert_eq!(
+            store.namespaces().expect("a scan"),
+            vec![
+                (String::from("garage"), String::from("b1")),
+                (String::from("kitchen"), String::from("a1")),
+                (String::from("kitchen"), String::from("a2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_untouched_store_has_no_namespaces() {
+        let (_, store) = on_disk("state-namespaces-empty");
+        assert_eq!(store.namespaces().expect("a scan"), vec![]);
+    }
+
+    #[test]
+    fn clear_namespace_removes_only_its_own_keys_and_reports_the_count() {
+        // The reclaim DAEMON §9's `DELETE /state/orphans/{namespace}` performs. A neighbour
+        // sharing the service, and one sharing the instance id in a different service, are
+        // both the traps `namespace`'s key composition exists to make unconstructible — so
+        // this is `a_value_written_by_one_instance_is_invisible_to_another`'s namespacing,
+        // checked from the deleting side instead of the reading one.
+        let (_, store) = on_disk("state-clear");
+        store
+            .namespace("kitchen", "a1")
+            .put(b"count", b"1")
+            .expect("write");
+        store
+            .namespace("kitchen", "a1")
+            .put(b"other", b"2")
+            .expect("write");
+        store
+            .namespace("kitchen", "a2")
+            .put(b"count", b"3")
+            .expect("write");
+        store
+            .namespace("garage", "a1")
+            .put(b"count", b"4")
+            .expect("write");
+
+        let removed = store
+            .clear_namespace("kitchen", "a1")
+            .expect("the reclaim commits");
+        assert_eq!(removed, 2, "both of kitchen/a1's keys");
+
+        assert_eq!(store.entries("kitchen", "a1").expect("a scan"), vec![]);
+        assert_eq!(
+            store.entries("kitchen", "a2").expect("a scan"),
+            vec![(b"count".to_vec(), b"3".to_vec())],
+            "a neighbour sharing the service must survive"
+        );
+        assert_eq!(
+            store.entries("garage", "a1").expect("a scan"),
+            vec![(b"count".to_vec(), b"4".to_vec())],
+            "a neighbour sharing the instance id in a different service must survive"
+        );
+    }
+
+    #[test]
+    fn clearing_a_namespace_with_nothing_in_it_removes_nothing() {
+        let (_, store) = on_disk("state-clear-empty");
+        store
+            .namespace("kitchen", "a1")
+            .put(b"count", b"1")
+            .expect("write");
+        assert_eq!(
+            store
+                .clear_namespace("kitchen", "nobody")
+                .expect("the reclaim commits"),
+            0
+        );
+        // And it left the store's one real namespace alone.
+        assert_eq!(
+            store.entries("kitchen", "a1").expect("a scan"),
+            vec![(b"count".to_vec(), b"1".to_vec())]
         );
     }
 }

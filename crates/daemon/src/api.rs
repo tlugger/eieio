@@ -119,6 +119,12 @@ pub fn routes() -> Vec<Route> {
             "/services/{service}/state/{instance}",
             get(state::instance_state),
         ),
+        (&["GET"], "/state/orphans", get(state::orphans)),
+        (
+            &["DELETE"],
+            "/state/orphans/{namespace}",
+            axum::routing::delete(state::reclaim),
+        ),
         (
             &["GET", "POST"],
             "/taps",

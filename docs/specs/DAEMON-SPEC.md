@@ -401,6 +401,8 @@ POST   /services/{s}/start            load from file and start
 POST   /services/{s}/stop             stop, keep the definition
 POST   /services/{s}/reload           re-read the file and apply it (§9.4)
 GET    /services/{s}/state/{i}        what instance {i} has in eio:state (§10)
+GET    /state/orphans                 namespaces no declared instance claims (§10)
+DELETE /state/orphans/{namespace}     reclaim exactly one, on purpose (§10)
 POST   /taps                          {service, connection} -> tap_id (§9.6)
 GET    /taps                          the taps this node is holding
 GET    /taps/{id}/stream              SSE: signals and expr failures (§9.6)
@@ -489,7 +491,11 @@ ABI §7.2 describes the scoping as `system/service/instance`. A node implements 
 - **The fsync is inside the guest's callback.** `state_put` is synchronous (§7.2 gives `eio:state` no completion callback), so the commit spends the callback's ABI §10 wall-clock deadline. A block writing on every signal faster than its deadline can absorb wants a larger deadline or fewer writes. The alternatives are worse: a background flush would make "durable" mean "probably", and an async commit would make `eio:state` a callback-shaped capability the ABI says it is not.
 - **Writers serialize.** redb admits one write transaction at a time, so two instances putting concurrently queue — each on its own thread (§5), never on the reactor.
 
-**Nothing garbage-collects a namespace.** An instance removed from a service file, or a service deleted, leaves its keys where they are. That is the safe default — a deploy that renamed an id would otherwise silently discard state a block is about to want, and state is the one thing on a node that cannot be rebuilt from a file — and reclaiming it deliberately is a management operation this specification does not yet have.
+**Nothing garbage-collects a namespace.** An instance removed from a service file, or a service deleted, leaves its keys where they are. That is the safe default — a deploy that renamed an id would otherwise silently discard state a block is about to want, and state is the one thing on a node that cannot be rebuilt from a file — and it stays the default: **nothing removes a namespace as a side effect.** Not deleting a service, not editing or reloading a service file, not a restart, not a reboot.
+
+§9's `DELETE /state/orphans/{namespace}` is the one operation that removes one, and it removes only what is named. An **orphan** is a namespace no *currently declared* instance in any service file on the node claims — a service that is merely stopped still declares its instances, so its namespaces are never orphans, and neither are those of a service whose file cannot be parsed, since a file that will not parse cannot be read as declaring nothing. Both are deliberately conservative: the failure that matters here is offering to delete live state, not declining to offer.
+
+`{namespace}` is `service:instance`, both SERVICE §2.1 ids joined on the one separator neither alphabet admits, so the segment cannot name a path. A `DELETE` naming a namespace some service still declares is refused rather than performed — an endpoint that destroys the one unrebuildable thing on a node must not do it on a typo.
 
 `dev run-block` (§12) gets the same store over an in-memory backend: the same table, the same keys, the same transactions, nothing persisted. One implementation, because a second one would be a second answer to what `eio:state` does — and the fast loop would be exercising it instead of the real one.
 

@@ -1290,3 +1290,304 @@ async fn an_instances_state_is_readable_through_the_api() {
     let unauthorized = harness.get_with("/services/tally/state/t1", None).await;
     assert_eq!(unauthorized.status, 401);
 }
+
+#[tokio::test]
+async fn orphans_lists_undeclared_namespaces_and_not_a_stopped_services() {
+    // DAEMON §9's discovery endpoint, and §10's distinction it exists to draw: "declared" is a
+    // question about the service *file*, never about whether anything is running. `kitchen` is
+    // stopped and still declares `a1`, so `a1` must not appear; `kitchen` no longer declares
+    // `removed`, and no file at all declares `ghost/g1` — both must.
+    let harness = Harness::start("api-state-orphans-list").await;
+    write_service(
+        &harness.root,
+        "kitchen",
+        "name = \"kitchen\"\nautostart = false\n\n\
+         [blocks.a1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.a1.props]\nval = \"(+ $n 1)\"\n",
+    );
+
+    {
+        use eio_host_core::StateStore as _;
+        let store = harness.shared.executor.state();
+        store
+            .namespace("kitchen", "a1")
+            .put(b"count", b"1")
+            .expect("write");
+        // `kitchen` exists, but its file has never declared `removed` — the instance-removed
+        // case DAEMON §10 names.
+        store
+            .namespace("kitchen", "removed")
+            .put(b"count", b"2")
+            .expect("write");
+        // No `ghost.toml` has ever existed — the whole-service-deleted case.
+        store
+            .namespace("ghost", "g1")
+            .put(b"count", b"3")
+            .expect("write");
+    }
+
+    let orphans = harness.get("/state/orphans").await.json();
+    let orphans = orphans.as_array().expect("an array");
+    let found: std::collections::BTreeSet<(String, String)> = orphans
+        .iter()
+        .map(|entry| {
+            (
+                entry["service"].as_str().unwrap().to_string(),
+                entry["instance"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+
+    assert!(
+        !found.contains(&(String::from("kitchen"), String::from("a1"))),
+        "a stopped-but-declared instance is not an orphan: {orphans:?}"
+    );
+    assert!(
+        found.contains(&(String::from("kitchen"), String::from("removed"))),
+        "an id no longer in its service's file is an orphan: {orphans:?}"
+    );
+    assert!(
+        found.contains(&(String::from("ghost"), String::from("g1"))),
+        "a namespace whose service has no file at all is an orphan: {orphans:?}"
+    );
+
+    // The namespace segment is what DELETE takes, and the key count is what it holds.
+    let ghost = orphans
+        .iter()
+        .find(|entry| entry["service"] == "ghost")
+        .expect("ghost is listed");
+    assert_eq!(ghost["namespace"], "ghost:g1");
+    assert_eq!(ghost["keys"], 1);
+
+    // Guarded like everything else (§9.1).
+    let unauthorized = harness.get_with("/state/orphans", None).await;
+    assert_eq!(unauthorized.status, 401);
+}
+
+#[tokio::test]
+async fn stopping_or_reloading_a_service_never_orphans_its_declared_instances() {
+    // The safe default's other face: an instance is undeclared only by its *file* changing, not
+    // by anything happening to the running graph. Starting, stopping and reloading a service
+    // that still declares the same instance must never make `GET /state/orphans` list it.
+    let harness = Harness::start("api-state-orphans-lifecycle").await;
+    write_service(
+        &harness.root,
+        "kitchen",
+        "name = \"kitchen\"\nautostart = true\n\n\
+         [blocks.a1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.a1.props]\nval = \"(+ $n 1)\"\n",
+    );
+    assert_eq!(
+        harness.post("/services/kitchen/start").await.status,
+        200,
+        "kitchen starts"
+    );
+
+    {
+        use eio_host_core::StateStore as _;
+        harness
+            .shared
+            .executor
+            .state()
+            .namespace("kitchen", "a1")
+            .put(b"count", b"1")
+            .expect("write");
+    }
+
+    async fn is_orphaned(harness: &Harness) -> bool {
+        harness
+            .get("/state/orphans")
+            .await
+            .json()
+            .as_array()
+            .expect("an array")
+            .iter()
+            .any(|entry| entry["service"] == "kitchen" && entry["instance"] == "a1")
+    }
+
+    assert!(
+        !is_orphaned(&harness).await,
+        "running and declared: not an orphan"
+    );
+
+    assert_eq!(harness.post("/services/kitchen/stop").await.status, 200);
+    assert!(
+        !is_orphaned(&harness).await,
+        "stopped, but its file still declares a1: not an orphan"
+    );
+
+    assert_eq!(harness.post("/services/kitchen/reload").await.status, 200);
+    assert!(
+        !is_orphaned(&harness).await,
+        "reloaded from the same file: still not an orphan"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_service_leaves_its_state_intact() {
+    // DAEMON §10's safe default, stated as a test: a service disappearing — its file removed
+    // out from under a running node, the case §10 names as "a service deleted" — must not
+    // touch a single byte of what it wrote. Nothing except `DELETE /state/orphans/{namespace}`
+    // may ever remove a key, and this test never calls it.
+    let harness = Harness::start("api-state-orphans-safe-default").await;
+    write_service(
+        &harness.root,
+        "kitchen",
+        "name = \"kitchen\"\nautostart = false\n\n\
+         [blocks.a1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.a1.props]\nval = \"(+ $n 1)\"\n",
+    );
+    {
+        use eio_host_core::StateStore as _;
+        harness
+            .shared
+            .executor
+            .state()
+            .namespace("kitchen", "a1")
+            .put(b"count", b"41")
+            .expect("write");
+    }
+    assert_eq!(
+        harness
+            .shared
+            .executor
+            .state()
+            .entries("kitchen", "a1")
+            .expect("a scan"),
+        vec![(b"count".to_vec(), b"41".to_vec())]
+    );
+
+    // The service is deleted: its file goes away.
+    std::fs::remove_file(harness.root.join("services").join("kitchen.toml"))
+        .expect("removing the file");
+
+    // Its keys are exactly as they were.
+    assert_eq!(
+        harness
+            .shared
+            .executor
+            .state()
+            .entries("kitchen", "a1")
+            .expect("a scan"),
+        vec![(b"count".to_vec(), b"41".to_vec())],
+        "a deleted service must not have touched its own state"
+    );
+    // And it is now discoverable as an orphan, which is the whole point of surfacing it rather
+    // than only refusing to lose it.
+    let orphans = harness.get("/state/orphans").await.json();
+    assert!(
+        orphans
+            .as_array()
+            .expect("an array")
+            .iter()
+            .any(|entry| entry["service"] == "kitchen" && entry["instance"] == "a1"),
+        "the now-fileless service's state is a discoverable orphan: {orphans}"
+    );
+}
+
+#[tokio::test]
+async fn delete_orphans_reclaims_an_orphan_and_refuses_a_declared_namespace() {
+    // The one place DAEMON §10's escape hatch lives, and the one thing it must never do: turn
+    // an ordinary operation into a deletion. Only this endpoint, named at exactly one
+    // namespace, may remove a key.
+    let harness = Harness::start("api-state-orphans-delete").await;
+    write_service(
+        &harness.root,
+        "kitchen",
+        "name = \"kitchen\"\nautostart = false\n\n\
+         [blocks.a1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.a1.props]\nval = \"(+ $n 1)\"\n",
+    );
+    {
+        use eio_host_core::StateStore as _;
+        let store = harness.shared.executor.state();
+        store
+            .namespace("kitchen", "a1")
+            .put(b"count", b"1")
+            .expect("write");
+        store
+            .namespace("kitchen", "removed")
+            .put(b"count", b"2")
+            .expect("write");
+    }
+
+    // Refusing a namespace a service still declares — the invariant a typo must not defeat.
+    let refused = harness.delete("/state/orphans/kitchen:a1").await;
+    assert_eq!(
+        refused.status, 422,
+        "a declared namespace is not reclaimable: {}",
+        refused.body
+    );
+    assert_eq!(refused.json()["error"], "invalid");
+    let message = refused.json()["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("kitchen:a1") && message.contains("live"),
+        "the refusal names the namespace and says why: {message}"
+    );
+    // And it is still exactly there.
+    assert_eq!(
+        harness
+            .shared
+            .executor
+            .state()
+            .entries("kitchen", "a1")
+            .expect("a scan"),
+        vec![(b"count".to_vec(), b"1".to_vec())],
+        "refusing must not have deleted anything"
+    );
+
+    // Reclaiming the orphan actually reclaims it.
+    let reclaimed = harness.delete("/state/orphans/kitchen:removed").await;
+    assert_eq!(reclaimed.status, 204, "{}", reclaimed.body);
+    assert_eq!(
+        harness
+            .shared
+            .executor
+            .state()
+            .entries("kitchen", "removed")
+            .expect("a scan"),
+        vec![],
+        "reclaimed means gone"
+    );
+    // The neighbour sharing the service is untouched.
+    assert_eq!(
+        harness
+            .shared
+            .executor
+            .state()
+            .entries("kitchen", "a1")
+            .expect("a scan"),
+        vec![(b"count".to_vec(), b"1".to_vec())]
+    );
+
+    // Reclaiming it again finds nothing to reclaim.
+    let again = harness.delete("/state/orphans/kitchen:removed").await;
+    assert_eq!(again.status, 404, "{}", again.body);
+
+    // A namespace this store never held, and a namespace that is not shaped like one at all,
+    // are both `404` rather than treated as reclaimable-by-default.
+    let never_existed = harness.delete("/state/orphans/nobody:home").await;
+    assert_eq!(never_existed.status, 404, "{}", never_existed.body);
+
+    let malformed = harness.delete("/state/orphans/not-a-namespace").await;
+    assert_eq!(
+        malformed.status, 404,
+        "no separator at all: {}",
+        malformed.body
+    );
+
+    // A path-traversal attempt fails `is_id` on both halves and is refused the same way, not
+    // treated as a filesystem path (blocks.rs's `is_component` guards the same class of input
+    // for a block reference; this is the same defence applied to a namespace segment).
+    let traversal = harness.delete("/state/orphans/..:..").await;
+    assert_eq!(traversal.status, 404, "{}", traversal.body);
+
+    // Guarded like everything else (§9.1).
+    let unauthorized = harness
+        .unauthenticated_delete("/state/orphans/kitchen:a1")
+        .await;
+    assert_eq!(unauthorized.status, 401);
+}
