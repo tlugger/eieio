@@ -1141,57 +1141,15 @@ mod tests {
         .expect("core WASM is what this host runs");
     }
 
-    #[test]
-    fn a_module_past_the_accepted_set_is_refused_by_the_engine() {
-        // One engine for the whole table. Each case is a fresh `Module::new`, which is where
-        // the refusal happens; rebuilding the engine per case would re-test `Runtime::new`
-        // eight times and spawn an epoch ticker for each.
-        let runtime = Runtime::new(Budgets::default()).expect("an engine");
-        // ABI §4.3: feature conformance is enforced here and nowhere else — `eio_manifest`
-        // accepts every one of these. Each is the smallest module that needs its proposal,
-        // paired with the words its rejection has to contain.
-        //
-        // These are the proposals still *outside* [`ACCEPTED`]. The six the guest toolchain
-        // emits have their own test below; what is left is what neither rustc emits nor wasm3
-        // implements, and admitting one of those would be the two-hosts divergence with
-        // nothing to catch it.
-        //
-        // Tail call, memory64 and threads are outside [`ACCEPTED`] too and are not here:
-        // wasm3 *runs* all three, so they are refused in the loader as well and are asserted
-        // in both layers at once by `what_the_leaf_engine_will_not_refuse_the_loader_does`.
-        //
-        // Matching the message is the point rather than an incidental strictness: ABI §4.3
-        // requires the rejection to *name* the proposal, because a deployer holding a valid
-        // manifest and a refused block has nothing else to act on. Each expectation is the
-        // distinctive noun and nothing around it, so wasmtime is free to rephrase the
-        // sentence without failing this — but not free to stop saying what was wrong.
-        for (proposal, needle, wat) in [
-            (
-                "simd",
-                "simd",
-                r#"(module (func (export "f") (result i32)
-                     (i32x4.extract_lane 0 (v128.const i32x4 1 2 3 4))))"#,
-            ),
-            // A second linear memory needs no instruction to be past MVP: declaring it is
-            // already the proposal.
-            (
-                "multi-memory",
-                "memories",
-                r#"(module (memory 1) (memory 1))"#,
-            ),
-        ] {
-            let error = compile(&runtime, wat)
-                .expect_err(&format!("{proposal} is outside the accepted set"));
-            // `{:?}`, because the sentence naming the proposal is a *cause* — the top line
-            // says only which function failed to compile. This is the same rendering the
-            // deployer gets, since the daemon returns the error out of `main` (ABI §4.3).
-            let message = format!("{error:?}").to_lowercase();
-            assert!(
-                message.contains(needle),
-                "refusing {proposal} has to say so, and said: {message}"
-            );
-        }
-    }
+    // A module past ABI §4.3's accepted set, refused by the engine with the proposal named,
+    // is asserted by the scenario suite now: `20_refuse_simd.json` and
+    // `23_refuse_multi_memory.json`, both engine-layer, run against this exact `Runtime` by
+    // `crates/daemon/src/conformance.rs`'s `the_daemon_passes_the_conformance_suite` via
+    // `suite::run_own` — its `Daemon::instantiate` calls `runtime.compile(wasm)`, the same
+    // call this test used to make directly, with the same needle-in-the-message check
+    // (eieio-7d8.27). Tail call, memory64 and threads stay covered only here, by
+    // `what_the_leaf_engine_will_not_refuse_the_loader_does` below: they are loader-layer
+    // scenarios, and a loader scenario cannot also assert an engine refusal.
 
     #[test]
     fn what_the_leaf_engine_will_not_refuse_the_loader_does() {

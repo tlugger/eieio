@@ -577,26 +577,10 @@ mod tests {
         assert!(crate::record::abi_name("eio:nonsense", "state_get").is_none());
     }
 
-    #[test]
-    fn a_module_outside_the_accepted_set_is_refused_with_the_proposal_named() {
-        // ABI §4.3 requires the rejection to name the proposal. The reference host is where a
-        // block author meets that rule first, so it has to hold here as well as in the daemon.
-        //
-        // SIMD rather than bulk memory: bulk memory is inside [`ACCEPTED`] now, and wasm3 does
-        // not implement SIMD, so this is a proposal admitting it would genuinely divide the
-        // two engines.
-        let mut reference = Reference::new().expect("an engine");
-        let wasm = wat::parse_str(
-            r#"(module (func (export "f") (result i32)
-                 (i32x4.extract_lane 0 (v128.const i32x4 1 2 3 4))))"#,
-        )
-        .expect("the snippet assembles");
-        let Err(error) = reference.instantiate(&wasm, Budget::default()) else {
-            panic!("simd is outside the accepted set")
-        };
-        assert!(
-            format!("{error}").to_lowercase().contains("simd"),
-            "refusing a proposal has to say which, and said: {error}"
-        );
-    }
+    // A module outside ABI §4.3's accepted set, refused with the proposal named, is asserted
+    // by the scenario suite now — `20_refuse_simd.json`, run against this host by
+    // `crates/conformance/tests/reference.rs`'s `the_reference_host_passes_the_suite` via
+    // `suite::run_own`, drives this exact `Reference::instantiate` with the same SIMD
+    // instruction this file used to build by hand (eieio-7d8.27). A hand-rolled duplicate here
+    // would fail identically to that scenario and prove nothing it does not already.
 }

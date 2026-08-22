@@ -444,6 +444,15 @@ fn a_post_mvp_module_is_refused_and_the_message_names_the_proposal() {
     // and `post_mvp.wat` is otherwise a valid block — `eio_manifest` accepts it, as the
     // assertion below insists. Deploying it would produce a block that runs here and is
     // refused by wasm3 at flash time.
+    //
+    // Not redundant with the scenario suite's `20_refuse_simd.json` (eieio-7d8.27): that
+    // scenario reaches `Daemon::instantiate` (`crates/daemon/src/conformance.rs`), which calls
+    // `Runtime::compile`/`instantiate` directly and never touches `run_block`. This is the only
+    // test in the crate that drives `run_block` — the function `main`'s `Dev::RunBlock` arm
+    // calls and then propagates out of `main` via `anyhow::Result` — so it is what stands for
+    // ABI §4.3's "nothing to act on" reaching a deployer at all. Nothing spawns the compiled
+    // binary itself: the crate has no lib target and so no `tests/` integration binary
+    // (`crate::scratch`'s doc comment), so this is as close to that as the suite gets.
     eio_manifest::validate(&wasm("post_mvp.wat"), None)
         .expect("the loader has no opinion about SIMD — both engines refuse it by name");
 
