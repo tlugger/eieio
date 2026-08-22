@@ -1,0 +1,21 @@
+{
+  "name": "state-del-of-a-key-never-written",
+  "spec": "§7.2, §13.1",
+  "note": "ABI §7.2, settled by eieio-7d8.16: `state_del` answers `0` whether or not the key was present, because the call states the intended end state rather than a transition. Nothing seeds the store and the block never calls `state_put` or `state_get`, so the only way this comes back `0` is the host actually implementing that rule — a host that read `ERR_NOT_FOUND` off `eio:state`'s three-function symmetry with `state_get` would fail this exact call, and the block's status is that call's return value unmodified.",
+  "module": "blocks/state_del_missing.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e01" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "state_del" ],
+        "emissions": []
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0, "state": {} }
+}

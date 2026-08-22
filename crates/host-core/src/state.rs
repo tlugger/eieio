@@ -181,9 +181,10 @@ pub fn put(call: HostCall<'_>, store: &mut dyn StateStore) -> Ret {
 
 /// `state_del(key, key_len) -> i32` (ABI §7.2). See [`get`].
 ///
-/// `0` whether or not the key was there. ABI §7.2 does not say which it is and §8's
-/// `ERR_NOT_FOUND` is a plausible other reading, so the question is open (eieio-7d8.16) and
-/// this answers the way the reference harness always has rather than settling it here.
+/// `0` whether or not the key was there — ABI §7.2, which settles it: the call states the
+/// intended end state, not a transition, so clearing a key that may never have been written
+/// needs no read first. [`StateError`] could not express the other reading anyway, having no
+/// `NotFound` to return, and `29_state_del_missing_key` now pins the answer for every host.
 pub fn del(call: HostCall<'_>, store: &mut dyn StateStore) -> Ret {
     let [Arg::I32(key), Arg::I32(key_len)] = *call.args else {
         return invalid();

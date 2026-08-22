@@ -243,6 +243,9 @@ impl StateStore for Shared {
         Ok(())
     }
 
+    /// `0` whether or not `key` was present (ABI §7.2, settled): a delete states the
+    /// intended end state rather than a transition, so there is no missing-key case for a
+    /// scenario to be forbidden from asserting on — `29_state_del_missing_key` pins it.
     fn del(&mut self, key: &[u8]) -> Result<(), StateError> {
         self.store.remove(key);
         Ok(())

@@ -317,6 +317,8 @@ Durable KV, scoped to the block instance. The host composes the namespace and th
 
 Durability is host-decided. On leaf hosts, `state_put` MAY return `ERR_THROTTLED` (flash wear budgets); blocks MUST treat persistence as best-effort and not as a message queue.
 
+**`state_del` answers `0` whether or not the key was present.** Deleting a key that was never written is not an error: the call states the intended end state, not a transition, so a block clearing state it may or may not have written needs no read first and no special case for the empty case. A host therefore MUST NOT report absence here — §8's `ERR_NOT_FOUND` is not an answer `state_del` gives — and a block that needs to know whether a key existed reads it before deleting. Pinned by `29_state_del_missing_key`, so the two hosts cannot drift on it.
+
 ### 7.3 `eio:timer` — capability `timer`
 
 |Import|Signature|
