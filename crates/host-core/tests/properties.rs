@@ -19,9 +19,9 @@
 
 #[path = "mock.rs"]
 mod mock;
-// The corpus's value notation, shared with the language runner so the two suites cannot
-// disagree about what `{"float": 3}` means. See that file for why it is reached across the
-// crate boundary rather than copied.
+// The corpus's value notation and corpus-loading mechanics, shared with the other two
+// `expr-tests/` runners so the notation and the loader cannot drift apart. See that file for
+// why it is reached across the crate boundary rather than copied.
 #[path = "../../expr/tests/support/vector_format.rs"]
 mod vector_format;
 
@@ -88,19 +88,8 @@ fn corpus_dir() -> PathBuf {
 /// Rejects a malformed file rather than skipping it: a corpus that silently loses a file is
 /// a corpus that silently stops asserting things.
 fn corpus() -> Vec<(String, Vector)> {
-    let dir = corpus_dir();
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()))
-        .map(|entry| entry.expect("readable directory entry").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no vector files in {}", dir.display());
-
     let mut all = Vec::new();
-    for path in files {
-        let file = path.file_name().unwrap().to_string_lossy().into_owned();
-        let text = std::fs::read_to_string(&path).expect("readable vector file");
+    for (file, text) in vector_format::json_files(&corpus_dir()) {
         let parsed: VectorFile = serde_json::from_str(&text)
             .unwrap_or_else(|error| panic!("{file} is not a valid vector file: {error}"));
 

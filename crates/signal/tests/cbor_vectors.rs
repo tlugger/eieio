@@ -100,32 +100,24 @@ fn corpus() -> PathBuf {
 }
 
 /// Every vector in the corpus, with the file it came from.
+///
+/// Shape checked here, while loading, not while running, so that every reader of the corpus
+/// gets it — the audit below tallies vectors without executing them, and a malformed one
+/// would otherwise be counted as coverage it does not provide. Name uniqueness is checked
+/// across the whole corpus rather than per file, per `expr-tests/README.md`: unlike the two
+/// sibling runners' vectors, a name here must be unique in `cbor/` as a whole.
 fn vectors() -> Vec<(String, Vector)> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(corpus())
-        .expect("the corpus directory is readable")
-        .map(|entry| entry.expect("a directory entry").path())
-        .filter(|path| path.extension().is_some_and(|e| e == "json"))
-        .collect();
-    // Filename order: a suite has to run the same way twice, and a filesystem's order is
-    // not a promise.
-    files.sort();
-    assert!(!files.is_empty(), "the corpus is empty");
-
+    let mut seen = BTreeSet::new();
     let mut all = Vec::new();
-    for path in files {
-        let name = path
-            .file_name()
-            .expect("a file name")
-            .to_string_lossy()
-            .to_string();
-        let text = std::fs::read_to_string(&path).expect("the file is readable");
+    for (name, text) in vector_format::json_files(&corpus()) {
         let file: File = serde_json::from_str(&text)
             .unwrap_or_else(|error| panic!("{name} is not a valid vector file: {error}"));
         for vector in file.vectors {
-            // Shape checked while loading, not while running, so that every reader of the
-            // corpus gets it — the audit below tallies vectors without executing them, and a
-            // malformed one would otherwise be counted as coverage it does not provide. Same
-            // placement as the two sibling runners, for the same reason.
+            assert!(
+                seen.insert(vector.name.clone()),
+                "{name}: {} is not a unique vector name in the corpus",
+                vector.name,
+            );
             assert!(
                 vector.expect.is_some() ^ vector.reject.is_some(),
                 "{name}: {} must carry exactly one of `expect` and `reject`",
@@ -144,13 +136,8 @@ fn vectors() -> Vec<(String, Vector)> {
 
 #[test]
 fn vectors_pass() {
-    let mut seen = BTreeSet::new();
     for (file, vector) in vectors() {
         let at = format!("{file}: {}", vector.name);
-        assert!(
-            seen.insert(vector.name.clone()),
-            "{at} is not a unique vector name in the corpus",
-        );
 
         let bytes = unhex(&vector.bytes);
         let decoded = match vector.depth {

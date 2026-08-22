@@ -100,22 +100,8 @@ fn corpus_dir() -> PathBuf {
 /// vectors carry a `type` field this runner would reject, and asserting a *host* rule is
 /// not something the interpreter can do.
 fn corpus() -> Vec<(String, Vector)> {
-    let dir = corpus_dir();
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", dir.display()))
-        .map(|entry| entry.expect("readable directory entry").path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no vector files in {}", dir.display());
-
     let mut all = Vec::new();
-    for path in files {
-        let file = path.file_name().unwrap().to_string_lossy().into_owned();
-        let text = std::fs::read_to_string(&path).expect("readable vector file");
+    for (file, text) in vector_format::json_files(&corpus_dir()) {
         let parsed: VectorFile = serde_json::from_str(&text)
             .unwrap_or_else(|error| panic!("{file} is not a valid vector file: {error}"));
 
