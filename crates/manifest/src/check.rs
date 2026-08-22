@@ -1,6 +1,6 @@
 //! Load-time validation of a module against its manifest (ABI-SPEC §4, §12).
 //!
-//! Seven checks, in the order a rejection is most useful in:
+//! Eight checks, in the order a rejection is most useful in:
 //!
 //! 0. the module contains nothing §4.3 accepts on one host and not the other
 //!    (`portable`) — first, because it is the only check that does not need the
@@ -16,7 +16,12 @@
 //!    (§4.1);
 //! 5. the embedded `eio:manifest` section parses, and agrees with the registry
 //!    manifest if there is one (§4.4);
-//! 6. the manifest's ABI version is one this host accepts (§12).
+//! 6. the effective manifest's `targets` is not `[]` (§11.1) — [`Manifest::validate`]
+//!    lets an empty list through, because that is the legal shape of a
+//!    host-implemented block's manifest with no bytes behind it at all, but this
+//!    function was just handed real module bytes, and a manifest describing them
+//!    cannot also claim there is no artifact;
+//! 7. the manifest's ABI version is one this host accepts (§12).
 //!
 //! # What is deliberately *not* checked here
 //!
@@ -36,7 +41,7 @@
 //! its value means calling it, which needs an engine. §12 makes the module
 //! authoritative over the manifest, so that comparison belongs to whoever holds an
 //! instance — `host-core`. What is checkable without running code is the manifest's
-//! claim against host policy, which is check 6.
+//! claim against host policy, which is check 7.
 
 use crate::abi::{CORE_FUNCTIONS, CORE_NAMESPACE, MEMORY_EXPORT, REQUIRED_EXPORTS};
 use crate::error::ModuleError;
@@ -113,6 +118,16 @@ fn validate_with(
 ) -> Result<Manifest, ModuleError> {
     let module = Module::read_portable(wasm, downstream)?;
     let manifest = effective_manifest(&module, registry)?;
+
+    // Check 6: `[]` is legal on the document alone (`Manifest::validate`) — it is what
+    // a host-implemented block's manifest looks like, and this crate cannot tell that
+    // apart from a bug by reading the document. What settles it is exactly what this
+    // function has and `validate` does not: real module bytes. A manifest attached to
+    // them cannot also claim no artifact exists, so `[]` here is always the bug (ABI
+    // §11.1).
+    if manifest.targets.is_empty() {
+        return Err(ModuleError::NoArtifact);
+    }
 
     if !manifest.abi.accepted_by(host) {
         return Err(ModuleError::UnacceptableAbi {

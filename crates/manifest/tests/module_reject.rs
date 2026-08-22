@@ -217,6 +217,74 @@ fn no_manifest_at_all() {
     rejects!("no_section.wat", ModuleError::NoManifest);
 }
 
+// ── targets (§11.1) ──────────────────────────────────────────────────────────
+
+/// `targets: []` parses (`reject.rs::empty_targets_parses` pins that half) because it is
+/// the legal shape of a host-implemented block's manifest — but handed to `validate`
+/// alongside real module bytes, it is always the other thing: a claim of no artifact
+/// contradicted by the artifact right there. This is the sharp edge the fix must not
+/// widen: a manifest saying `[]` MUST NOT be accepted just because it parses.
+#[test]
+fn a_manifest_with_no_targets_is_refused_for_a_real_module() {
+    let registry = parse(
+        r#"{ "name": "probe", "version": "1.0.0", "abi": { "major": 1, "minor": 0 }, "targets": [] }"#,
+    )
+    .expect("targets: [] is a legal document (ABI §11.1)");
+
+    let error = match validate(&wasm("no_section.wat"), Some(&registry)) {
+        Err(error @ ModuleError::NoArtifact) => error,
+        Ok(_) => panic!("a manifest declaring no artifact must not be accepted for real bytes"),
+        Err(other) => panic!("expected NoArtifact, got {other:?}"),
+    };
+    assert_eq!(
+        error.to_string(),
+        "targets: [] — this manifest claims no compiled artifact exists, but it was just \
+         read alongside module bytes that contradict the claim (ABI §11.1)",
+    );
+}
+
+/// The other half of the same edge, in the shape the bug was actually found in
+/// (eieio-7d8.32): a host-native system block's manifest — built in memory exactly as
+/// `eio_daemon::bridge::manifest_for` builds one, `targets: []` included — validates as
+/// a document on its own, and is still refused the moment it is offered as the manifest
+/// for real module bytes.
+#[test]
+fn a_system_block_style_manifest_validates_but_not_for_a_real_module() {
+    use eio_manifest::{Manifest, Port, Property, PropertyType};
+
+    let manifest = Manifest {
+        name: String::from("publisher"),
+        version: String::from("1.0.0"),
+        abi: Abi::CURRENT,
+        description: String::from("Host-native: implemented by the router's bridge."),
+        capabilities: Vec::new(),
+        inputs: vec![Port {
+            name: String::from("in"),
+        }],
+        outputs: Vec::new(),
+        properties: vec![Property {
+            name: String::from("topic"),
+            ty: PropertyType::String,
+            description: String::new(),
+            default: None,
+            required: true,
+        }],
+        targets: Vec::new(),
+        aot: Vec::new(),
+    };
+    manifest
+        .validate()
+        .expect("targets: [] is exactly what a host-implemented block's manifest looks like");
+
+    // Offered as the registry manifest for real module bytes, nothing about this function
+    // can tell the block behind those bytes is host-native rather than a WASM module whose
+    // targets was lost to a bug — ABI §11.1 resolves that ambiguity in favour of refusing.
+    match validate(&wasm("no_section.wat"), Some(&manifest)) {
+        Err(ModuleError::NoArtifact) => {}
+        other => panic!("expected NoArtifact, got {other:?}"),
+    }
+}
+
 // ── ABI version (§12) ────────────────────────────────────────────────────────
 
 /// A major mismatch is refused whichever direction it points.

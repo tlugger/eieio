@@ -68,10 +68,11 @@
       "items": { "$ref": "#/$defs/property" }
     },
     "targets": {
-      "description": "The compilation targets this block is published for. Always includes \"wasm32-unknown-unknown\", the portable module every host can load; omit the field to mean exactly that.",
+      "description": "The compilation targets this block is published for. Non-empty, always includes \"wasm32-unknown-unknown\" (the portable module every host can load) — omit the field to mean exactly that. An empty array is a distinct, legal claim: it is how a host-implemented block, which has no compiled artifact at all, describes itself; a host loading real module bytes refuses a manifest declaring [] for those bytes, but that is a runtime check this schema cannot make.",
       "type": "array",
       "uniqueItems": true,
-      "contains": { "const": "wasm32-unknown-unknown" },
+      "if": { "minItems": 1 },
+      "then": { "contains": { "const": "wasm32-unknown-unknown" } },
       "items": {
         "type": "string",
         "pattern": "^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$",

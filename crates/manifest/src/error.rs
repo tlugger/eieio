@@ -104,7 +104,13 @@ pub enum Error {
         name: String,
     },
 
-    /// `targets` did not contain `wasm32-unknown-unknown` (ABI §11.1, targets).
+    /// `targets` is non-empty but does not contain `wasm32-unknown-unknown` (ABI
+    /// §11.1, targets).
+    ///
+    /// Not raised for `targets: []` — an empty list is a different claim ("no
+    /// compiled artifact"), not a shorter version of this one. This is the AOT-only
+    /// mistake: a list that names a leaf triple without the portable module every
+    /// block that has bytes at all still ships.
     MissingPortableTarget,
 
     /// Every property `default` that failed to parse or failed static analysis, in
@@ -213,7 +219,8 @@ impl fmt::Display for Error {
             }
             Error::MissingPortableTarget => write!(
                 f,
-                "targets: must contain \"wasm32-unknown-unknown\" — every block ships the portable module",
+                "targets: a non-empty list must contain \"wasm32-unknown-unknown\" — every \
+                 block that has a compiled artifact ships the portable module",
             ),
             Error::InvalidDefaults(defaults) => {
                 // One reads exactly as it did before this variant held a list, so the
@@ -411,6 +418,17 @@ pub enum ModuleError {
         found: FuncType,
     },
 
+    /// The effective manifest declares `targets: []` (ABI §11.1).
+    ///
+    /// Legal on the document alone — [`Error::MissingPortableTarget`] does not fire on
+    /// an empty list, because that is how a host-implemented block, which has no
+    /// compiled artifact at all, describes itself. But this function was handed real
+    /// module bytes, and a manifest claiming no artifact cannot be describing the
+    /// bytes it arrived with, whichever of the two sources
+    /// ([`crate::module::Module::manifest_section`] or `registry`) it came from. §11.1
+    /// makes the refusal a MUST.
+    NoArtifact,
+
     /// The embedded `eio:manifest` section is not a valid manifest (§4.4, §11).
     EmbeddedManifest(Error),
 
@@ -519,6 +537,11 @@ impl fmt::Display for ModuleError {
             } => write!(
                 f,
                 "export {name:?} has signature {found} but the ABI requires {expected}",
+            ),
+            ModuleError::NoArtifact => write!(
+                f,
+                "targets: [] — this manifest claims no compiled artifact exists, but it was \
+                 just read alongside module bytes that contradict the claim (ABI §11.1)",
             ),
             ModuleError::EmbeddedManifest(error) => {
                 write!(f, "embedded eio:manifest section is invalid: {error}")

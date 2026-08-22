@@ -109,11 +109,12 @@ impl SystemBlockKind {
 /// rather than read from a module (DAEMON §6.3).
 ///
 /// `capabilities` is empty and always will be: a host-native block never imports anything,
-/// there being no guest to import into. `targets` still names the portable target because
-/// [`Manifest::validate`] requires it (ABI §11.1) — a schema written for a document that always
-/// accompanies a `.wasm`, which a host-native block does not have. That is a seam in the
-/// manifest schema this block exposes rather than papers over; ABI-SPEC is silent on a manifest
-/// with no module behind it at all, and resolving that silence is not this crate's call.
+/// there being no guest to import into. `targets` is `[]`, which is exactly what ABI §11.1
+/// says an empty list means: no compiled artifact exists for this block, there being no
+/// `.wasm` and no triple it was built for. Nothing refuses this manifest for it —
+/// [`Manifest::validate`] accepts `[]` on the document alone — because nothing here ever
+/// hands a host real module bytes to contradict it with; that refusal belongs to
+/// [`eio_manifest::validate`], for a caller that did.
 pub fn manifest_for(kind: SystemBlockKind) -> Manifest {
     let topic = Property {
         name: String::from(TOPIC_PROPERTY),
@@ -144,7 +145,9 @@ pub fn manifest_for(kind: SystemBlockKind) -> Manifest {
             }],
             outputs: Vec::new(),
             properties: vec![topic],
-            targets: vec![String::from(eio_manifest::PORTABLE_TARGET)],
+            // No compiled artifact exists for a host-native block (ABI §11.1) — see the
+            // module docs above.
+            targets: Vec::new(),
             aot: Vec::new(),
         },
         SystemBlockKind::Subscriber => Manifest {
@@ -162,7 +165,9 @@ pub fn manifest_for(kind: SystemBlockKind) -> Manifest {
                 name: String::from("out"),
             }],
             properties: vec![topic],
-            targets: vec![String::from(eio_manifest::PORTABLE_TARGET)],
+            // No compiled artifact exists for a host-native block (ABI §11.1) — see the
+            // module docs above.
+            targets: Vec::new(),
             aot: Vec::new(),
         },
     }

@@ -490,7 +490,9 @@ The reservation is a forbidden string rather than an exclusion folded into the p
 
 **Closed sets.** `capabilities` entries MUST each be one of `state`, `timer`, `gpio`, `i2c`, `http`. `core` MUST NOT appear: `eio:core` is always available and requires no capability (§7.0). A property's `type` MUST be one of `bool`, `int`, `float`, `string`, `bytes`, `any`.
 
-**Targets.** `targets` MUST contain `wasm32-unknown-unknown`. Every block ships the portable module (§1); `aot` entries are additions published alongside it, never replacements for it.
+**Targets.** `targets` lists the triples a block's compiled artifact was built for, and a **non-empty** `targets` MUST contain `wasm32-unknown-unknown`: every block that ships bytes ships the portable module (§1), and `aot` entries are additions published alongside it, never replacements.
+
+`targets: []` is a distinct, legal claim rather than a shorter list — it says **there is no compiled artifact**. That is what a **host-implemented** block looks like: DAEMON §6's `publisher` and `subscriber` are real blocks in the palette with real manifests, and there is no `.wasm`, no triple they were built for, and nothing for a leaf tier to flash. A host therefore **MUST refuse to load a module whose manifest declares `[]`**, because a manifest claiming no artifact cannot be describing the bytes it arrived with. The requirement attaches to being loaded from bytes, not to being a manifest: the document is valid, and the contradiction only exists once something hands it a module.
 
 **Default expressions.** A `default`, when present, MUST parse and MUST pass static analysis (EXPR §10) — the same configure-time gate a service-supplied expression gets, so a manifest cannot ship a default naming a function that does not exist. A default MAY be signal-dependent; it is an expression like any other property value, not a constant.
 

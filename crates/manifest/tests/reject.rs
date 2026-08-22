@@ -368,14 +368,28 @@ fn duplicate_targets() {
 
 // ── targets (§11.1) ──────────────────────────────────────────────────────────
 
-/// `aot` artifacts are published alongside the portable module, never instead of it.
+/// `aot` artifacts are published alongside the portable module, never instead of it: a
+/// non-empty `targets` that omits the portable target is rejected regardless of what
+/// else it lists.
 #[test]
 fn targets_without_the_portable_target() {
     rejects!(
         manifest(r#", "targets": ["esp32s3"]"#),
         Error::MissingPortableTarget
     );
-    rejects!(manifest(r#", "targets": []"#), Error::MissingPortableTarget);
+}
+
+/// `targets: []` is a different claim from a partial list, not a shorter one — it is
+/// how a host-implemented block, which has no compiled artifact at all, describes
+/// itself (ABI §11.1) — so it parses even though the document has no bytes behind it
+/// to make that claim true or false. `eio_manifest::validate`'s `module_reject.rs`
+/// pins the half of this rule that *does* fire: a manifest attached to real module
+/// bytes may not make this claim.
+#[test]
+fn empty_targets_parses() {
+    let manifest = eio_manifest::parse(&manifest(r#", "targets": []"#))
+        .expect("an empty targets list is a legal, distinct claim (ABI §11.1)");
+    assert_eq!(manifest.targets, Vec::<String>::new());
 }
 
 // ── default expressions (§11.1, EXPR §10) ────────────────────────────────────

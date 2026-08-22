@@ -132,7 +132,17 @@ impl Manifest {
             unique(site, targets.iter().map(|target| target.as_str()))?;
         }
 
-        if !self.targets.iter().any(|target| target == PORTABLE_TARGET) {
+        // An empty list is a legal, distinct claim — "no compiled artifact at all"
+        // (ABI §11.1) — not a partial one, so it owes nothing to the portable-target
+        // rule below. A *non-empty* list still MUST contain the portable target:
+        // that is the rule an AOT-only `targets: ["esp32s3"]` breaks, and emptiness
+        // is not a bigger version of that break, it is a different statement.
+        // Whether `[]` is legitimate for *this* block — a host-implemented one — or
+        // a bug that dropped every target is not decidable from the document alone;
+        // [`crate::validate`] decides it once it has the module bytes the document
+        // claims not to describe.
+        if !self.targets.is_empty() && !self.targets.iter().any(|target| target == PORTABLE_TARGET)
+        {
             return Err(Error::MissingPortableTarget);
         }
 

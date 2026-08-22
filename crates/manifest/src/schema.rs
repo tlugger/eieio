@@ -52,7 +52,15 @@ pub struct Manifest {
     #[serde(default)]
     pub properties: Vec<Property>,
     /// Compilation targets the block is published for. Defaults to the portable
-    /// target alone, and MUST always contain it (ABI §11.1).
+    /// target alone, and MUST contain it whenever the list is non-empty (ABI §11.1).
+    /// An empty list is a distinct, legal claim: it is how a **host-implemented**
+    /// block — one with no compiled artifact at all, so no `.wasm` and no triple —
+    /// describes itself. A host loading an actual module's bytes MUST refuse a
+    /// manifest that declares `[]`, because that manifest cannot be describing the
+    /// bytes it just arrived with; this crate cannot make that refusal on the
+    /// document alone, since the very same `[]` is what a host-implemented block is
+    /// supposed to say. See [`crate::validate`] for the check that has the bytes to
+    /// make it with.
     #[serde(default = "portable_targets")]
     pub targets: Vec<String>,
     /// Leaf targets with a prebuilt AOT artifact published alongside the portable
