@@ -111,6 +111,16 @@ pub enum PullError {
         /// What arrived.
         got: String,
     },
+    /// The manifest actually fetched is not the artifact a digest-pinned reference names
+    /// (DAEMON §4, §4.1, eieio-8yq.11). A digest-pinned reference that resolved to different
+    /// bytes than it names would defeat the only thing a digest is for, so this is a refusal
+    /// and not a warning.
+    DigestMismatch {
+        /// The digest the reference named.
+        named: String,
+        /// The digest of the manifest that was actually fetched.
+        fetched: String,
+    },
     /// `require_signed` is set and the artifact carries no signature (DAEMON §4.2).
     Unsigned,
     /// A signature is present and does not verify (DAEMON §4.2).
@@ -148,6 +158,10 @@ impl std::fmt::Display for PullError {
                     "the artifact is {got}, and the manifest says it is {expected}"
                 )
             }
+            PullError::DigestMismatch { named, fetched } => write!(
+                f,
+                "the reference names {named}, and the manifest actually fetched is {fetched}"
+            ),
             PullError::Unsigned => f.write_str(
                 "this artifact carries no signature, and this node is configured to require one",
             ),
@@ -173,7 +187,33 @@ pub struct Signing {
     pub key_path: String,
 }
 
-/// Where a pull goes: the host, the repository on it, and the tag (DAEMON §4.1).
+/// What a manifest is fetched by: a tag, or a digest that pins one artifact (DAEMON §4,
+/// eieio-8yq.11).
+///
+/// A manifest is fetched by digest exactly as it is by tag — `GET
+/// /v2/<repository>/manifests/<reference>` takes either — so this is the one place that
+/// distinction is made, and [`Location::url`] does not need to know which it has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Pin {
+    /// A tag, e.g. `1.2.0`.
+    Tag(String),
+    /// A digest, e.g. `sha256:0123...` — kept in the reference's own spelling of "reference to
+    /// fetch by", and checked against what was actually fetched once the manifest is in hand.
+    Digest(String),
+}
+
+impl Pin {
+    /// The text a manifest request's path segment is built from.
+    fn as_str(&self) -> &str {
+        match self {
+            Pin::Tag(tag) => tag,
+            Pin::Digest(digest) => digest,
+        }
+    }
+}
+
+/// Where a pull goes: the host, the repository on it, and what it fetches the manifest by
+/// (DAEMON §4.1).
 ///
 /// Distinct from [`blocks`](crate::blocks)'s cache entry, which is the same reference read the
 /// other way — `filter` and `1.2.0` out of `ghcr.io/tlugger/filter:1.2.0`. One reference, two
@@ -183,10 +223,10 @@ pub struct Signing {
 struct Location {
     /// The registry host, with its port if it carries one.
     host: String,
-    /// Everything between the host and the tag.
+    /// Everything between the host and the tag or digest.
     repository: String,
-    /// The tag.
-    tag: String,
+    /// The tag or digest a manifest is fetched by.
+    pin: Pin,
 }
 
 impl Location {
@@ -213,9 +253,19 @@ impl Location {
 ///
 /// The first `/`-separated component is the registry when it contains a `.` or a `:`, or is
 /// exactly `localhost` — OCI's rule, which is what makes `tlugger/filter:1.2.0` a namespace on
-/// no particular host rather than a host called `tlugger`.
+/// no particular host rather than a host called `tlugger`. A digest pin (`name@sha256:...`) is
+/// split first, since `blocks::split_tag`'s rule of "the last `:`" would otherwise read the
+/// digest's own colon as a tag separator (DAEMON §4, eieio-8yq.11) — this is the pull side of
+/// the split [`blocks::parse`](crate::blocks) makes for the cache side, and it MUST agree with
+/// it, or a pull would fetch one artifact and a resolve would cache it under another.
 fn locate(reference: &str) -> Result<Location, PullError> {
-    let (path, tag) = crate::blocks::split_tag(reference).ok_or(PullError::Unregistered)?;
+    let (path, pin) = match crate::blocks::split_digest(reference) {
+        Some((path, digest)) => (path, Pin::Digest(digest.to_ascii_lowercase())),
+        None => {
+            let (path, tag) = crate::blocks::split_tag(reference).ok_or(PullError::Unregistered)?;
+            (path, Pin::Tag(String::from(tag)))
+        }
+    };
     let (host, repository) = path.split_once('/').ok_or(PullError::Unregistered)?;
     if !(host.contains('.') || host.contains(':') || host == "localhost") {
         return Err(PullError::Unregistered);
@@ -226,7 +276,7 @@ fn locate(reference: &str) -> Result<Location, PullError> {
     Ok(Location {
         host: String::from(host),
         repository: String::from(repository),
-        tag: String::from(tag),
+        pin,
     })
 }
 
@@ -256,19 +306,35 @@ impl Registry {
 
     /// Pulls `reference` and answers the block's bytes, verified (DAEMON §4.1, §4.2).
     ///
-    /// Verified means both of §4.1's senses: the layer's digest is recomputed over what
-    /// arrived, and the signature policy has been applied. A caller may write what this
-    /// returns into the cache without checking anything further — which is the point, since
-    /// the cache is what the *next* boot trusts without a registry to ask.
+    /// Verified means both of §4.1's senses, plus a third when `reference` is digest-pinned: the
+    /// layer's digest is recomputed over what arrived, the signature policy has been applied,
+    /// and — the pull side is nearly free here, because a manifest is fetched by digest exactly
+    /// as it is by tag — a digest-pinned reference's digest is checked against the manifest
+    /// actually fetched before anything past it is trusted (DAEMON §4, eieio-8yq.11). A caller
+    /// may write what this returns into the cache without checking anything further — which is
+    /// the point, since the cache is what the *next* boot trusts without a registry to ask.
     pub fn pull(&self, reference: &str) -> Result<Vec<u8>, PullError> {
         let at = locate(reference)?;
         tracing::info!(block = reference, registry = at.host, "pulling");
         let mut token = None;
 
-        let url = at.url("manifests", &at.tag);
+        let url = at.url("manifests", at.pin.as_str());
         let raw = self.fetch(&url, MANIFEST_TYPES, MANIFEST_LIMIT, &mut token)?;
         let manifest = parse_manifest(&url, &raw)?;
         let digest = hex_digest(&raw);
+
+        // A mismatch is a refusal, not a warning: a digest-pinned reference that resolved to
+        // different bytes than it names would defeat the only thing a digest is for. Checked
+        // before the layer is even fetched — there is no reason to pull a blob for a manifest
+        // that already failed the one check the reference asked for.
+        if let Pin::Digest(expected) = &at.pin
+            && &digest != expected
+        {
+            return Err(PullError::DigestMismatch {
+                named: expected.clone(),
+                fetched: digest,
+            });
+        }
 
         let layer = manifest.wasm_layer()?;
         let wasm = self.blob(&at, layer, BLOB_LIMIT, &mut token)?;
@@ -687,7 +753,7 @@ mod tests {
         Ok(Location {
             host: String::from(host),
             repository: String::from(repository),
-            tag: String::from(tag),
+            pin: Pin::Tag(String::from(tag)),
         })
     }
 
@@ -720,6 +786,30 @@ mod tests {
             located("localhost/filter:1.2.0"),
             location("localhost", "filter", "1.2.0"),
             "and so does being localhost"
+        );
+    }
+
+    #[test]
+    fn a_digest_pinned_reference_locates_by_the_digest_rather_than_a_tag() {
+        // The digest's own colon must not be read as a tag separator (DAEMON §4, eieio-8yq.11)
+        // — `blocks::split_tag`'s "last colon in the last path component" rule would otherwise
+        // find the one inside `sha256:...` and split there.
+        assert_eq!(
+            located("ghcr.io/tlugger/filter@sha256:0123456789abcdef"),
+            Ok(Location {
+                host: String::from("ghcr.io"),
+                repository: String::from("tlugger/filter"),
+                pin: Pin::Digest(String::from("sha256:0123456789abcdef")),
+            })
+        );
+        assert_eq!(
+            located("ghcr.io/tlugger/filter@sha256:ABCDEF"),
+            Ok(Location {
+                host: String::from("ghcr.io"),
+                repository: String::from("tlugger/filter"),
+                pin: Pin::Digest(String::from("sha256:abcdef")),
+            }),
+            "folded to lowercase, so it compares equal to what this node computes"
         );
     }
 
@@ -758,6 +848,47 @@ mod tests {
             anonymous().pull(&fake.reference("filter", "1.0.0")),
             Ok(b"\0asm-the-block".to_vec())
         );
+    }
+
+    #[test]
+    fn a_pull_by_digest_fetches_the_manifest_at_its_digest_and_answers_the_same_bytes() {
+        // "A manifest can be fetched by digest exactly as it is by tag" (eieio-8yq.11): the
+        // pull path is the one above, reached through the digest branch of `locate`.
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm-the-block");
+        let reference = fake.digest_reference("filter", "1.0.0");
+        assert_eq!(
+            anonymous().pull(&reference),
+            Ok(b"\0asm-the-block".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_digest_that_does_not_match_the_manifest_fetched_is_refused() {
+        // The security-relevant path (DAEMON §4, eieio-8yq.11): a digest-pinned reference
+        // that resolved to different bytes than it names would defeat the only thing a
+        // digest is for, so a mismatch is a refusal and not a warning.
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm");
+
+        // A registry that answers a manifest at a digest that is not its own — the only way
+        // to make this happen deliberately, since a well-behaved registry never disagrees
+        // with the digest it is asked for.
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        fake.publish_manifest_dishonestly_at_digest("filter", "1.0.0", &wrong);
+        let sabotaged = fake.pinned_reference("filter", &wrong);
+        match anonymous().pull(&sabotaged) {
+            Err(PullError::DigestMismatch { named, fetched }) => {
+                assert_eq!(named, wrong);
+                assert_ne!(fetched, wrong, "the manifest's real digest is not the lie");
+            }
+            other => panic!("a mismatched digest resolved to {other:?}"),
+        }
+
+        // And reverting to the correct digest for the very same artifact pulls clean — proof
+        // the refusal above was about the mismatch, and not something else broken.
+        let correct = fake.digest_reference("filter", "1.0.0");
+        assert_eq!(anonymous().pull(&correct), Ok(b"\0asm".to_vec()));
     }
 
     #[test]

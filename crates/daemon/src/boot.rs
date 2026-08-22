@@ -936,6 +936,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_digest_pinned_reference_resolves_from_a_warm_cache_offline() {
+        // The strongest pin there is, resolved exactly the way a tag is (DAEMON §2, §4,
+        // eieio-8yq.11): `sha256-<hex>` occupies the position a tag occupies, so a warm entry
+        // answers with nothing reaching a registry — the same airgap claim
+        // `a_warm_cache_boots_with_no_registry_in_sight` makes for a tag.
+        let root = scratch("boot-digest-warm");
+        let entry = root
+            .join("blocks")
+            .join("transform")
+            .join("sha256-deadbeef");
+        std::fs::create_dir_all(&entry).expect("the cache entry");
+        std::fs::copy(
+            eio_conformance::golden::build().join("transform.wasm"),
+            entry.join("block.wasm"),
+        )
+        .expect("the golden blocks are built");
+        service(
+            &root,
+            "alpha.toml",
+            &one_transform("alpha").replace("transform:1.0.0", "transform@sha256:deadbeef"),
+        );
+
+        let services = boot_dir(&root).await;
+        assert_eq!(services.counts().running, 1, "{:?}", services.get("alpha"));
+    }
+
+    #[tokio::test]
+    async fn a_digest_pinned_reference_pulls_on_a_miss_and_the_cache_keeps_it() {
+        // "A manifest can be fetched by digest exactly as it is by tag" (eieio-8yq.11): a cold
+        // digest-pinned entry is filled through the same pull `a_miss_is_pulled_and_the_cache_
+        // keeps_it` exercises for a tag.
+        let root = data_dir("boot-digest-pull");
+        let fake = Fake::start();
+        fake.publish(
+            "golden",
+            "1.0.0",
+            &std::fs::read(eio_conformance::golden::build().join("transform.wasm"))
+                .expect("the golden blocks are built"),
+        );
+        let reference = fake.digest_reference("golden", "1.0.0");
+        let (_, digest) = reference
+            .split_once('@')
+            .expect("a digest-pinned reference");
+        let hex = digest.trim_start_matches("sha256:");
+        service(
+            &root,
+            "alpha.toml",
+            &one_transform("alpha").replace("transform:1.0.0", &reference),
+        );
+
+        let services = boot_dir(&root).await;
+        assert_eq!(services.counts().running, 1, "{:?}", services.get("alpha"));
+        assert!(
+            root.join("blocks")
+                .join("golden")
+                .join(format!("sha256-{hex}"))
+                .join("block.wasm")
+                .exists(),
+            "the pull filled the content-addressed cache entry the reference names"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_digest_mismatch_between_reference_and_manifest_is_refused() {
+        // The security-relevant path (DAEMON §4, eieio-8yq.11): a digest-pinned reference
+        // that resolved to different bytes than it names would defeat the only thing a
+        // digest is for, so the pull is refused and nothing is written to the cache.
+        let root = data_dir("boot-digest-mismatch");
+        let fake = Fake::start();
+        fake.publish(
+            "golden",
+            "1.0.0",
+            &std::fs::read(eio_conformance::golden::build().join("transform.wasm"))
+                .expect("the golden blocks are built"),
+        );
+        // A registry that answers a manifest at a digest that is not its own — the only way
+        // to make this happen deliberately, since a well-behaved registry never disagrees
+        // with the digest it is asked for.
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        fake.publish_manifest_dishonestly_at_digest("golden", "1.0.0", &wrong);
+        let sabotaged = fake.pinned_reference("golden", &wrong);
+        service(
+            &root,
+            "alpha.toml",
+            &one_transform("alpha").replace("transform:1.0.0", &sabotaged),
+        );
+
+        let services = boot_dir(&root).await;
+        assert!(
+            matches!(
+                failure(&services, "alpha"),
+                Failure::Unpullable {
+                    reason: PullError::DigestMismatch { .. },
+                    ..
+                }
+            ),
+            "{:?}",
+            failure(&services, "alpha")
+        );
+        assert!(
+            !root
+                .join("blocks")
+                .join("golden")
+                .join(format!("sha256-{}", "0".repeat(64)))
+                .join("block.wasm")
+                .exists(),
+            "a refused pull must not fill the cache"
+        );
+
+        // And reverting to the correct digest for the very same artifact still resolves —
+        // proof the refusal above was about the mismatch, and not something else broken.
+        let correct = fake.digest_reference("golden", "1.0.0");
+        service(
+            &root,
+            "beta.toml",
+            &one_transform("beta").replace("transform:1.0.0", &correct),
+        );
+        let services = boot_dir(&root).await;
+        assert_eq!(services.counts().running, 1, "{:?}", services.get("beta"));
+    }
+
+    #[tokio::test]
     async fn a_cached_file_that_is_not_a_block_is_its_own_class() {
         // Resolution succeeded and ABI §4 did not, which is a different thing for an
         // operator to do about it than an empty cache slot: something is *there*.

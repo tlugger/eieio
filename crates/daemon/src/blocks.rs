@@ -36,8 +36,13 @@ const MODULE: &str = "block.wasm";
 pub enum Unresolvable {
     /// The reference carries no tag, so it names no cache entry (DAEMON §4).
     Untagged,
-    /// The reference is digest-pinned, which names an artifact and not a version (DAEMON §4).
-    Digest,
+    /// The reference is digest-pinned with an algorithm this cache has no directory prefix
+    /// for. Only `sha256` has one (DAEMON §2); a second algorithm is a new prefix and not a
+    /// migration, but until one exists, a reference naming it genuinely cannot be resolved.
+    UnsupportedDigest {
+        /// The algorithm named, e.g. `sha512`.
+        algorithm: String,
+    },
     /// The reference is empty, or its name or version is not a single path component.
     Malformed,
     /// Nothing is cached under that name and version.
@@ -67,9 +72,11 @@ impl std::fmt::Display for Unresolvable {
             Unresolvable::Untagged => {
                 f.write_str("this reference has no version tag, and the cache is keyed by version")
             }
-            Unresolvable::Digest => {
-                f.write_str("digest-pinned references are not resolvable from the cache yet")
-            }
+            Unresolvable::UnsupportedDigest { algorithm } => write!(
+                f,
+                "this reference is pinned by a {algorithm} digest, and only sha256 has a cache \
+                 directory prefix"
+            ),
             Unresolvable::Malformed => f.write_str("this is not a block reference"),
             Unresolvable::Missing { path } => {
                 write!(f, "no block is cached at {}", path.display())
@@ -87,9 +94,11 @@ impl std::fmt::Display for Unresolvable {
 /// One name-and-version pair, as a reference resolves to (DAEMON §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    /// The block's name: the reference's last component before the tag.
+    /// The block's name: the reference's last component before the tag or digest.
     pub name: String,
-    /// The version: the reference's tag.
+    /// The version: the reference's tag, or `sha256-<hex>` for a digest-pinned reference
+    /// (DAEMON §2, §4, eieio-8yq.11) — the digest occupying the position a tag occupies, so
+    /// every reader of this field needs no digest-specific case.
     pub version: String,
 }
 
@@ -194,8 +203,8 @@ fn parse(reference: &str) -> Result<Entry, Unresolvable> {
     if reference.is_empty() {
         return Err(Unresolvable::Malformed);
     }
-    if reference.contains('@') {
-        return Err(Unresolvable::Digest);
+    if let Some((path, digest)) = split_digest(reference) {
+        return parse_digest(path, digest);
     }
 
     let Some((path, version)) = split_tag(reference) else {
@@ -211,6 +220,37 @@ fn parse(reference: &str) -> Result<Entry, Unresolvable> {
     Ok(Entry {
         name: String::from(name),
         version: String::from(version),
+    })
+}
+
+/// A digest-pinned reference's cache entry (DAEMON §2, §4, eieio-8yq.11).
+///
+/// `sha256-<hex>` occupies the position a tag occupies, which is what lets [`Cache::path`]
+/// need no digest-specific branch once this has run: the layout shape is unchanged, and a
+/// digest-pinned block is found, listed and garbage-collected by exactly the code a tagged
+/// one is. `path` is everything before the `@`, same as [`parse`] reads before the `:`.
+fn parse_digest(path: &str, digest: &str) -> Result<Entry, Unresolvable> {
+    let Some((algorithm, hex)) = digest.split_once(':') else {
+        return Err(Unresolvable::Malformed);
+    };
+    if algorithm != "sha256" {
+        return Err(Unresolvable::UnsupportedDigest {
+            algorithm: String::from(algorithm),
+        });
+    }
+    if hex.is_empty() || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(Unresolvable::Malformed);
+    }
+
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if !is_component(name) {
+        return Err(Unresolvable::Malformed);
+    }
+    Ok(Entry {
+        name: String::from(name),
+        // Folded to lowercase: this node always computes and compares hex in lowercase
+        // (`hex`, above), and a reference spelled in uppercase should name the same entry.
+        version: format!("sha256-{}", hex.to_ascii_lowercase()),
     })
 }
 
@@ -234,6 +274,16 @@ pub fn split_tag(reference: &str) -> Option<(&str, &str)> {
         true => None,
         false => Some((&reference[..colon], tag)),
     }
+}
+
+/// Splits a reference at its digest pin: everything before the `@`, and the digest itself.
+///
+/// Shared with [`registry`](crate::registry) for the reason [`split_tag`] is: the two sides
+/// must read a reference the same way, or a pull would fetch one artifact and a resolve would
+/// cache it under another. `None` when the reference carries no `@`, which is the ordinary,
+/// tag-pinned case.
+pub fn split_digest(reference: &str) -> Option<(&str, &str)> {
+    reference.split_once('@')
 }
 
 /// Whether `text` is one ordinary path component, safe to join onto the cache root.
@@ -301,13 +351,52 @@ mod tests {
     }
 
     #[test]
-    fn a_digest_pinned_reference_says_so_rather_than_failing_as_a_miss() {
-        // Its own class, because resolving one is the pull half's: a digest names an
-        // artifact and not a cache path (DAEMON §4, eieio-8yq.3).
+    fn a_digest_pinned_reference_names_a_content_addressed_entry() {
+        // The digest occupies the position a tag occupies (DAEMON §2, §4, eieio-8yq.11): the
+        // layout shape is unchanged, so a digest-pinned block is found by exactly the code a
+        // tagged one is.
         assert_eq!(
             parse("filter@sha256:0123456789abcdef"),
-            Err(Unresolvable::Digest)
+            entry("filter", "sha256-0123456789abcdef")
         );
+        assert_eq!(
+            parse("ghcr.io/tlugger/filter@sha256:0123456789abcdef"),
+            entry("filter", "sha256-0123456789abcdef"),
+            "the registry and namespace say where a pull goes, same as with a tag"
+        );
+        assert_eq!(
+            parse("filter@sha256:ABCDEF01"),
+            entry("filter", "sha256-abcdef01"),
+            "hex folds to lowercase, since that is what this node computes and compares"
+        );
+    }
+
+    #[test]
+    fn a_digest_naming_an_unsupported_algorithm_is_its_own_class() {
+        // `sha256` has a directory prefix (DAEMON §2); a second algorithm is a new prefix
+        // and not a migration, but until one exists this genuinely cannot resolve.
+        assert_eq!(
+            parse("filter@sha512:0123456789abcdef"),
+            Err(Unresolvable::UnsupportedDigest {
+                algorithm: String::from("sha512")
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_digest_is_refused_as_malformed_rather_than_unsupported() {
+        for reference in [
+            "filter@sha256:",
+            "filter@sha256:not-hex",
+            "filter@nonsense",
+            "filter@",
+        ] {
+            assert_eq!(
+                parse(reference),
+                Err(Unresolvable::Malformed),
+                "{reference:?}"
+            );
+        }
     }
 
     #[test]
@@ -322,6 +411,21 @@ mod tests {
             entry("shadow", "1"),
             "the leading segments are a namespace, and a namespace names no directory here"
         );
+        assert_eq!(
+            parse("../../etc/shadow@sha256:0123456789abcdef"),
+            entry("shadow", "sha256-0123456789abcdef"),
+            "the same is true of a digest pin's namespace"
+        );
+        for reference in ["..@sha256:0123456789abcdef", "filter@sha256:.."] {
+            let parsed = parse(reference);
+            assert!(
+                matches!(
+                    parsed,
+                    Err(Unresolvable::Malformed | Unresolvable::UnsupportedDigest { .. })
+                ),
+                "{reference:?} resolved to {parsed:?}"
+            );
+        }
         for reference in [
             "..:1",
             "filter:..",
@@ -349,6 +453,8 @@ mod tests {
             "filter:../../..",
             "a/../../b:1",
             "..:..",
+            "../../etc/shadow@sha256:0123456789abcdef",
+            "..@sha256:0123456789abcdef",
         ] {
             match cache.path(reference) {
                 Err(_) => {}
@@ -384,6 +490,35 @@ mod tests {
                 path: root.join("filter").join("9.9.9").join(MODULE)
             }),
             "the miss says where to put one"
+        );
+    }
+
+    #[test]
+    fn a_digest_pinned_reference_resolves_from_a_warm_cache_with_no_registry_consulted() {
+        // DAEMON §4's airgap claim, for the strongest pin there is: the cache is keyed by
+        // `sha256-<hex>` exactly where a tag would sit, so a warm entry answers the read half
+        // with nothing reaching a registry (eieio-8yq.11).
+        let root = scratch("cache-read-digest");
+        let entry = root.join("filter").join("sha256-0123456789abcdef");
+        std::fs::create_dir_all(&entry).expect("the cache entry");
+        std::fs::write(entry.join(MODULE), b"\0asm").expect("a module");
+
+        let cache = Cache::new(root.clone());
+        assert_eq!(
+            read(&cache, "filter@sha256:0123456789abcdef"),
+            Ok(b"\0asm".to_vec())
+        );
+        assert_eq!(
+            read(&cache, "ghcr.io/anyone/filter@sha256:0123456789abcdef"),
+            Ok(b"\0asm".to_vec()),
+            "a cache filled from anywhere answers a digest-pinned reference from anywhere"
+        );
+        assert_eq!(
+            read(&cache, "filter@sha256:ffff"),
+            Err(Unresolvable::Missing {
+                path: root.join("filter").join("sha256-ffff").join(MODULE)
+            }),
+            "a miss under a different digest says where to put one, same as a tag would"
         );
     }
 }

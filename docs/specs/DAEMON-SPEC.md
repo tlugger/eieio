@@ -107,7 +107,9 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
     token                      the management API's bearer token (§9.1)
   services/
     <name>.toml                one service definition per file
-  blocks/                      OCI pull cache: <name>/<version>/block.wasm
+  blocks/                      OCI pull cache: <name>/<version>/block.wasm,
+                               where <version> is a tag or sha256-<hex> for a
+                               digest-pinned reference (§4)
   precompiled/                 <sha256>.<engine>.cwasm — a compiled block, for
                                those bytes on this engine (§4.3). Derived; safe
                                to delete
@@ -192,12 +194,18 @@ A service that parses and validates but is not marked `autostart` is **loaded an
 **How a reference names a cache entry.** §2's layout is `blocks/<name>/<version>/block.wasm`, and a service file carries a reference (SERVICE §4), so the mapping between them is normative:
 
 ```
-reference = [ registry "/" ] [ namespace "/" ]... name ":" version
+reference = [ registry "/" ] [ namespace "/" ]... name ( ":" version | "@" algorithm ":" hex )
 ```
 
 `name` is the last `/`-separated component before the tag and `version` is the tag, so `filter:1.2.0` and `ghcr.io/tlugger/filter:1.2.0` name the same cache entry. The registry and namespace are where a *pull* goes (that half of this section) and say nothing about where a pulled block sits, which is what lets a node resolve a service offline against a cache filled from anywhere.
 
-**The tag is REQUIRED.** A reference without one is refused rather than defaulted to `latest`: the cache is keyed by version, and a service pinned to a moving tag would resolve to whatever was pulled last — reproducibility being the thing SCOPE §3.6 versions blocks for. **Digest-pinned references** (`name@sha256:…`) are refused with a distinct error, and remain refused after the pull half below: a digest names an artifact and not a version, so admitting one means deciding what directory it caches into, which is a change to §2's layout rather than an addition to this client.
+**A tag or a digest is REQUIRED.** A reference carrying neither is refused rather than defaulted to `latest`: the cache is keyed by version, and a service pinned to a moving tag would resolve to whatever was pulled last — reproducibility being the thing SCOPE §3.6 versions blocks for.
+
+**A digest-pinned reference** (`name@sha256:…`) caches at `blocks/<name>/sha256-<hex>/block.wasm`, the digest occupying the position a tag occupies. §2's layout *shape* is therefore unchanged, and every path that resolves a reference against `blocks/` treats a digest-pinned entry exactly as it treats a tagged one — there is no second mapping to keep in step with this one. The `sha256-` prefix rather than a bare hex string keeps the algorithm in the path, so a second digest algorithm is a new prefix and not a migration; a digest pinned with any other algorithm has no prefix yet and is refused rather than guessed at.
+
+Refusing the strongest pin while accepting a tag was backwards: a digest is the most reproducible form a reference has, and it is what a deployer reaches for when a tag is not enough.
+
+**The digest MUST be verified against the manifest actually fetched** — before the layer is fetched and before §4.2's signature policy is applied. A mismatch is a refusal and nothing is written to the cache: a digest-pinned reference that resolved to different bytes than it names would defeat the only thing a digest is for.
 
 Resolution is therefore two halves with one seam. The **read** half — reference to cache entry to bytes, and every way that fails — is what boot (§3) needs and is what makes the airgap claim above true. The **pull** half — the registry client, digest verification, signature policy and the precompiled artifact — fills the cache and is where a reference's registry and namespace are finally used.
 

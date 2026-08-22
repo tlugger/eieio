@@ -111,6 +111,41 @@ impl Fake {
         format!("127.0.0.1:{}/{name}:{version}", self.port)
     }
 
+    /// What a service file would write to pin `name:version` on this registry by digest
+    /// instead of by tag (DAEMON §4, eieio-8yq.11).
+    ///
+    /// The digest of the manifest actually published for `name:version` — a real registry
+    /// answers the identical manifest bytes whether asked for by tag or by the digest that
+    /// names them, which is what [`publish_with_layer_type`](Fake::publish_with_layer_type)
+    /// mirrors by serving one manifest under both keys.
+    pub fn digest_reference(&self, name: &str, version: &str) -> String {
+        self.pinned_reference(name, &self.manifest_digest(name, version))
+    }
+
+    /// A reference pinning `name` at `digest`, whether or not anything is actually served
+    /// there — for the test that needs to name a digest deliberately and see what a pull does
+    /// with it (eieio-8yq.11).
+    pub fn pinned_reference(&self, name: &str, digest: &str) -> String {
+        format!("127.0.0.1:{}/{name}@{digest}", self.port)
+    }
+
+    /// Serves `name:version`'s manifest at a digest key that is not its own (eieio-8yq.11).
+    ///
+    /// What a registry that answers the wrong manifest for a digest looks like from the
+    /// outside — the only way to reach [`PullError::DigestMismatch`](super::PullError::
+    /// DigestMismatch) in a test, since a well-behaved registry never disagrees with the
+    /// digest it is asked for. The manifest already served at its *real* digest and at
+    /// `name:version` is untouched, so a reference using the correct digest still pulls clean.
+    pub fn publish_manifest_dishonestly_at_digest(&self, name: &str, version: &str, digest: &str) {
+        let mut state = self.state.lock().expect("the registry");
+        let manifest = state
+            .manifests
+            .get(&format!("{name}:{version}"))
+            .expect("something published to alias")
+            .clone();
+        state.manifests.insert(format!("{name}:{digest}"), manifest);
+    }
+
     /// How many tokens the dance has minted, over the registry's life.
     pub fn tokens_minted(&self) -> usize {
         self.minted.load(Ordering::SeqCst)
@@ -144,12 +179,21 @@ impl Fake {
             empty = hex_digest(b"{}"),
             size = blob.len(),
         );
+        let manifest = manifest.into_bytes();
+        // A real registry answers the identical bytes whether the manifest is asked for by
+        // tag or by the digest that names it, so this is served under both keys (DAEMON §4,
+        // eieio-8yq.11) — the second is what makes `digest_reference` resolvable.
+        let manifest_digest = hex_digest(&manifest);
+
         let mut state = self.state.lock().expect("the registry");
         state.blobs.insert(digest, blob.to_vec());
         state.blobs.insert(hex_digest(b"{}"), b"{}".to_vec());
         state
             .manifests
-            .insert(format!("{name}:{version}"), manifest.into_bytes());
+            .insert(format!("{name}:{version}"), manifest.clone());
+        state
+            .manifests
+            .insert(format!("{name}:{manifest_digest}"), manifest);
     }
 
     /// Publishes an image index at `name:version`, which a block may not be.
