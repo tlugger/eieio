@@ -17,6 +17,8 @@ use std::time::Duration;
 use eio_host_core::Engine;
 use eio_manifest::Capability;
 
+use crate::scenario::Proposal;
+
 /// What one guest entry is allowed to consume (ABI §10).
 ///
 /// Carried by a scenario rather than defaulted by a host, because exhaustion is a fault
@@ -109,7 +111,7 @@ pub trait Host {
     /// divergence. The method stays because the next engine's gap should be a named skip rather
     /// than a mystery — and the skip path is exercised by a fixture host in `tests/reference.rs`
     /// rather than left to rot until that engine arrives.
-    fn refuses_proposal(&self, _proposal: &str) -> bool {
+    fn refuses_proposal(&self, _proposal: Proposal) -> bool {
         true
     }
 

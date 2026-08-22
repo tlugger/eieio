@@ -10,7 +10,7 @@
 //! a fact about this repository rather than an aspiration.
 
 use eio_conformance::{
-    Budget, Guest, Host, HostError, Loaded, Outcome, Reference, RefusalLayer, run, suite,
+    Budget, Guest, Host, HostError, Loaded, Outcome, Proposal, Reference, RefusalLayer, run, suite,
 };
 
 #[test]
@@ -141,7 +141,7 @@ impl Host for EngineGap {
     }
 
     /// The gap. Not "SIMD is acceptable" — a host declaring what its engine does not do.
-    fn refuses_proposal(&self, _proposal: &str) -> bool {
+    fn refuses_proposal(&self, _proposal: Proposal) -> bool {
         false
     }
 

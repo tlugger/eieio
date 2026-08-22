@@ -21,6 +21,7 @@
 //! publishes, and property expressions by name.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use eio_manifest::Capability;
 use serde::Deserialize;
@@ -88,12 +89,76 @@ pub struct Scenario {
     pub refuses: Option<RefusalSpec>,
 }
 
+/// One of the nine proposals outside ABI §4.3's accepted set: core WASM 1.0 plus exactly the
+/// six the guest toolchain emits.
+///
+/// A closed, ABI-fixed vocabulary — the same shape [`RefusalKind`], [`DeathKind`] and
+/// [`RefusalLayer`] already give the rest of this file — so a mistyped name is a
+/// deserialization failure rather than a `RefusalSpec` that silently carries a string
+/// `Host::refuses_proposal` has never heard of and answers `true` about by default (strict,
+/// not permissive: the vector then fails loudly instead of passing).
+///
+/// Each variant is renamed by hand rather than through `rename_all`: §4.3's own spellings mix
+/// case and punctuation (`"SIMD"`, `"relaxed SIMD"`, `"multi-memory"`) in a way no single
+/// case convention reproduces, and these are the strings ABI §4.3's prose uses, that appear in
+/// report output and skip messages, and that the nine scenario JSONs already spell — nothing
+/// about the JSON needs to change for this enum to read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum Proposal {
+    /// Fixed-width SIMD (`v128`).
+    #[serde(rename = "SIMD")]
+    Simd,
+    /// Relaxed SIMD.
+    #[serde(rename = "relaxed SIMD")]
+    RelaxedSimd,
+    /// Tail calls (`return_call`, `return_call_indirect`).
+    #[serde(rename = "tail call")]
+    TailCall,
+    /// Multiple memories per module.
+    #[serde(rename = "multi-memory")]
+    MultiMemory,
+    /// 64-bit memory indices.
+    #[serde(rename = "memory64")]
+    Memory64,
+    /// Shared memory and atomics.
+    #[serde(rename = "threads")]
+    Threads,
+    /// Exception handling.
+    #[serde(rename = "exceptions")]
+    Exceptions,
+    /// Extended constant expressions.
+    #[serde(rename = "extended const")]
+    ExtendedConst,
+    /// Garbage-collected reference types.
+    #[serde(rename = "GC")]
+    Gc,
+}
+
+impl fmt::Display for Proposal {
+    /// ABI §4.3's own spelling — the exact text the nine scenario JSONs carry, so a skip
+    /// message or a violation detail reads the same whether it came from the JSON or from this
+    /// enum's `Display`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Proposal::Simd => "SIMD",
+            Proposal::RelaxedSimd => "relaxed SIMD",
+            Proposal::TailCall => "tail call",
+            Proposal::MultiMemory => "multi-memory",
+            Proposal::Memory64 => "memory64",
+            Proposal::Threads => "threads",
+            Proposal::Exceptions => "exceptions",
+            Proposal::ExtendedConst => "extended const",
+            Proposal::Gc => "GC",
+        })
+    }
+}
+
 /// A load-time refusal a scenario asserts (ABI §4.3, §13.1).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefusalSpec {
     /// The proposal §4.3 refuses, as the report and any skip name it.
-    pub proposal: String,
+    pub proposal: Proposal,
     /// What the rejection must contain, matched case-insensitively as a substring.
     ///
     /// Optional because no engine names every proposal — wasmtime does not name extended
@@ -447,4 +512,40 @@ pub struct RunExpect {
     /// Allocations the guest declined with `0` (ABI §9.5).
     #[serde(default)]
     pub refused_allocations: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Proposal;
+
+    /// Every proposal's `Display` is the spelling serde reads it back from.
+    ///
+    /// The two are hand-written lists of the same nine strings — `#[serde(rename)]` because
+    /// no case convention reproduces §4.3's spellings, and `Display` because a skip message
+    /// has to name the proposal the way the specification does. Nothing but this test stops
+    /// one from drifting from the other, and a drift would be quiet: the JSON would still
+    /// deserialize, and a report would name a proposal by a spelling no scenario uses.
+    #[test]
+    fn display_and_serde_agree_on_all_nine_spellings() {
+        let all = [
+            Proposal::Simd,
+            Proposal::RelaxedSimd,
+            Proposal::TailCall,
+            Proposal::MultiMemory,
+            Proposal::Memory64,
+            Proposal::Threads,
+            Proposal::Exceptions,
+            Proposal::ExtendedConst,
+            Proposal::Gc,
+        ];
+        for proposal in all {
+            let rendered = proposal.to_string();
+            let parsed: Proposal = serde_json::from_str(&format!("{rendered:?}"))
+                .unwrap_or_else(|error| panic!("`{rendered}` is not a name serde reads: {error}"));
+            assert_eq!(
+                parsed, proposal,
+                "`{rendered}` round-trips to a different variant"
+            );
+        }
+    }
 }

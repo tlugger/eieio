@@ -351,7 +351,7 @@ fn refused<H: Host>(
             // for the same reason: a suite that scored an unreachable scenario as a pass
             // would claim coverage the platform has not got. The gap is a conformance bug;
             // this is what keeps it visible while it is open.
-            if !host.refuses_proposal(proposal) {
+            if !host.refuses_proposal(*proposal) {
                 return Report::skipped(
                     &scenario.name,
                     host.name(),
