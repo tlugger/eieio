@@ -3,8 +3,10 @@
 //! Seven checks, in the order a rejection is most useful in:
 //!
 //! 0. the module contains nothing §4.3 accepts on one host and not the other
-//!    (`portable`) — first, because it is the only check that does not need the manifest,
-//!    and a module the leaf tier cannot run is not made loadable by a correct one;
+//!    (`portable`) — first, because it is the only check that does not need the
+//!    manifest, and a module the leaf tier cannot run is not made loadable by a
+//!    correct one. Judged in the same pass [`Module::read_portable`] uses to build
+//!    the module, not as a separate walk before it;
 //! 1. every import is from an `eio:*` namespace, and names a function that namespace
 //!    actually has (§4.3, §7);
 //! 2. every imported namespace is covered by a declared capability (§4.3);
@@ -40,7 +42,7 @@ use crate::abi::{CORE_FUNCTIONS, CORE_NAMESPACE, MEMORY_EXPORT, REQUIRED_EXPORTS
 use crate::error::ModuleError;
 use crate::module::{ExportKind, Module};
 use crate::parse;
-use crate::portable::{self, Downstream};
+use crate::portable::Downstream;
 use crate::schema::{Abi, Capability, Manifest};
 
 /// Validates a module for loading on a host implementing [`Abi::CURRENT`].
@@ -109,8 +111,7 @@ fn validate_with(
     host: Abi,
     downstream: Downstream,
 ) -> Result<Manifest, ModuleError> {
-    portable::check(wasm, downstream)?;
-    let module = Module::read(wasm)?;
+    let module = Module::read_portable(wasm, downstream)?;
     let manifest = effective_manifest(&module, registry)?;
 
     if !manifest.abi.accepted_by(host) {

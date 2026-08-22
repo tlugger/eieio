@@ -1,8 +1,14 @@
 //! What a module may contain if both hosts are to treat it the same way (ABI §4.3).
 //!
-//! Two duties, one walk, and the same reason behind both: an engine's feature
-//! configuration cannot express the accepted set, so the loader is where the rest of it
-//! is stated. Neither duty restates what the engine already gates.
+//! Two duties, and the same reason behind both: an engine's feature configuration
+//! cannot express the accepted set, so the loader is where the rest of it is stated.
+//! Neither duty restates what the engine already gates.
+//!
+//! The walk itself lives in [`crate::module::Module::read_portable`] now, not here —
+//! judging a section is folded into the same pass that reads it, rather than a second
+//! `Parser::new(0).parse_all` over the same bytes. What stays here is what a
+//! *judgement* is: the predicates below, each over one item a walk hands it, and the
+//! vocabulary (the proposal names, [`Downstream`]) they're stated in.
 //!
 //! # 1. The portable subset — the part of the six the leaf interpreter does not run
 //!
@@ -41,7 +47,7 @@
 //! only through `externref`, a tail-call feature it does not emit, or a `-Z build-std`
 //! shared-memory build, none of which a block does.
 
-use wasmparser::{CompositeInnerType, MemoryType, Operator, Parser, Payload, TypeRef, ValType};
+use wasmparser::{MemoryType, Operator, ValType};
 
 use crate::error::ModuleError;
 
@@ -57,60 +63,14 @@ const TAIL_CALL: &str = "tail call";
 const MEMORY64: &str = "memory64";
 const THREADS: &str = "threads";
 
-/// Refuses a module ABI §4.3 accepts on one host and not the other.
+/// Refuses a second table (ABI §4.3's reference-types carve-out).
 ///
-/// Structural unreadability is [`ModuleError::Unreadable`], the same as everywhere else
-/// in this crate: whether the module is *valid* WASM remains the engine's judgement, and
-/// this walk stops at the first thing it cannot read rather than guessing past it.
-pub(crate) fn check(wasm: &[u8], downstream: Downstream) -> Result<(), ModuleError> {
-    // Every table in the module, imported or declared. wasm3 answers "element table
-    // index must be zero for MVP" to the second one, so more than one is refused even
-    // when no instruction ever addresses it.
-    let mut tables = 0usize;
-
-    for payload in Parser::new(0).parse_all(wasm) {
-        match payload.map_err(ModuleError::Unreadable)? {
-            Payload::ImportSection(reader) => {
-                for import in reader.into_imports() {
-                    if matches!(
-                        import.map_err(ModuleError::Unreadable)?.ty,
-                        TypeRef::Table(_)
-                    ) {
-                        tables += 1;
-                    }
-                }
-            }
-            Payload::TableSection(reader) => tables += reader.count() as usize,
-            Payload::MemorySection(reader) => {
-                // The declaration is the whole offence: an `i64` index type is memory64 and
-                // a `shared` flag is threads, with no instruction anywhere to give it away.
-                // An *imported* memory is not read here — every import MUST be an `eio:*`
-                // function (§4.3, §7), so `check_imports` refuses one whatever its flags
-                // say, and it says the more useful thing.
-                for memory in reader {
-                    memory_declaration(&memory.map_err(ModuleError::Unreadable)?)?;
-                }
-            }
-            Payload::TypeSection(reader) => {
-                for group in reader {
-                    for ty in group.map_err(ModuleError::Unreadable)?.into_types() {
-                        // A composite type that is not a function cannot appear in a
-                        // core module at all, and the engine says so — this walk is only
-                        // looking for a reference reaching a parameter or a result.
-                        if let CompositeInnerType::Func(ref func) = ty.composite_type.inner {
-                            for value in func.params().iter().chain(func.results()) {
-                                numeric(*value)?;
-                            }
-                        }
-                    }
-                }
-            }
-            Payload::CodeSectionEntry(entry) => function(&entry, downstream)?,
-            _ => {}
-        }
-    }
-
-    if tables > 1 {
+/// wasm3 answers "element table index must be zero for MVP" to the second one, so more
+/// than one is refused even when no instruction ever addresses it. `count` is every
+/// table in the module, imported or declared — [`crate::module::Module::read_portable`]
+/// is the one walk that visits both sections a table can come from, and tallies it.
+pub(crate) fn too_many_tables(count: usize) -> Result<(), ModuleError> {
+    if count > 1 {
         return Err(unportable("a second table", REFERENCE_TYPES));
     }
     Ok(())
@@ -143,7 +103,7 @@ pub(crate) enum Downstream {
 /// proposal, because `BinaryReaderError` carries a message and an offset and no kind: a
 /// seventh proposal's opcode and a corrupt body are indistinguishable here, and guessing
 /// between them is what §4.3 rules out.
-fn function(
+pub(crate) fn function(
     entry: &wasmparser::FunctionBody<'_>,
     downstream: Downstream,
 ) -> Result<(), ModuleError> {
@@ -254,7 +214,7 @@ fn post_mvp(feature: &'static str, proposal: &'static str) -> ModuleError {
 /// Shared memory is also refused for a reason that survives any engine fixing it: ABI §1.2
 /// gives an instance one caller at a time, so a second thread reaching into guest memory
 /// has no place in this ABI at all.
-fn memory_declaration(memory: &MemoryType) -> Result<(), ModuleError> {
+pub(crate) fn memory_declaration(memory: &MemoryType) -> Result<(), ModuleError> {
     if memory.memory64 {
         return Err(post_mvp("a memory with an i64 index", MEMORY64));
     }
@@ -269,7 +229,7 @@ fn memory_declaration(memory: &MemoryType) -> Result<(), ModuleError> {
 /// `funcref` in a *table* is core WASM 1.0 and stays legal — this is about a reference
 /// reaching a local, a parameter or a result, which is the reference-types value type
 /// wasm3 answers "unknown value_type" to.
-fn numeric(ty: ValType) -> Result<(), ModuleError> {
+pub(crate) fn numeric(ty: ValType) -> Result<(), ModuleError> {
     match ty {
         ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 => Ok(()),
         ValType::V128 => Ok(()), // SIMD: the engine's to refuse, naming its own proposal.

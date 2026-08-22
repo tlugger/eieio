@@ -7,6 +7,14 @@
 //!
 //! One pass, borrowing from the input. Nothing is copied out of the module except
 //! signatures and the manifest section's bytes, which the caller parses.
+//!
+//! [`Module::read_portable`] is the same pass with `crate::portable`'s policy folded
+//! in: the same `Parser::new(0).parse_all`, judging the sections it already visits
+//! rather than making a caller walk the module a second time to ask ABI §4.3's
+//! questions about it. [`Module::read`] stays the plain reader — nothing here changes
+//! what it means for bytes merely to be *readable* — and the two share one walk,
+//! written once, so the import and type sections are never decoded twice for two
+//! projections that must otherwise be kept in sync by hand.
 
 use alloc::vec::Vec;
 use core::fmt;
@@ -15,6 +23,7 @@ use wasmparser::{ExternalKind, Parser, Payload, TypeRef};
 
 use crate::abi::{Signature, ValType};
 use crate::error::ModuleError;
+use crate::portable::{self, Downstream};
 
 /// An import, as the module declares it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +116,31 @@ impl<'a> Module<'a> {
     /// missing export, a wrong signature, an import from nowhere — is a finding for
     /// [`crate::check`] to judge, not a read error.
     pub fn read(bytes: &'a [u8]) -> Result<Module<'a>, ModuleError> {
+        Self::read_impl(bytes, None)
+    }
+
+    /// The same read, with ABI §4.3's portable-subset and measured-gap policy
+    /// (`crate::portable`) judged in the same walk.
+    ///
+    /// `crate::check::validate_with` calls this instead of `Module::read` followed by
+    /// `portable::check` — same bytes, one `Parser::new(0).parse_all`, not two. Only
+    /// the policy question changes; the reader still fails on nothing but unreadable
+    /// bytes, and a policy violation is reported the moment the walk reaches the
+    /// section that carries it, exactly where the two-walk version reported it.
+    pub(crate) fn read_portable(
+        bytes: &'a [u8],
+        downstream: Downstream,
+    ) -> Result<Module<'a>, ModuleError> {
+        Self::read_impl(bytes, Some(downstream))
+    }
+
+    /// The one walk behind both [`Module::read`] and [`Module::read_portable`].
+    ///
+    /// `policy` is `None` for the plain reader, which never fails for anything the
+    /// engine or `crate::portable` are meant to judge. `Some(downstream)` folds that
+    /// judging in, in the same pass, at the point each section is already being
+    /// visited to build the [`Module`].
+    fn read_impl(bytes: &'a [u8], policy: Option<Downstream>) -> Result<Module<'a>, ModuleError> {
         let mut imports = Vec::new();
         let mut exports: Vec<Export<'a>> = Vec::new();
         let mut manifest_section = None;
@@ -122,19 +156,27 @@ impl<'a> Module<'a> {
         // Resolved after the walk, because section order is not guaranteed to put the
         // function section before the export section.
         let mut exported_functions: Vec<(usize, u32)> = Vec::new();
+        // Every table in the module, imported or declared, when `policy` is judging
+        // it. wasm3 answers "element table index must be zero for MVP" to the
+        // second one, so more than one is refused even when no instruction ever
+        // addresses it (ABI §4.3).
+        let mut tables = 0usize;
 
         for payload in Parser::new(0).parse_all(bytes) {
             match payload.map_err(ModuleError::Unreadable)? {
                 Payload::TypeSection(reader) => {
                     for group in reader {
                         for ty in group.map_err(ModuleError::Unreadable)?.into_types() {
-                            types.push(func_type(&ty));
+                            types.push(func_type(&ty, policy)?);
                         }
                     }
                 }
                 Payload::ImportSection(reader) => {
                     for import in reader.into_imports() {
                         let import = import.map_err(ModuleError::Unreadable)?;
+                        if policy.is_some() && matches!(import.ty, TypeRef::Table(_)) {
+                            tables += 1;
+                        }
                         imports.push(Import {
                             namespace: import.module,
                             name: import.name,
@@ -147,6 +189,26 @@ impl<'a> Module<'a> {
                 Payload::FunctionSection(reader) => {
                     for index in reader {
                         function_types.push(index.map_err(ModuleError::Unreadable)?);
+                    }
+                }
+                Payload::TableSection(reader) => {
+                    if policy.is_some() {
+                        tables += reader.count() as usize;
+                    }
+                }
+                Payload::MemorySection(reader) => {
+                    // The declaration is the whole offence: an `i64` index type is
+                    // memory64 and a `shared` flag is threads, with no instruction
+                    // anywhere to give it away. An *imported* memory is not judged
+                    // here — every import MUST be an `eio:*` function (§4.3, §7), so
+                    // `crate::check::check_imports` refuses one whatever its flags
+                    // say, and it says the more useful thing.
+                    if policy.is_some() {
+                        for memory in reader {
+                            portable::memory_declaration(
+                                &memory.map_err(ModuleError::Unreadable)?,
+                            )?;
+                        }
                     }
                 }
                 Payload::ExportSection(reader) => {
@@ -167,6 +229,11 @@ impl<'a> Module<'a> {
                         });
                     }
                 }
+                Payload::CodeSectionEntry(entry) => {
+                    if let Some(downstream) = policy {
+                        portable::function(&entry, downstream)?;
+                    }
+                }
                 Payload::CustomSection(section) if section.name() == MANIFEST_SECTION => {
                     // WASM permits repeated custom sections with one name, so this is
                     // reachable. Taking the last would be the same silent last-wins
@@ -179,6 +246,10 @@ impl<'a> Module<'a> {
                 }
                 _ => {}
             }
+        }
+
+        if policy.is_some() {
+            portable::too_many_tables(tables)?;
         }
 
         for (export, function) in exported_functions {
@@ -208,22 +279,46 @@ impl<'a> Module<'a> {
     }
 }
 
-/// A parsed type as a [`FuncType`].
+/// A parsed type as a [`FuncType`], judging each value type against `policy` on the
+/// way past if it is judging anything at all.
 ///
 /// A composite type that is not a function cannot appear in a core MVP module, so it
 /// reports as a signature with no parameters and no results — which matches no ABI
 /// export, meaning the export checks reject it. That is the right answer, arrived at
 /// without a special case.
-fn func_type(ty: &wasmparser::SubType) -> FuncType {
+///
+/// This is the one place [`val_type`]'s collapse of `V128` and `Ref` into
+/// [`ValType::Other`] would lose a distinction `crate::portable` needs: V128 is the
+/// engine's to refuse, by name, and Ref is §4.3's reference-types carve-out, which
+/// this crate refuses itself. So `policy` is asked here, against the parser's own
+/// value type, *before* the fold — never against the folded [`ValType::Other`], which
+/// cannot tell the two apart.
+fn func_type(
+    ty: &wasmparser::SubType,
+    policy: Option<Downstream>,
+) -> Result<FuncType, ModuleError> {
     match ty.composite_type.inner {
-        wasmparser::CompositeInnerType::Func(ref func) => FuncType {
-            params: func.params().iter().map(val_type).collect(),
-            results: func.results().iter().map(val_type).collect(),
-        },
-        _ => FuncType {
+        wasmparser::CompositeInnerType::Func(ref func) => {
+            let mut params = Vec::with_capacity(func.params().len());
+            for value in func.params() {
+                if policy.is_some() {
+                    portable::numeric(*value)?;
+                }
+                params.push(val_type(value));
+            }
+            let mut results = Vec::with_capacity(func.results().len());
+            for value in func.results() {
+                if policy.is_some() {
+                    portable::numeric(*value)?;
+                }
+                results.push(val_type(value));
+            }
+            Ok(FuncType { params, results })
+        }
+        _ => Ok(FuncType {
             params: Vec::new(),
             results: Vec::new(),
-        },
+        }),
     }
 }
 
