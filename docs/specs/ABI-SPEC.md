@@ -682,8 +682,8 @@ Almost no one writes against this ABI raw. The `block-sdk` Rust crate is develop
 
 This spec deliberately does not decide, and is compatible with any resolution of:
 
-- Cross-device delivery guarantees, ordering, backpressure policy — SCOPE §3.4, §3.9. (ABI touchpoints: `emit` enqueue semantics and `ERR_LIMIT` already accommodate all candidate policies.)
-- Pub/sub transport and broker topology — SCOPE §3.9. (Publisher/subscriber blocks are ordinary blocks; transport is a host concern behind `emit`/delivery.)
+- ~~Cross-device delivery guarantees, ordering, backpressure~~ — **settled**: at-most-once, per-publisher ordering, no cross-device backpressure (SCOPE §3.4). No ABI change was needed, which is the point: `emit`'s enqueue semantics and `ERR_LIMIT` accommodated every candidate, so the decision cost this document nothing.
+- ~~Pub/sub transport and broker topology~~ — **settled**: MQTT behind DAEMON §7's bridge, elected daemon-class broker (SCOPE §3.9). Still no ABI surface — `publisher`/`subscriber` remain ordinary blocks and the transport stays behind `emit`/delivery, which is why a transport swap cannot reach this spec.
 - Supervision policy on instance death — SCOPE §3.13. (ABI defines only: trap = death, re-instantiation = fresh configure.)
 - Transport security / node auth — SCOPE §3.11. (No ABI surface.)
 - Metrics — SCOPE §3.12. (Likely additive `eio:core` functions or pure host-side counters; minor version either way.)
