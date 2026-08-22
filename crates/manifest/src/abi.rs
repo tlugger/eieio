@@ -99,6 +99,20 @@ const I32: &[ValType] = &[ValType::I32];
 const I32_I32: &[ValType] = &[ValType::I32, ValType::I32];
 const I32_I32_I32: &[ValType] = &[ValType::I32, ValType::I32, ValType::I32];
 const I32_I32_I32_I32: &[ValType] = &[ValType::I32, ValType::I32, ValType::I32, ValType::I32];
+const I32_I32_I32_I32_I32_I32: &[ValType] = &[
+    ValType::I32,
+    ValType::I32,
+    ValType::I32,
+    ValType::I32,
+    ValType::I32,
+    ValType::I32,
+];
+/// `timer_set`'s `(delay_ms: i64, repeat: i32)` — ABI §7's one import with an `i64`
+/// parameter (§7.3). Everything else in §7 is all-`i32`.
+const I64_I32: &[ValType] = &[ValType::I64, ValType::I32];
+/// The two clocks' `() -> i64` result (§7.0). There is no status/size convention on
+/// an `i64` return, so this is not built with [`Signature::status`].
+const I64_RESULT: &[ValType] = &[ValType::I64];
 const NONE: &[ValType] = &[];
 
 /// Every required function export, with its signature (ABI §4.1).
@@ -153,6 +167,143 @@ pub const CORE_FUNCTIONS: [&str; 7] = [
     "rand",
 ];
 
+/// An import a module MAY use, and the signature it has (ABI §7).
+///
+/// This is the table a host binding reads to build one linker entry — wasmtime needs
+/// a closure typed to the right parameter count, a leaf runtime's dispatch table
+/// needs the same shape. It exists so that three host bindings restating "`rand` is
+/// `(i32, i32) -> i32`" by hand can instead read one row here.
+///
+/// **This is a table, not a check.** ABI §4.3 puts import signature checking on the
+/// engine at link time, deliberately, because that is where the same information
+/// already lives and is already enforced — a WASM function type mismatch is a link
+/// error the engine raises on its own. Nothing here re-validates a module's imports
+/// against these signatures; [`crate::check::validate`] cross-checks only namespaces
+/// and names for exactly that reason (see its module doc). Do not add a signature
+/// comparison against this table — that would be the second, worse-placed copy of
+/// the check §4.3 already assigns to the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportSpec {
+    /// The import's name.
+    pub name: &'static str,
+    /// The signature it has.
+    pub signature: Signature,
+}
+
+/// `eio:core`'s functions, with their signatures, in [`CORE_FUNCTIONS`]'s order
+/// (§7.0).
+pub const CORE_IMPORTS: [ImportSpec; 7] = [
+    ImportSpec {
+        name: "log",
+        signature: Signature {
+            params: I32_I32_I32,
+            results: NONE,
+        },
+    },
+    ImportSpec {
+        name: "emit",
+        signature: Signature::status(I32_I32_I32),
+    },
+    ImportSpec {
+        name: "prop",
+        signature: Signature::status(I32_I32_I32_I32),
+    },
+    ImportSpec {
+        name: "error",
+        signature: Signature {
+            params: I32_I32_I32,
+            results: NONE,
+        },
+    },
+    ImportSpec {
+        name: "time_unix_ms",
+        signature: Signature {
+            params: NONE,
+            results: I64_RESULT,
+        },
+    },
+    ImportSpec {
+        name: "time_mono_ms",
+        signature: Signature {
+            params: NONE,
+            results: I64_RESULT,
+        },
+    },
+    ImportSpec {
+        name: "rand",
+        signature: Signature::status(I32_I32),
+    },
+];
+
+const STATE_IMPORTS: [ImportSpec; 3] = [
+    ImportSpec {
+        name: "state_get",
+        signature: Signature::status(I32_I32_I32_I32),
+    },
+    ImportSpec {
+        name: "state_put",
+        signature: Signature::status(I32_I32_I32_I32),
+    },
+    ImportSpec {
+        name: "state_del",
+        signature: Signature::status(I32_I32),
+    },
+];
+
+const TIMER_IMPORTS: [ImportSpec; 2] = [
+    ImportSpec {
+        name: "timer_set",
+        signature: Signature::status(I64_I32),
+    },
+    ImportSpec {
+        name: "timer_cancel",
+        signature: Signature::status(I32),
+    },
+];
+
+const GPIO_IMPORTS: [ImportSpec; 5] = [
+    ImportSpec {
+        name: "gpio_mode",
+        signature: Signature::status(I32_I32),
+    },
+    ImportSpec {
+        name: "gpio_read",
+        signature: Signature::status(I32),
+    },
+    ImportSpec {
+        name: "gpio_write",
+        signature: Signature::status(I32_I32),
+    },
+    ImportSpec {
+        name: "gpio_watch",
+        signature: Signature::status(I32_I32),
+    },
+    ImportSpec {
+        name: "gpio_unwatch",
+        signature: Signature::status(I32),
+    },
+];
+
+const I2C_IMPORTS: [ImportSpec; 3] = [
+    ImportSpec {
+        name: "i2c_write",
+        signature: Signature::status(I32_I32_I32_I32),
+    },
+    ImportSpec {
+        name: "i2c_read",
+        signature: Signature::status(I32_I32_I32_I32),
+    },
+    ImportSpec {
+        name: "i2c_write_read",
+        signature: Signature::status(I32_I32_I32_I32_I32_I32),
+    },
+];
+
+const HTTP_IMPORTS: [ImportSpec; 1] = [ImportSpec {
+    name: "http_request",
+    signature: Signature::status(I32_I32),
+}];
+
 impl Capability {
     /// The optional export a module MUST provide because it imports this namespace,
     /// or `None` for a capability with no callback (ABI §4.2).
@@ -197,6 +348,23 @@ impl Capability {
             ],
             Capability::I2c => &["i2c_write", "i2c_read", "i2c_write_read"],
             Capability::Http => &["http_request"],
+        }
+    }
+
+    /// This namespace's functions, with their signatures, in [`functions`]'s order
+    /// (ABI §7.2–§7.6).
+    ///
+    /// See [`ImportSpec`]: a table, read by a host binding building its linker —
+    /// never a second copy of §4.3's link-time check.
+    ///
+    /// [`functions`]: Capability::functions
+    pub const fn imports(self) -> &'static [ImportSpec] {
+        match self {
+            Capability::State => &STATE_IMPORTS,
+            Capability::Timer => &TIMER_IMPORTS,
+            Capability::Gpio => &GPIO_IMPORTS,
+            Capability::I2c => &I2C_IMPORTS,
+            Capability::Http => &HTTP_IMPORTS,
         }
     }
 

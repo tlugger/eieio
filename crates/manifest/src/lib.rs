@@ -112,7 +112,8 @@ mod schema;
 mod validate;
 
 pub use abi::{
-    CORE_FUNCTIONS, CORE_NAMESPACE, ExportSpec, MEMORY_EXPORT, REQUIRED_EXPORTS, Signature, ValType,
+    CORE_FUNCTIONS, CORE_IMPORTS, CORE_NAMESPACE, ExportSpec, ImportSpec, MEMORY_EXPORT,
+    REQUIRED_EXPORTS, Signature, ValType,
 };
 pub use check::{validate, validate_against, validate_unaided};
 pub use error::{Error, ModuleError, NameSite};

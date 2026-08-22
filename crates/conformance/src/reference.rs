@@ -30,7 +30,7 @@ use std::time::Duration;
 use eio_host_core::{
     Arg, Engine, EngineError, HostCall, HostFn, Memory, Ret, Trap, TrapKind, memory_range,
 };
-use eio_manifest::{Capability, MEMORY_EXPORT};
+use eio_manifest::{CORE_IMPORTS, Capability, ImportSpec, MEMORY_EXPORT};
 use wasmtime::{Caller, Config, Extern, Func, Linker, Module, Store, Val, WasmFeatures};
 
 use crate::host::{Budget, Host, HostError};
@@ -357,9 +357,12 @@ fn trap_of(error: wasmtime::Error) -> Trap {
 
 /// Defines every ABI §7 function on `linker`, with §7's exact signatures.
 ///
-/// The signatures live in these closures rather than in a table, because wasmtime encodes them
-/// in the closure's Rust type — a table would be a second statement of the same thing, and
-/// only one of the two would be checked by the compiler.
+/// The signatures themselves come from `eio_manifest`'s [`CORE_IMPORTS`] and
+/// [`Capability::imports`] — not restated here (eieio-7d8.18). What still has to live in this
+/// file is the *shape* of each closure: wasmtime reads a parameter count from the closure's
+/// Rust type, not from a value, so [`link_i32`]'s `match` over that table's `params.len()` is
+/// where a parameter count too wide for any arm still fails loudly, however precisely the count
+/// was sourced.
 ///
 /// All twenty-two, whatever the module imports: a linker definition nothing imports costs
 /// nothing, and choosing which to define from the manifest would put ABI §4.3's capability
@@ -405,14 +408,26 @@ fn link(linker: &mut Linker<State>) -> anyhow::Result<()> {
             },
         )?;
     }
-    link_i32(linker, ns::CORE, core_fn::RAND, 2)?;
-    link_i32(linker, ns::CORE, core_fn::PROP, 4)?;
+    link_i32(
+        linker,
+        ns::CORE,
+        core_fn::RAND,
+        params_len(&CORE_IMPORTS, core_fn::RAND),
+    )?;
+    link_i32(
+        linker,
+        ns::CORE,
+        core_fn::PROP,
+        params_len(&CORE_IMPORTS, core_fn::PROP),
+    )?;
 
     for capability in Capability::ALL {
         let ns = capability.namespace();
         for name in capability.functions().iter().copied() {
             // `timer_set(delay_ms: i64, repeat: i32) -> i32` is the one function in ABI §7
-            // with an `i64` parameter (§7.3); everything else is all-`i32`.
+            // with an `i64` parameter (§7.3); everything else is all-`i32`. `eio_manifest`'s
+            // table carries this signature too — [`params_len`] just can't produce it, because
+            // an all-`i32` helper is all [`link_i32`] is.
             if name == "timer_set" {
                 linker.func_wrap(
                     ns,
@@ -427,25 +442,30 @@ fn link(linker: &mut Linker<State>) -> anyhow::Result<()> {
                     },
                 )?;
             } else {
-                link_i32(linker, ns, name, arity(name))?;
+                link_i32(linker, ns, name, params_len(capability.imports(), name))?;
             }
         }
     }
     Ok(())
 }
 
-/// How many `i32` parameters an ABI §7 capability function takes.
-fn arity(name: &str) -> usize {
-    match name {
-        "gpio_read" | "gpio_unwatch" | "timer_cancel" => 1,
-        "state_del" | "gpio_mode" | "gpio_write" | "gpio_watch" | "http_request" => 2,
-        "state_get" | "state_put" | "i2c_write" | "i2c_read" => 4,
-        "i2c_write_read" => 6,
-        // Unreachable: the caller walks `Capability::functions()`, which is ABI §7's closed
-        // set. An arity of zero would fail to link against any real import, which is the
-        // loudest failure available here.
-        _ => 0,
-    }
+/// How many parameters `name` takes, per `eio_manifest`'s published signature.
+///
+/// Every all-`i32` ABI §7 import is all-`i32` in *count* only as far as this function is
+/// concerned — it hands `params.len()` to [`link_i32`], which is the one place that still
+/// assumes every parameter is an `i32` (true of everything but `timer_set`, linked by hand
+/// above). Panics if `name` is not in `specs`: every caller draws `name` from
+/// `CORE_FUNCTIONS` or `Capability::functions()`, which `eio-manifest`'s own tests keep in
+/// lockstep with `CORE_IMPORTS`/`Capability::imports()` — so a mismatch here would already be
+/// a failure over there.
+fn params_len(specs: &[ImportSpec], name: &str) -> usize {
+    specs
+        .iter()
+        .find(|spec| spec.name == name)
+        .unwrap_or_else(|| panic!("{name} has no ABI §7 signature in eio-manifest's table"))
+        .signature
+        .params
+        .len()
 }
 
 /// Defines an all-`i32`, `-> i32` function of `params` arguments.
@@ -519,9 +539,12 @@ mod tests {
 
     #[test]
     fn every_abi_7_function_is_linked_and_registrable() {
-        // The two tables this file keeps — the linker's definitions and `defined`'s slots —
-        // against the shared one. A function missing from either is an import a block may
-        // legitimately declare and this host would fail to link or fail to answer.
+        // Three things this file and `eio_manifest` each keep, checked against each other and
+        // against a live engine: the linker's definitions (`link`, called below, `expect`s
+        // every one to succeed), `record`'s dispatch slots, and `eio_manifest`'s published
+        // signatures. A function missing from any is an import a block may legitimately
+        // declare and this host would fail to link, fail to answer, or fail to build a linker
+        // entry for at all.
         let reference = Reference::new().expect("an engine");
         let mut linker = Linker::new(&reference.engine);
         link(&mut linker).expect("every ABI §7 function links");
@@ -531,6 +554,10 @@ mod tests {
                 crate::record::abi_name(eio_host_core::exports::namespace::CORE, name).is_some(),
                 "eio:core {name} is not registrable"
             );
+            assert!(
+                CORE_IMPORTS.iter().any(|spec| spec.name == name),
+                "eio:core {name} has no eio-manifest signature"
+            );
         }
         for capability in Capability::ALL {
             for name in capability.functions() {
@@ -539,11 +566,11 @@ mod tests {
                     "{} {name} is not registrable",
                     capability.namespace()
                 );
-                // `timer_set` is the one function ABI §7 gives an `i64` parameter (§7.3), so
-                // it is linked by hand rather than through `link_i32`/`arity`.
-                if *name != "timer_set" {
-                    assert_ne!(arity(name), 0, "{name} has no arity");
-                }
+                assert!(
+                    capability.imports().iter().any(|spec| spec.name == *name),
+                    "{} {name} has no eio-manifest signature",
+                    capability.namespace()
+                );
             }
         }
         assert!(crate::record::abi_name("eio:core", "frobnicate").is_none());
