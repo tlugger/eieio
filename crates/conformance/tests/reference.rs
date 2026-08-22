@@ -9,7 +9,9 @@
 //! (`crates/daemon/src/conformance.rs`), which is what makes ABI §13's "both hosts MUST pass"
 //! a fact about this repository rather than an aspiration.
 
-use eio_conformance::{Loaded, Outcome, Reference, RefusalLayer, run, suite};
+use eio_conformance::{
+    Budget, Guest, Host, HostError, Loaded, Outcome, Reference, RefusalLayer, run, suite,
+};
 
 #[test]
 fn the_reference_host_passes_the_suite() {
@@ -35,6 +37,12 @@ fn the_reference_host_passes_the_suite() {
     );
 }
 
+/// One scenario of this repository's own suite, by filename.
+#[track_caller]
+fn scenario(name: &str) -> Loaded {
+    suite::load(&suite::scenarios_dir().join(name)).expect("the scenario loads")
+}
+
 /// One refusal scenario, with its `layer` changed to the wrong one.
 ///
 /// The two directions of ABI §4.3's two layers, and the reason `layer` is stated by the
@@ -43,9 +51,8 @@ fn the_reference_host_passes_the_suite() {
 /// grew an opinion about SIMD would satisfy the SIMD vector silently, and a proposal that
 /// slipped out of the loader's list would be caught by nothing.
 #[track_caller]
-fn mislayered(scenario: &str, layer: RefusalLayer) -> Loaded {
-    let mut loaded =
-        suite::load(&suite::scenarios_dir().join(scenario)).expect("the scenario loads");
+fn mislayered(name: &str, layer: RefusalLayer) -> Loaded {
+    let mut loaded = scenario(name);
     loaded
         .scenario
         .refuses
@@ -91,8 +98,7 @@ fn a_loader_scenario_that_asserts_no_proposal_name_is_a_failure() {
     // rule, would pass while doing it. `names` stays optional in the schema because six of the
     // nine proposals are the engine's and wasmtime names only eight of them.
     let mut host = Reference::new().expect("a wasmtime engine");
-    let mut loaded = suite::load(&suite::scenarios_dir().join("22_refuse_tail_call.json"))
-        .expect("the scenario loads");
+    let mut loaded = scenario("22_refuse_tail_call.json");
     loaded
         .scenario
         .refuses
@@ -108,6 +114,70 @@ fn a_loader_scenario_that_asserts_no_proposal_name_is_a_failure() {
             .iter()
             .any(|violation| violation.detail.contains("needs `names`")),
         "the failure has to say what is missing: {:?}",
+        report.violations
+    );
+}
+
+/// A host declaring an engine gap: wasmtime underneath, but answering ABI §13.1's
+/// `refuses_proposal` with `false`.
+///
+/// The only implementor there is. No *real* host answers `false` today — wasm3 did, until the
+/// three proposals it ran rather than refused moved into the loader's layer — and §13.1's skip
+/// is the one affordance in [`Host`] with no live implementor to exercise it. A fixture is what
+/// keeps it from rotting silently: the next engine's gap should be a named skip, and nothing
+/// would notice if the path that produces one stopped working.
+///
+/// A newtype rather than a host of its own because the skip is decided *before* anything is
+/// instantiated, so there is no guest to fake — only [`Host::Guest`]'s bound to satisfy. It runs
+/// refusal scenarios and nothing else, which is also why it declares no capabilities: a refusal
+/// is answered before the capability check is ever reached.
+struct EngineGap(Reference);
+
+impl Host for EngineGap {
+    type Guest = Guest;
+
+    fn name(&self) -> &str {
+        "engine-gap"
+    }
+
+    /// The gap. Not "SIMD is acceptable" — a host declaring what its engine does not do.
+    fn refuses_proposal(&self, _proposal: &str) -> bool {
+        false
+    }
+
+    fn instantiate(&mut self, wasm: &[u8], budget: Budget) -> Result<Guest, HostError> {
+        self.0.instantiate(wasm, budget)
+    }
+}
+
+#[test]
+fn a_host_whose_engine_does_not_refuse_the_proposal_has_the_scenario_skipped_by_name() {
+    let mut host = EngineGap(Reference::new().expect("a wasmtime engine"));
+
+    // SIMD is the engine's layer, so the declaration is read: skipped with the proposal named,
+    // exactly as an unimplemented capability is (§13.1). Not passed — a suite scoring an
+    // unreachable scenario as a pass would claim coverage the platform has not got — and not
+    // failed, because a red suite on a known, tracked gap gets muted, and a muted suite pins
+    // nothing. The divergence is a conformance bug either way; this is what keeps it visible
+    // while it is open.
+    let report = run(&scenario("20_refuse_simd.json"), &mut host);
+    let Outcome::Skipped(reason) = &report.outcome else {
+        panic!("a declared engine gap is a skip, not {:?}", report.outcome);
+    };
+    assert!(
+        reason.contains("SIMD"),
+        "a skip that does not name the proposal is the mystery §13.1 exists to prevent: {reason}"
+    );
+
+    // And read *only* for the engine's layer. Tail call is the loader's —
+    // `eio_manifest::validate`, the same code on every host — so there is no engine gap to
+    // declare and this host is not excused from it. A `refuses_proposal` consulted here would
+    // let any host opt out of the three refusals §4.3 does not leave to an engine at all.
+    let report = run(&scenario("22_refuse_tail_call.json"), &mut host);
+    assert_eq!(
+        report.outcome,
+        Outcome::Passed,
+        "a loader refusal is never skipped (§13.1): {:?}",
         report.violations
     );
 }

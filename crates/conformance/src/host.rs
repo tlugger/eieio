@@ -104,10 +104,11 @@ pub trait Host {
     /// `eio_manifest::validate`'s answer, which is the same code on every host, so there is no
     /// engine gap for a host to declare.
     ///
-    /// **No host answers `false` today.** wasm3 did, for the three proposals it runs rather
-    /// than refuses, and those moved to the loader's layer when eieio-7d8.26 closed the
-    /// divergence. The method stays because the next engine's gap should be a named skip
-    /// rather than a mystery.
+    /// **No *real* host answers `false` today.** wasm3 did, for the three proposals it runs
+    /// rather than refuses, and those moved to the loader's layer when eieio-7d8.26 closed the
+    /// divergence. The method stays because the next engine's gap should be a named skip rather
+    /// than a mystery — and the skip path is exercised by a fixture host in `tests/reference.rs`
+    /// rather than left to rot until that engine arrives.
     fn refuses_proposal(&self, _proposal: &str) -> bool {
         true
     }
