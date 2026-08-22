@@ -405,6 +405,7 @@ divergence a conformance bug.
 |`.unset_property(name, ty)`|ABI §7.1's "no value at all": keeps its `prop_id`, answers `ERR_NOT_FOUND`|
 |`.limits(max_payload, max_batch)`|What the descriptor publishes (ABI §9.7). Neither has a floor, and setting them small is the only way to find out whether a block reads them|
 |`.scripted(..)`|Capability answers, before the lifecycle runs — `configure` and `start` use capabilities too|
+|`.seed_state(key, value)`|What `eio:state` already holds before the block runs, as raw bytes — the same standing state a conformance scenario's `state` field sets up (ABI §7.2)|
 |`.configure()` / `.start()`|ABI §5.1's lifecycle, stopping after the first or running both|
 
 |Driving|Meaning|
@@ -425,6 +426,18 @@ answers, which is what lets a test script a sensor that changes between polls. A
 (`Throttle::Throttled`) is scriptable for the same reason it has to be — ABI §7.2's flash
 wear budget is a property of the hardware, so a block's back-off path is otherwise
 unreachable in a test.
+
+**`eio:state` is additionally a real store.** `state_put` writes it, `state_get` reads it
+back and `state_del` removes from it, so a block that writes on one delivery and reads on
+the next reads what it wrote — the most obvious test of what ABI §7.2 is *for*, and one this
+layer could not express at all while every answer came from a queue. Scripted answers still
+win: a queued answer or a refusal is consulted first, and only an empty queue falls through
+to the store. That order is what keeps §7.2's flash-wear back-off reachable, since a store
+that always answered would make a refusal unscriptable.
+
+The store belongs to the host, not the process, so two `TestHost`s on one thread never read
+each other's keys. It answers `state_del` for a key that was never written the way
+`host-core`'s store does, so what a block sees here is what it sees on a node.
 
 **One block per test crate.** `#[block]` generates `#[unsafe(no_mangle)]` exports and a
 single `EIO_MANIFEST`, so a second block in the same crate is a link error — §1's

@@ -291,10 +291,10 @@ pub use wasm::{
     not(target_os = "none")
 ))]
 pub use stub::{
-    Call, Recorder, emit, error, gpio_mode, gpio_read, gpio_unwatch, gpio_watch, gpio_write,
-    http_request, i2c_read, i2c_write, i2c_write_read, log, prop, rand, recorded,
-    set_prop_answerer, state_del, state_get, state_put, take_calls, time_mono_ms, time_unix_ms,
-    timer_cancel, timer_set,
+    Call, Recorder, StateAnswerer, emit, error, gpio_mode, gpio_read, gpio_unwatch, gpio_watch,
+    gpio_write, http_request, i2c_read, i2c_write, i2c_write_read, log, prop, rand, recorded,
+    set_prop_answerer, set_state_answerer, state_del, state_get, state_put, take_calls,
+    time_mono_ms, time_unix_ms, timer_cancel, timer_set,
 };
 
 #[cfg(target_os = "none")]
@@ -396,18 +396,58 @@ mod stub {
         refuse_with: Option<i32>,
         /// What answers `prop`, when something richer than a queue is driving.
         ///
-        /// The one seam in this stub, and it exists because `prop` is the one call whose
-        /// answer depends on *evaluating* something: ABI §7.1 makes a property an
-        /// expression resolved per signal, so a queue can only replay answers a test
-        /// worked out in advance, in the order the block happens to ask. `eio-test-host`
-        /// installs the real protocol here — `host-core`'s `PropContext`, the same
-        /// implementation a daemon runs.
+        /// A seam in this stub, and it exists because `prop` is a call whose answer
+        /// depends on *evaluating* something: ABI §7.1 makes a property an expression
+        /// resolved per signal, so a queue can only replay answers a test worked out in
+        /// advance, in the order the block happens to ask. `eio-test-host` installs the
+        /// real protocol here — `host-core`'s `PropContext`, the same implementation a
+        /// daemon runs. Checked *before* `prop_answers`, because once a real evaluator is
+        /// installed there is no meaningful scripted property value to prefer over it.
         ///
-        /// Nothing else needs a seam. Emissions are recorded and read back, the capability
-        /// answers are scriptable already, and timers, GPIO edges and HTTP completions are
-        /// *callbacks* — a host drives those by calling the block, not by answering it.
+        /// Emissions are recorded and read back, and timers, GPIO edges and HTTP
+        /// completions are *callbacks* — a host drives those by calling the block, not by
+        /// answering it — so neither needs a seam. `eio:state` does, for the reason given
+        /// at [`State::state_answerer`], but with the opposite precedence.
         #[allow(clippy::type_complexity)]
         prop_answerer: Option<Rc<dyn Fn(i32, i32, &mut [u8]) -> i32>>,
+        /// What answers `state_get`/`state_put`/`state_del`, when neither a refusal nor
+        /// the scripted queue answered first (ABI §7.2).
+        ///
+        /// `TestHost` (eieio-7d8.23) installs a real key-value store here, the same way
+        /// it installs `host-core`'s `PropContext` above — it runs a block as native
+        /// Rust, with no wasm import table to register a handler on the way the
+        /// reference conformance harness does (`eio_host_core::state::register`), so this
+        /// stub is the only place such a seam can live.
+        ///
+        /// **Checked last, unlike `prop_answerer`.** A property's scripted queue is a
+        /// fallback for when no real evaluator is installed; `eio:state`'s scripted queue
+        /// is a first-class fault-injection surface a test relies on even when a real
+        /// store *is* installed (a refusal, an oversized answer, SDK §6.1) — so the queue
+        /// keeps priority and the store is what an empty queue falls through to.
+        state_answerer: Option<StateAnswerer>,
+    }
+
+    /// What backs `eio:state` once neither a refusal nor the scripted queue answers
+    /// first (see [`State::state_answerer`]).
+    ///
+    /// Three closures and not one: unlike `prop`, which is a single read, `eio:state` has
+    /// three distinct shapes — a lookup that hands back bytes, a write, and a removal —
+    /// bundled into one type so a caller installs and clears all three together, the same
+    /// way ABI §4.3 grants a capability whole rather than function by function.
+    #[derive(Clone)]
+    pub struct StateAnswerer {
+        /// Answers `state_get`. `None` becomes ABI §8's `ERR_NOT_FOUND` — a store with
+        /// nothing under `key` is the ordinary case, not a failure (ABI §7.2).
+        #[allow(clippy::type_complexity)]
+        pub get: Rc<dyn Fn(&str) -> Option<Vec<u8>>>,
+        /// Answers `state_put`.
+        #[allow(clippy::type_complexity)]
+        pub put: Rc<dyn Fn(&str, &[u8])>,
+        /// Answers `state_del`. What this returns for a key that was never there is
+        /// still open (eieio-7d8.16); this stub's callers return `0` either way, matching
+        /// `host-core`'s reference implementation, and this closure is not asked to say
+        /// which case it was in.
+        pub del: Rc<dyn Fn(&str)>,
     }
 
     thread_local! {
@@ -548,6 +588,16 @@ mod stub {
         STATE.with(|state| core::mem::replace(&mut state.borrow_mut().prop_answerer, answerer))
     }
 
+    /// Installs what answers `eio:state`'s three calls once a refusal and the scripted
+    /// queue have both had first refusal (see [`State::state_answerer`]).
+    ///
+    /// Returns the previous answerer, mirroring [`set_prop_answerer`] so a caller can
+    /// restore it the same way. `Recorder::new` clears it along with everything else,
+    /// which is what keeps one test's store from leaking into the next.
+    pub fn set_state_answerer(answerer: Option<StateAnswerer>) -> Option<StateAnswerer> {
+        STATE.with(|state| core::mem::replace(&mut state.borrow_mut().state_answerer, answerer))
+    }
+
     /// Takes the calls recorded so far, leaving everything else in place.
     ///
     /// What a caller draining between callbacks needs, and distinct from
@@ -634,21 +684,68 @@ mod stub {
     }
 
     /// `state_get` (ABI §7.2), size convention.
+    ///
+    /// Precedence (see [`State::state_answerer`]): a refusal first, then the scripted
+    /// queue if a test put something in it, then the installed store, then `ERR_NOT_FOUND`
+    /// — a store with nothing under `key` is the same answer either way.
     pub fn state_get(key: &str, buffer: &mut [u8]) -> i32 {
         record(Call::StateGet(key.to_string()));
-        sized_read(buffer)
+        if let Some(code) = refusal() {
+            return code;
+        }
+        let queued = STATE.with(|state| state.borrow_mut().reads.pop_front());
+        if let Some(answer) = queued {
+            if answer.len() > buffer.len() {
+                // ABI §8: nothing written, this much required. Put back so the retry —
+                // which is the thing under test — finds it, same as `sized_read`.
+                STATE.with(|state| state.borrow_mut().reads.push_front(answer.clone()));
+                return answer.len() as i32;
+            }
+            buffer[..answer.len()].copy_from_slice(&answer);
+            return answer.len() as i32;
+        }
+        let answerer = STATE.with(|state| state.borrow().state_answerer.clone());
+        let Some(bytes) = answerer.and_then(|answerer| (answerer.get)(key)) else {
+            return eio_abi::ErrorCode::NotFound.as_i32();
+        };
+        if bytes.len() > buffer.len() {
+            // No push-back needed: the store answers the same key again for free, unlike
+            // a queue that would otherwise have consumed its only copy.
+            return bytes.len() as i32;
+        }
+        buffer[..bytes.len()].copy_from_slice(&bytes);
+        bytes.len() as i32
     }
 
-    /// `state_put` (ABI §7.2).
+    /// `state_put` (ABI §7.2). See [`state_get`] for the precedence.
     pub fn state_put(key: &str, value: &[u8]) -> i32 {
         record(Call::StatePut(key.to_string(), value.to_vec()));
-        ok_or_refusal()
+        if let Some(code) = refusal() {
+            return code;
+        }
+        let answerer = STATE.with(|state| state.borrow().state_answerer.clone());
+        if let Some(answerer) = answerer {
+            (answerer.put)(key, value);
+        }
+        0
     }
 
-    /// `state_del` (ABI §7.2).
+    /// `state_del` (ABI §7.2). See [`state_get`] for the precedence.
+    ///
+    /// `0` whether or not the key was there, matching `host-core`'s reference
+    /// implementation — ABI §7.2 does not say which it is and §8's `ERR_NOT_FOUND` is a
+    /// plausible other reading, so the question is open (eieio-7d8.16) and this does not
+    /// settle it.
     pub fn state_del(key: &str) -> i32 {
         record(Call::StateDel(key.to_string()));
-        ok_or_refusal()
+        if let Some(code) = refusal() {
+            return code;
+        }
+        let answerer = STATE.with(|state| state.borrow().state_answerer.clone());
+        if let Some(answerer) = answerer {
+            (answerer.del)(key);
+        }
+        0
     }
 
     /// `timer_set` (ABI §7.3), id convention.

@@ -46,6 +46,7 @@
 //! layers exist because neither layer catches the other's bugs.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use eio_host_core::{Arg, EngineError, HostCall, Memory, PropContext, PropFailure, PropertySource};
@@ -87,6 +88,7 @@ pub struct Builder<B> {
     limits: Limits,
     instance_id: String,
     name: String,
+    state: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -165,6 +167,20 @@ impl<B: Block> Builder<B> {
         self
     }
 
+    /// Seeds a key in the `eio:state` store before the lifecycle runs, the way a
+    /// conformance scenario's `state` field does (ABI §7.2) — for a block that reads its
+    /// own state at `start`, resuming as if from a previous life.
+    ///
+    /// Raw bytes, not a `Value`, mirroring `eio-conformance`'s `seed_state`: a CBOR value
+    /// is seeded with `value.to_cbor()`. Distinct from [`Scripted::state`], which queues
+    /// a one-shot scripted answer that outranks this store — this is what the store
+    /// itself holds before any script or any block write touches it.
+    pub fn seed_state(mut self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Self {
+        self.state
+            .insert(key.as_ref().to_vec(), value.as_ref().to_vec());
+        self
+    }
+
     /// The instance id the descriptor carries.
     pub fn instance_id(mut self, id: impl Into<String>) -> Self {
         self.instance_id = id.into();
@@ -209,6 +225,7 @@ impl<B: Block> Builder<B> {
             properties,
             emitted: Vec::new(),
             errors: Vec::new(),
+            store: Rc::new(RefCell::new(self.state)),
             _answerer: Answerer::install(),
         };
         host.drain();
@@ -226,6 +243,10 @@ impl<B: Block> Builder<B> {
     }
 }
 
+/// One instance's `eio:state`, shared between [`TestHost`] and the answerer
+/// [`Answerer::install`] wires up (ABI §7.2, eieio-7d8.23).
+type StateStore = Rc<RefCell<BTreeMap<Vec<u8>, Vec<u8>>>>;
+
 /// A configured block, and the host driving it.
 #[derive(Debug)]
 pub struct TestHost<B> {
@@ -235,6 +256,13 @@ pub struct TestHost<B> {
     properties: PropContext,
     emitted: Vec<Emission>,
     errors: Vec<String>,
+    /// The real `eio:state` store behind this instance (ABI §7.2, eieio-7d8.23).
+    ///
+    /// `Rc<RefCell<_>>` because [`Answerer::install`]'s `eio:state` closures reach it
+    /// through [`STATE_STORE`], the same indirection [`Answering`] uses for properties —
+    /// one process-wide answerer, repointed at whichever host is driving the current
+    /// callback.
+    store: StateStore,
     /// Uninstalls the property answerer when the host is dropped, so one test's block
     /// cannot answer another's properties.
     _answerer: Answerer,
@@ -275,6 +303,7 @@ impl<B: Block> TestHost<B> {
             },
             instance_id: String::from("test-instance"),
             name: String::from("block-under-test"),
+            state: BTreeMap::new(),
         }
     }
 
@@ -433,6 +462,7 @@ impl<B: Block> TestHost<B> {
         call: impl FnOnce(&mut B, &mut Ctx) -> Result<(), BlockError>,
     ) -> Result<(), BlockError> {
         ANSWERER.with(|slot| *slot.borrow_mut() = Some(Answering::new(&self.properties)));
+        STATE_STORE.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&self.store)));
         let result = {
             let block = &mut self.block;
             let ctx = &mut self.ctx;
@@ -482,6 +512,15 @@ thread_local! {
     /// each `TestHost` on this thread points it at its own context before every callback —
     /// which is what lets two hosts exist in one test without their properties crossing.
     static ANSWERER: RefCell<Option<Answering>> = const { RefCell::new(None) };
+
+    /// Which host's `eio:state` store the installed [`eio_sdk::raw::StateAnswerer`]
+    /// reaches into right now.
+    ///
+    /// The same indirection as [`ANSWERER`], for the same reason: the answerer is
+    /// installed once per thread (see [`Answerer::install`]) and [`TestHost::callback`]
+    /// repoints this at whichever host is driving before every callback, so two hosts on
+    /// one thread never see each other's state.
+    static STATE_STORE: RefCell<Option<StateStore>> = const { RefCell::new(None) };
 }
 
 /// A `PropContext` and the `HostFn` over it, built once.
@@ -566,6 +605,38 @@ impl Answerer {
                     _ => eio_host_core::ErrorCode::InvalidArg.as_i32(),
                 }
             })));
+            // `eio:state`'s real store (eieio-7d8.23): a plain map behind `STATE_STORE`,
+            // reached the same way the property answerer above reaches `ANSWERER`. Each
+            // closure is a no-op when no host is driving, which cannot happen through a
+            // live `TestHost` — `callback` sets `STATE_STORE` before every guest call —
+            // but is the correct answer if it ever does: no store, nothing to report.
+            eio_sdk::raw::set_state_answerer(Some(eio_sdk::raw::StateAnswerer {
+                get: Rc::new(|key| {
+                    STATE_STORE.with(|slot| {
+                        slot.borrow()
+                            .as_ref()?
+                            .borrow()
+                            .get(key.as_bytes())
+                            .cloned()
+                    })
+                }),
+                put: Rc::new(|key, value| {
+                    STATE_STORE.with(|slot| {
+                        if let Some(store) = slot.borrow().as_ref() {
+                            store
+                                .borrow_mut()
+                                .insert(key.as_bytes().to_vec(), value.to_vec());
+                        }
+                    });
+                }),
+                del: Rc::new(|key| {
+                    STATE_STORE.with(|slot| {
+                        if let Some(store) = slot.borrow().as_ref() {
+                            store.borrow_mut().remove(key.as_bytes());
+                        }
+                    });
+                }),
+            }));
         });
         Answerer { _private: () }
     }

@@ -3,12 +3,15 @@
 //! `TestHost` scripts capability answers *queued*, not set, so a block that reads twice gets
 //! two answers — which is what lets a test script a store whose contents change (SDK §6.1).
 //!
-//! What it does not have is a store that *round-trips*: `state_put` is recorded, not kept, so
-//! `state_get` answers from the script and never from what this block just wrote. Durability
-//! across deliveries and across re-instantiation is therefore the harness layer's here — see
-//! `crates/conformance/scenarios/09_state_round_trip.json` and the two
-//! `*_reinstantiation` scenarios, which run against a real store and assert what is left in
-//! it. Tracked as eieio-7d8.23.
+//! Behind the script is a real store, so `state_put` is kept and `state_get` reads back what
+//! this block just wrote: durability *across deliveries* is testable right here (SDK §6.1).
+//! A queued answer still wins over the store, which is what keeps a throttled `state_put`
+//! scriptable at all.
+//!
+//! Durability across *re-instantiation* stays the harness layer's, because that is a question
+//! about what survives a new instance rather than what a store remembers — see
+//! `crates/conformance/scenarios/09_state_round_trip.json` and the two `*_reinstantiation`
+//! scenarios, which run against a real store and assert what is left in it.
 
 use counter::Counter;
 use eio_sdk::prelude::*;
