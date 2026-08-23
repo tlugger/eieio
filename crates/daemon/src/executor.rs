@@ -78,12 +78,9 @@ pub enum Work {
         /// instance checks (ABI §9.7).
         batch: Batch,
     },
-    /// A timer fired (ABI §7.3). Unproducible today, for the reason [`Work::GpioEdge`]
-    /// gives.
-    #[expect(
-        dead_code,
-        reason = "produced once the timer capability exists (ABI §7.3); see Work::GpioEdge"
-    )]
+    /// A timer fired (ABI §7.3). Produced by `crate::timer::Scheduler`, posted into this same
+    /// instance's own mailbox so a firing waits its turn behind whatever else the instance is
+    /// doing rather than calling the guest directly (ABI §1.2).
     Timer {
         /// The id `timer_set` handed the guest.
         timer_id: u32,
@@ -449,6 +446,11 @@ impl Executor {
         let runtime = Arc::clone(&self.runtime);
         let bridge = Arc::clone(&self.bridge);
         let bus = self.pubsub_bus.clone();
+        // A clone of the instance's own way in, for `crate::timer::Scheduler`: a timer fires
+        // by posting `Work::Timer` back into this same mailbox, from the instance's own
+        // thread, rather than by calling the guest directly (ABI §1.2; see `crate::timer`'s
+        // module docs). Cloned before `mailbox` moves into `Instance` below.
+        let self_mailbox = mailbox.clone();
         let thread = std::thread::Builder::new()
             // Visible in `top`, in a core file, and in a profiler — which is where an
             // operator asks "which block is eating this machine" (DAEMON §11).
@@ -459,7 +461,16 @@ impl Executor {
             ))
             .spawn(move || {
                 run_instance(
-                    runtime, prepared, inbox.rx, event_tx, started_tx, outlet, state, bridge, bus,
+                    runtime,
+                    prepared,
+                    inbox.rx,
+                    event_tx,
+                    started_tx,
+                    outlet,
+                    state,
+                    bridge,
+                    bus,
+                    self_mailbox,
                 )
             })?;
 
@@ -537,8 +548,17 @@ impl Instance {
     /// Waits for the instance's thread to finish.
     ///
     /// Closes the mailbox first, which stops the instance if a [`Work::Stop`] has not
-    /// already done so. Blocking, and meant to be called after the caller has drained the
-    /// [`Events`] stream to its end — at which point the thread has already returned and
+    /// already done so — **for a block that declares no capability holding its own sender**.
+    /// A `timer`-capable block's `crate::timer::Scheduler` keeps a clone of this same mailbox
+    /// for the instance's whole life (that is how a firing timer reaches the loop at all), so
+    /// dropping the caller's own handle does not close the channel by itself for one of
+    /// those; `instance_task`'s loop would wait on a [`Work::Stop`] that never comes. Every
+    /// real caller already sends one first (`router`, `bridge`, `run`) — this fallback was
+    /// only ever a courtesy for the unwired path, never the primary shutdown signal (see
+    /// [`crate::router::Outlet::new`]'s docs) — but a caller relying on drop-alone for an
+    /// instance that might declare `timer` should send [`Work::Stop`] explicitly rather than
+    /// assume this closes it. Blocking, and meant to be called after the caller has drained
+    /// the [`Events`] stream to its end — at which point the thread has already returned and
     /// this waits for nothing.
     pub fn join(self) {
         drop(self.mailbox);

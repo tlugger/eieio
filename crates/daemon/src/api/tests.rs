@@ -47,6 +47,16 @@ impl Harness {
         )
         .expect("the golden blocks are built");
 
+        // ABI §13.2's timer emitter, for the one test that needs a source block emitting
+        // unprompted rather than a constructed `Event` (eieio-8yq.12).
+        let emitter_entry = root.join("blocks").join("emitter").join("1.0.0");
+        std::fs::create_dir_all(&emitter_entry).expect("the cache entry");
+        std::fs::copy(
+            eio_conformance::golden::build().join("emitter.wasm"),
+            emitter_entry.join("block.wasm"),
+        )
+        .expect("the golden blocks are built");
+
         // Port 0: the test takes whatever is free, so a suite running in parallel with itself
         // does not fight over a number.
         std::fs::create_dir_all(&root).expect("the data directory");
@@ -406,9 +416,10 @@ async fn a_node_reports_what_a_service_can_be_built_against() {
     assert_eq!(node["require_signed"], false);
     assert_eq!(
         node["capabilities"],
-        serde_json::json!(["state"]),
+        serde_json::json!(["state", "timer"]),
         "the node publishes what a block deployed here may declare (SCOPE §3.3): `eio:state` \
-         is backed by a store (DAEMON §10) and the three device namespaces are nobody's yet"
+         is backed by a store (DAEMON §10), `eio:timer` by a scheduler (`crate::timer`), and \
+         the three device namespaces are nobody's yet"
     );
 
     let blocks = harness.get("/blocks").await.json();
@@ -481,11 +492,12 @@ async fn a_cached_block_whose_body_stops_decoding_is_not_listed_as_good() {
         .map(|block| block["name"].as_str().expect("a name"))
         .collect();
     // `publisher`/`subscriber` are host-native and never read from the cache at all (DAEMON
-    // §6.3), so nothing about a corrupted `transform` touches them — they are the only two
-    // names left once the corrupted one is not reported loadable.
+    // §6.3), and `emitter` is the harness's other cached block (eieio-8yq.12) — none of the
+    // three is `transform`, so nothing about its corruption touches them; they are what is
+    // left once the corrupted one is not reported loadable.
     assert_eq!(
         names,
-        ["publisher", "subscriber"],
+        ["publisher", "subscriber", "emitter"],
         "a block the loader cannot finish reading is not reported loadable: {blocks}"
     );
 }
@@ -1007,6 +1019,26 @@ fn wired(name: &str) -> String {
     )
 }
 
+/// A three-block service with a real source: ABI §13.2's timer emitter feeding a transform
+/// whose property is deliberately unanswerable, feeding a second transform (eieio-8yq.12).
+///
+/// `e1` has no input port at all — it emits `{n: 7}` unprompted, once a second, which is what
+/// makes `e1.out -> t1.in` a connection a real running guest drives rather than a fixture.
+/// `t1`'s `val` references `$missing`, an attribute no signal `e1` ever emits has, so every
+/// signal `t1` processes fails that property for real (EXPR §6, ABI §7.1) — which is what
+/// makes `t1.out -> t2.in` a connection a real `expr_failure` travels, and `t2` exists only so
+/// that connection has a destination to name.
+fn wired_timer(name: &str) -> String {
+    format!(
+        "name = \"{name}\"\nautostart = true\n\
+         connections = [\"e1.out -> t1.in\", \"t1.out -> t2.in\"]\n\n\
+         [blocks.e1]\nblock = \"emitter:1.0.0\"\n\n\
+         [blocks.t1]\nblock = \"transform:1.0.0\"\n\
+         [blocks.t1.props]\nval = \"$missing\"\n\n\
+         [blocks.t2]\nblock = \"transform:1.0.0\"\n"
+    )
+}
+
 #[tokio::test]
 async fn a_tap_names_a_connection_the_service_actually_declares() {
     // A tap on an edge that does not exist would stream nothing forever, which is
@@ -1149,86 +1181,77 @@ async fn a_tap_stream_is_guarded_and_refuses_an_unknown_id() {
 
 #[tokio::test]
 async fn a_tap_streams_signals_and_the_expression_failures_that_explain_them() {
-    // The two events a tap exists for (DAEMON §6.3, §9.6). Driven by feeding the *real* drain
-    // rather than by a running guest, and the reason is a limitation worth naming: no
-    // capability is implemented yet (`IMPLEMENTED_CAPABILITIES`), so the one golden block that
-    // emits unprompted — the timer emitter — cannot load here, and DAEMON §9 has no endpoint
-    // that injects a signal into a running service. What is under test is therefore everything
-    // from an instance's event stream to the bytes on the wire: the drain, the port-name
-    // resolution, the filter, the SSE framing. The guest half is `end_to_end`'s.
+    // The two events a tap exists for (DAEMON §6.3, §9.6), both from a real running guest
+    // rather than a constructed `Event` (eieio-8yq.12): `e1` is ABI §13.2's timer emitter, the
+    // one golden block that emits with nothing delivered to it, and `timer` landing in
+    // `IMPLEMENTED_CAPABILITIES` is what lets it load here at all. `wired_timer`'s `t1` fails
+    // its own property against every real signal `e1` emits, so the failure half is just as
+    // real as the signal half — one running graph, watched from its two connections.
     let harness = Harness::start("api-tap-stream-events").await;
     harness
-        .put_definition("/services/kitchen", &wired("kitchen"))
+        .put_definition("/services/kitchen", &wired_timer("kitchen"))
         .await;
 
-    let tap = harness
+    let signals_tap = harness
+        .post_json(
+            "/taps",
+            serde_json::json!({ "service": "kitchen", "connection": "e1.out -> t1.in" }),
+        )
+        .await
+        .json();
+    let signals_id = signals_tap["id"].as_str().expect("an id").to_string();
+
+    let failure_tap = harness
         .post_json(
             "/taps",
             serde_json::json!({ "service": "kitchen", "connection": "t1.out -> t2.in" }),
         )
         .await
         .json();
-    let id = tap["id"].as_str().expect("an id").to_string();
+    let failure_id = failure_tap["id"].as_str().expect("an id").to_string();
 
-    let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
-    crate::observe::drain(
-        std::sync::Arc::clone(&harness.shared.bus),
-        String::from("kitchen"),
-        String::from("t1"),
-        vec![String::from("out")],
-        receiver,
+    // `e1` fires on its own hard-coded one-second period (`examples/blocks/emitter`, outside
+    // this task's ownership) rather than on a clock this test can drive, so this genuinely
+    // waits on wall time. Two events at one a second is comfortably inside ten real seconds;
+    // the margin is generosity against CI jitter, not a tight race — see `sse_until`'s docs
+    // for why a real guest's own pace is what a tap test now has to wait on.
+    let signals_path = format!("/taps/{signals_id}/stream");
+    let failure_path = format!("/taps/{failure_id}/stream");
+    let (signals_seen, failure_seen) = tokio::join!(
+        sse_until(&harness, &signals_path, 2, 10),
+        sse_until(&harness, &failure_path, 2, 10),
     );
 
-    tokio::spawn(async move {
-        for _ in 0..40 {
-            let mut batch = eio_signal::Batch::new();
-            let mut signal = eio_signal::Signal::new();
-            signal.set("n", eio_signal::Value::Int(41));
-            batch.push(signal);
-            let _ = events.send(crate::executor::Event::Emitted {
-                callback: "process_signals",
-                emission: crate::core_fns::Emission { port: 0, batch },
-            });
-            let _ = events.send(crate::executor::Event::Failure(
-                eio_host_core::PropFailure {
-                    prop_id: 0,
-                    signal: Some(0),
-                    error: eio_expr::Error {
-                        code: eio_expr::ErrorCode::Missing,
-                        span: eio_expr::Span { start: 3, end: 8 },
-                        message: "no such attribute on this signal",
-                    },
-                },
-            ));
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    });
-
-    let seen = sse_until(&harness, &format!("/taps/{id}/stream"), 2, 4).await;
-
     assert!(
-        seen.contains("event: signals") || seen.contains("event:signals"),
-        "the batch that travelled the connection: {seen}"
+        signals_seen.contains("event: signals") || signals_seen.contains("event:signals"),
+        "a real signal e1 emitted, over the tap: {signals_seen}"
     );
     assert!(
-        seen.contains("\"signals\":[\"{n: 41}\"]") || seen.contains("41"),
-        "rendered as EXPR §7.6 canonical text: {seen}"
+        signals_seen.contains(r#""signals":["{\"n\": 7}"]"#) || signals_seen.contains("\": 7"),
+        "rendered as EXPR §7.6 canonical text: {signals_seen}"
     );
     assert!(
-        seen.contains("\"port\":\"out\""),
-        "with the port as a name, resolved from the descriptor: {seen}"
+        signals_seen.contains("\"port\":\"out\""),
+        "with the port as a name, resolved from the descriptor: {signals_seen}"
     );
 
-    // EXPR §8's payoff: the code, the span and the message, in-stream and annotated.
+    // EXPR §8's payoff, from t1's real per-signal evaluation of `$missing` against a real
+    // signal e1 emitted — the code, the span and the message, in-stream and annotated.
     assert!(
-        seen.contains("event: expr_failure") || seen.contains("event:expr_failure"),
-        "the expression failure: {seen}"
+        failure_seen.contains("event: expr_failure") || failure_seen.contains("event:expr_failure"),
+        "the expression failure: {failure_seen}"
     );
-    assert!(seen.contains("Missing"), "carrying its code: {seen}");
-    assert!(seen.contains("\"span\":\"3..8\""), "and its span: {seen}");
     assert!(
-        seen.contains("no such attribute on this signal"),
-        "and its message: {seen}"
+        failure_seen.contains("Missing"),
+        "carrying its code: {failure_seen}"
+    );
+    assert!(
+        failure_seen.contains("\"span\":\"0..8\""),
+        "and its span, over all of `$missing`: {failure_seen}"
+    );
+    assert!(
+        failure_seen.contains("signal has no such attribute"),
+        "and its message: {failure_seen}"
     );
 }
 

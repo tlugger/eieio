@@ -131,6 +131,7 @@ mod router;
 
 pub mod exports;
 pub mod state;
+pub mod timer;
 
 pub use budget::ExprBudgets;
 pub use descriptor::{Descriptor, Limits};
@@ -153,6 +154,8 @@ pub use router::{
 // implements against; the three call handlers stay behind `state::` because a host reaches
 // for them only when it is answering the imports itself rather than registering them.
 pub use state::{StateError, StateStore};
+// `eio:timer`'s host side, exported the same way and for the same reason.
+pub use timer::{TimerError, Timers};
 // The ABI's shared vocabulary lives in `eio-abi`, below both halves of the boundary, so
 // that a guest can read ABI §8's codes without compiling this crate's expression
 // interpreter and manifest parser (see that crate's module docs). Re-exported rather than

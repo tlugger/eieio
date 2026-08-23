@@ -14,9 +14,10 @@
 //! caller at a time and nothing here needs atomics. The two are reconciled by never putting
 //! a `HostFn` in the linker at all:
 //!
-//! - The linker defines all seven `eio:core` functions and all three `eio:state` ones once,
-//!   with ABI §7.0's and §7.2's exact signatures. Each definition is a closure capturing an
-//!   [`Import`] — a plain enum — so it is trivially `Send + Sync`.
+//! - The linker defines all seven `eio:core` functions, all three `eio:state` ones and both
+//!   `eio:timer` ones once, with ABI §7.0's, §7.2's and §7.3's exact signatures. Each
+//!   definition is a closure capturing an [`Import`] — a plain enum — so it is trivially
+//!   `Send + Sync`.
 //! - The real [`HostFn`]s live in the store's data, and `register` puts them there. The
 //!   store is per-instance and never leaves its thread, so nothing about it needs to be
 //!   `Send`.
@@ -61,7 +62,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use eio_host_core::exports::{core_fn, namespace, state_fn};
+use eio_host_core::exports::{core_fn, namespace, state_fn, timer_fn};
 use eio_host_core::{
     Arg, Engine, EngineError, ExprBudgets, HostCall, HostFn, Memory, Ret, Trap, TrapKind,
     memory_range,
@@ -197,28 +198,59 @@ impl StateFn {
     }
 }
 
-/// One host function this binding can dispatch to (ABI §7.0, §7.2).
+/// The two `eio:timer` functions (ABI §7.3), as slots in the dispatch table.
+///
+/// A third enum beside [`CoreFn`] and [`StateFn`], for the same reason [`StateFn`] is not
+/// folded into [`CoreFn`]: `eio:timer` is its own capability (§4.3), and what it shares with
+/// the other two is only the slot table, through [`Import`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimerFn {
+    Set,
+    Cancel,
+}
+
+impl TimerFn {
+    /// Every one, in ABI §7.3's table order.
+    const ALL: [TimerFn; 2] = [TimerFn::Set, TimerFn::Cancel];
+
+    /// The name the guest imports it as.
+    const fn name(self) -> &'static str {
+        match self {
+            TimerFn::Set => timer_fn::SET,
+            TimerFn::Cancel => timer_fn::CANCEL,
+        }
+    }
+
+    /// The function `name` denotes, if `eio:timer` has one.
+    fn from_name(name: &str) -> Option<TimerFn> {
+        TimerFn::ALL.into_iter().find(|f| f.name() == name)
+    }
+}
+
+/// One host function this binding can dispatch to (ABI §7.0, §7.2, §7.3).
 ///
 /// The slot table is flat, and this is what indexes it: a linker closure names its import as
 /// a constant, and [`Engine::register`] resolves a `(namespace, name)` pair to the same slot.
 /// A namespace the daemon has no functions in resolves to nothing at all, which is what makes
-/// "this host implements `eio:core` and `eio:state`" a single statement rather than one per
-/// call site.
+/// "this host implements `eio:core`, `eio:state` and `eio:timer`" a single statement rather
+/// than one per call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Import {
     Core(CoreFn),
     State(StateFn),
+    Timer(TimerFn),
 }
 
 impl Import {
     /// How many slots the table has.
-    const COUNT: usize = CoreFn::ALL.len() + StateFn::ALL.len();
+    const COUNT: usize = CoreFn::ALL.len() + StateFn::ALL.len() + TimerFn::ALL.len();
 
     /// Its slot in [`State::slots`].
     const fn slot(self) -> usize {
         match self {
             Import::Core(function) => function as usize,
             Import::State(function) => CoreFn::ALL.len() + function as usize,
+            Import::Timer(function) => CoreFn::ALL.len() + StateFn::ALL.len() + function as usize,
         }
     }
 
@@ -227,6 +259,7 @@ impl Import {
         match namespace {
             namespace::CORE => CoreFn::from_name(name).map(Import::Core),
             namespace::STATE => StateFn::from_name(name).map(Import::State),
+            namespace::TIMER => TimerFn::from_name(name).map(Import::Timer),
             _ => None,
         }
     }
@@ -241,6 +274,12 @@ impl From<CoreFn> for Import {
 impl From<StateFn> for Import {
     fn from(function: StateFn) -> Import {
         Import::State(function)
+    }
+}
+
+impl From<TimerFn> for Import {
+    fn from(function: TimerFn) -> Import {
+        Import::Timer(function)
     }
 }
 
@@ -513,6 +552,7 @@ impl Runtime {
         let mut linker = Linker::new(&self.engine);
         link_core(&mut linker)?;
         link_state(&mut linker)?;
+        link_timer(&mut linker)?;
 
         let mut store = Store::new(
             &self.engine,
@@ -668,13 +708,14 @@ impl Engine for Guest {
     }
 
     fn register(&mut self, ns: &str, name: &str, f: HostFn) -> Result<(), EngineError> {
-        // `eio:core` (ABI §7.0) and `eio:state` (§7.2) are what this host implements. A block
-        // needing anything else is refused at load time with the capability named (DAEMON
-        // §12); reaching here with another namespace means a caller registered for one the
-        // linker never defined, and the guest could not have imported it.
+        // `eio:core` (ABI §7.0), `eio:state` (§7.2) and `eio:timer` (§7.3) are what this host
+        // implements. A block needing anything else is refused at load time with the
+        // capability named (DAEMON §12); reaching here with another namespace means a caller
+        // registered for one the linker never defined, and the guest could not have imported
+        // it.
         let Some(import) = Import::from_name(ns, name) else {
             return Err(EngineError::Engine(format!(
-                "this host implements no host function {ns} {name:?} (ABI §7.0, §7.2)"
+                "this host implements no host function {ns} {name:?} (ABI §7.0, §7.2, §7.3)"
             )));
         };
         let slot = &mut self.store.data_mut().slots[import.slot()];
@@ -829,6 +870,39 @@ fn link_state(linker: &mut Linker<State>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Defines `eio:timer`'s two functions on `linker`, with ABI §7.3's signatures.
+///
+/// Defined whatever the module imports, for the reason [`link_state`] gives. `timer_set`'s
+/// `delay_ms` is `eio:timer`'s own `i64` (ABI §7.3, §3) — the one import anywhere in this
+/// dispatch table that is not all-`i32` — which is why [`Arg::I64`] exists at all on the
+/// `eio_host_core` side of this call.
+fn link_timer(linker: &mut Linker<State>) -> anyhow::Result<()> {
+    let ns = namespace::TIMER;
+    linker.func_wrap(
+        ns,
+        TimerFn::Set.name(),
+        |mut caller: Caller<'_, State>, delay_ms: i64, repeat: i32| -> i32 {
+            i32_of(dispatch(
+                &mut caller,
+                TimerFn::Set,
+                &[Arg::I64(delay_ms), Arg::I32(repeat)],
+            ))
+        },
+    )?;
+    linker.func_wrap(
+        ns,
+        TimerFn::Cancel.name(),
+        |mut caller: Caller<'_, State>, timer_id: i32| -> i32 {
+            i32_of(dispatch(
+                &mut caller,
+                TimerFn::Cancel,
+                &[Arg::I32(timer_id)],
+            ))
+        },
+    )?;
+    Ok(())
+}
+
 /// Runs the handler registered in `function`'s slot.
 ///
 /// The one place a guest→host call crosses into `eio_host_core`, and the reason the
@@ -955,6 +1029,17 @@ mod tests {
     }
 
     #[test]
+    fn timer_fn_names_match_the_shared_tables() {
+        let names: Vec<&str> = TimerFn::ALL.into_iter().map(TimerFn::name).collect();
+        assert_eq!(
+            names,
+            eio_manifest::Capability::Timer.functions(),
+            "the linker defines exactly the functions ABI §7.3 gives the capability"
+        );
+        assert_eq!(names, eio_host_core::exports::timer_fn::ALL);
+    }
+
+    #[test]
     fn every_import_has_its_own_slot_and_resolves_from_its_name() {
         // The dispatch table is flat and indexed by these numbers, so two imports sharing a
         // slot would be one handler answering the other's calls — `state_get` reached through
@@ -963,6 +1048,7 @@ mod tests {
             .into_iter()
             .map(Import::Core)
             .chain(StateFn::ALL.into_iter().map(Import::State))
+            .chain(TimerFn::ALL.into_iter().map(Import::Timer))
             .collect();
         assert_eq!(imports.len(), Import::COUNT);
         for (index, import) in imports.into_iter().enumerate() {
@@ -970,6 +1056,7 @@ mod tests {
             let (namespace, name) = match import {
                 Import::Core(function) => (namespace::CORE, function.name()),
                 Import::State(function) => (namespace::STATE, function.name()),
+                Import::Timer(function) => (namespace::TIMER, function.name()),
             };
             assert_eq!(Import::from_name(namespace, name), Some(import));
         }
@@ -980,6 +1067,8 @@ mod tests {
         // no slots at all.
         assert_eq!(Import::from_name(namespace::CORE, state_fn::GET), None);
         assert_eq!(Import::from_name(namespace::STATE, core_fn::LOG), None);
+        assert_eq!(Import::from_name(namespace::STATE, timer_fn::SET), None);
+        assert_eq!(Import::from_name(namespace::TIMER, state_fn::GET), None);
         assert_eq!(Import::from_name(namespace::GPIO, "gpio_read"), None);
     }
 

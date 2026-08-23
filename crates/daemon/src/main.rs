@@ -35,6 +35,7 @@ mod registry;
 mod router;
 mod run;
 mod state;
+mod timer;
 
 #[cfg(test)]
 mod conformance;

@@ -226,10 +226,13 @@ impl Prepared {
 /// completions of ABI §7.3 and §7.6 will be awaited when they exist.
 ///
 /// `bridge` and `bus` are only ever read on the [`PreparedBody::HostNative`] path; an
-/// ordinary block's thread carries them and never touches them. Passed straight through
-/// rather than folded into a struct: every parameter here is already "what this instance is
-/// built from or reports through", and a wrapper type would not make that list shorter, only
-/// less visible at the one call site ([`crate::executor::Executor::spawn_wired`]) that has it.
+/// ordinary block's thread carries them and never touches them. `self_mailbox` is only ever
+/// read on the [`PreparedBody::Wasm`] path, for the same reason: a system block declares no
+/// capability and so never needs `crate::timer::Scheduler` (see [`instance_task`]). Passed
+/// straight through rather than folded into a struct: every parameter here is already "what
+/// this instance is built from or reports through", and a wrapper type would not make that
+/// list shorter, only less visible at the one call site
+/// ([`crate::executor::Executor::spawn_wired`]) that has it.
 #[allow(
     clippy::too_many_arguments,
     reason = "one instance's whole environment, at its one construction site; see the doc \
@@ -245,8 +248,13 @@ pub fn run_instance(
     state: Namespace,
     bridge: Arc<dyn Bridge>,
     bus: String,
+    self_mailbox: crate::executor::Mailbox,
 ) {
     let local = tokio::runtime::Builder::new_current_thread()
+        // `eio:timer`'s clock (`crate::timer::Scheduler`) is `tokio::time`, so the runtime
+        // that will drive it needs the time driver running — `build()` alone leaves it off,
+        // and a `Scheduler::set` on a runtime without it panics rather than schedules nothing.
+        .enable_time()
         .build()
         .expect("a current-thread runtime needs no resources this process lacks");
     let tasks = tokio::task::LocalSet::new();
@@ -259,7 +267,14 @@ pub fn run_instance(
         // and an ordinary block never reaches `system_block_task`.
         let task = match &prepared.body {
             PreparedBody::Wasm(_) => tokio::task::spawn_local(instance_task(
-                runtime, prepared, work, events, started, outlet, state,
+                runtime,
+                prepared,
+                work,
+                events,
+                started,
+                outlet,
+                state,
+                self_mailbox,
             )),
             PreparedBody::HostNative { .. } => tokio::task::spawn_local(system_block_task(
                 prepared, work, events, started, outlet, bridge, bus,
@@ -392,6 +407,11 @@ async fn system_block_task(
 }
 
 /// The one task the instance's `LocalSet` runs.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one instance's whole environment, passed straight through from run_instance; \
+              see that function's doc comment"
+)]
 async fn instance_task(
     runtime: Arc<Runtime>,
     prepared: Prepared,
@@ -400,6 +420,7 @@ async fn instance_task(
     started: oneshot::Sender<anyhow::Result<()>>,
     outlet: Outlet,
     state: Namespace,
+    self_mailbox: crate::executor::Mailbox,
 ) {
     // DAEMON §11: every line from here on — the daemon's own and the guest's `log` calls
     // alike — carries this identity. Entered per callback rather than held across the loop,
@@ -411,16 +432,17 @@ async fn instance_task(
         block = %prepared.manifest.name,
     );
 
-    let (mut live, mut running) =
-        match span.in_scope(|| Live::start(&runtime, prepared, events, outlet, state)) {
-            Ok(started) => started,
-            Err(error) => {
-                // Nothing was spawned that needs unwinding: `start` reports only failures that
-                // leave no instance behind (ABI §5.1 discards a rejected configuration).
-                let _ = started.send(Err(error));
-                return;
-            }
-        };
+    let (mut live, mut running) = match span
+        .in_scope(|| Live::start(&runtime, prepared, events, outlet, state, self_mailbox))
+    {
+        Ok(started) => started,
+        Err(error) => {
+            // Nothing was spawned that needs unwinding: `start` reports only failures that
+            // leave no instance behind (ABI §5.1 discards a rejected configuration).
+            let _ = started.send(Err(error));
+            return;
+        }
+    };
     // Answered before anything is routed: RUNNING is what the caller is waiting to hear, and
     // an instance that had to wait for room in a destination before saying so would make one
     // slow receiver look like a block that would not start.
@@ -485,6 +507,13 @@ struct Live {
     outlet: Outlet,
     /// What the last callback emitted, waiting to be routed (ABI §6.2).
     pending: Vec<Emission>,
+    /// This instance's `eio:timer` scheduler (ABI §7.3), if it declared the capability.
+    ///
+    /// Held here — separately from the `Rc` clone `eio_host_core::timer::register` keeps
+    /// inside the guest's own host functions — so `stop`/`died` can reach
+    /// [`crate::timer::Scheduler::cancel_all`] without going through the guest at all. `None`
+    /// for a block that never imports `eio:timer`, which is the ordinary case today.
+    timers: Option<crate::timer::Scheduler>,
 }
 
 impl Live {
@@ -499,6 +528,7 @@ impl Live {
         events: mpsc::UnboundedSender<Event>,
         outlet: Outlet,
         state: Namespace,
+        self_mailbox: crate::executor::Mailbox,
     ) -> anyhow::Result<(Live, Running<Guest>)> {
         // ABI §11.1's `required`/`default` rule, then EXPR §10's static analysis. Both are
         // configuration-time gates, and a failure of either is a rejection the deployer
@@ -542,6 +572,19 @@ impl Live {
                 .map_err(|error| anyhow::anyhow!("wiring eio:state: {error}"))?;
         }
 
+        // ABI §7.3, for a block that declared `timer` and only then — the same reasoning as
+        // `eio:state` above. `crate::timer::Scheduler::new` takes this instance's own mailbox
+        // rather than anything the guest can reach, because a timer firing must post `Work`
+        // the same way any other sender does (see `crate::timer`'s module docs).
+        let timers = if prepared.manifest.capabilities.contains(&Capability::Timer) {
+            let scheduler = crate::timer::Scheduler::new(self_mailbox);
+            eio_host_core::timer::register(&mut guest, scheduler.clone())
+                .map_err(|error| anyhow::anyhow!("wiring eio:timer: {error}"))?;
+            Some(scheduler)
+        } else {
+            None
+        };
+
         check_abi_version(&mut guest, &prepared.manifest)?;
 
         let mut live = Live {
@@ -551,6 +594,7 @@ impl Live {
             events,
             outlet,
             pending: Vec::new(),
+            timers,
         };
 
         // ABI §5.1 step 2. The driver takes the property context here and opens a scope
@@ -677,6 +721,11 @@ impl Live {
     fn stop(&mut self, running: Running<Guest>) {
         let outcome = running.stop();
         self.collect("stop");
+        // ABI §5.1 step 5: "Host cancels outstanding timers/watches/requests after stop
+        // returns." Unconditional and ahead of the match below, so it runs whether the guest
+        // stopped cleanly or died answering `eio_stop` — either way nothing will call it
+        // again, and a timer still armed would fire into a mailbox nobody drains any more.
+        self.cancel_timers();
         match outcome {
             Outcome::Live(stopped, status) => {
                 self.record("stop", status);
@@ -697,8 +746,21 @@ impl Live {
     /// of the event; today the log line is what an operator gets.
     fn died(&mut self, trap: Trap) -> Option<Running<Guest>> {
         tracing::error!(kind = %trap.kind, "the instance died: {trap}");
+        // A dead instance receives no more callbacks of any kind, `eio_on_timer` included;
+        // an outstanding timer left running would only ever post into a mailbox this instance
+        // has stopped draining. Idempotent with the call in `stop`, above, for the death that
+        // happens while answering `eio_stop` itself.
+        self.cancel_timers();
         self.send(Event::Died(trap));
         None
+    }
+
+    /// Cancels every timer this instance still has armed, if it declared the capability at
+    /// all (ABI §5.1 step 5, §7.3).
+    fn cancel_timers(&self) {
+        if let Some(timers) = &self.timers {
+            timers.cancel_all();
+        }
     }
 
     /// Records a callback's return (ABI §8).
@@ -789,11 +851,11 @@ impl Live {
 
 /// Refuses a block needing a capability this host does not implement.
 ///
-/// `eio:core` (ABI §7.0) and `eio:state` (§7.2, DAEMON §10) are what the daemon has; the three
-/// device namespaces are still nobody's. Refusing here, by name, is what SCOPE §3.3's
-/// capability negotiation amounts to for a node with no devices — and it is much more useful
-/// than the linker's answer, which would name a missing symbol rather than the capability that
-/// asked for it.
+/// `eio:core` (ABI §7.0), `eio:state` (§7.2, DAEMON §10) and `eio:timer` (§7.3, `crate::timer`)
+/// are what the daemon has; the three device namespaces are still nobody's. Refusing here, by
+/// name, is what SCOPE §3.3's capability negotiation amounts to for a node with no devices —
+/// and it is much more useful than the linker's answer, which would name a missing symbol
+/// rather than the capability that asked for it.
 ///
 /// Spelled from `eio_manifest`'s own name for each capability rather than as string literals,
 /// so that a capability this host implements cannot be listed here under a name no manifest
@@ -803,7 +865,8 @@ impl Live {
 /// check among a service's *validations*: a block wanting `gpio` on a node with no GPIO is a
 /// deployment aimed at the wrong node, which an operator answers by moving it — not by
 /// looking at why a service would not start.
-pub const IMPLEMENTED_CAPABILITIES: &[&str] = &[Capability::State.as_str()];
+pub const IMPLEMENTED_CAPABILITIES: &[&str] =
+    &[Capability::State.as_str(), Capability::Timer.as_str()];
 
 /// See [`IMPLEMENTED_CAPABILITIES`].
 pub fn refuse_unimplemented_capabilities(manifest: &Manifest) -> anyhow::Result<()> {

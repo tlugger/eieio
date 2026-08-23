@@ -20,17 +20,19 @@
 //! only shape in which §13's claim is checkable at all today, the leaf runtime not existing
 //! yet.
 //!
-//! It proves capability behaviour as far as the daemon has capabilities. `eio:core` (ABI §7.0)
-//! and `eio:state` (§7.2) are linked here, so the state scenarios — round-trip, grow-and-retry,
-//! `ERR_THROTTLED`, a first life with nothing stored — run against this binding, answered by the
-//! harness's own store. What they check is the half that is *this* crate's: the linker
-//! signatures, the dispatch table, and the store the harness registers reaching the guest at
-//! all. What backs `eio:state` on a real node is `crate::state`, and its own tests are where
-//! redb is checked.
+//! It proves capability behaviour as far as the daemon has capabilities. `eio:core` (ABI §7.0),
+//! `eio:state` (§7.2) and `eio:timer` (§7.3) are linked here, so their scenarios — state's
+//! round-trip, grow-and-retry, `ERR_THROTTLED`, a first life with nothing stored; timer's a
+//! block emitting with no inbound batch at all — run against this binding, answered by the
+//! harness's own store and scheduler. What they check is the half that is *this* crate's: the
+//! linker signatures, the dispatch table, and the store or scheduler the harness registers
+//! reaching the guest at all. What backs `eio:state` and `eio:timer` on a real node is
+//! `crate::state` and `crate::timer`, and their own tests are where redb and `tokio::time` are
+//! checked.
 //!
-//! Scenarios needing `eio:timer`, `eio:gpio`, `eio:i2c` or `eio:http` are reported **skipped, by
-//! name**. That is the honest report and not a gap being papered over — a suite counting those
-//! as passes would claim coverage this daemon does not have.
+//! Scenarios needing `eio:gpio`, `eio:i2c` or `eio:http` are reported **skipped, by name**.
+//! That is the honest report and not a gap being papered over — a suite counting those as
+//! passes would claim coverage this daemon does not have.
 
 use eio_conformance::{Budget, Host, HostError, suite};
 use eio_manifest::Capability;
@@ -55,13 +57,13 @@ impl Host for Daemon {
         "daemon"
     }
 
-    /// `state`, and nothing else yet (DAEMON §10).
+    /// `state` and `timer`, and nothing else yet (DAEMON §10, §5).
     ///
     /// The same list `crate::instance::IMPLEMENTED_CAPABILITIES` refuses a block against, and
     /// asserted below to be exactly that: a harness told the daemon can answer a namespace the
     /// daemon refuses to load a block for would report a pass nothing can reach in production.
     fn capabilities(&self) -> &[Capability] {
-        &[Capability::State]
+        &[Capability::State, Capability::Timer]
     }
 
     fn instantiate(&mut self, wasm: &[u8], budget: Budget) -> Result<Guest, HostError> {
@@ -126,8 +128,8 @@ fn the_daemon_passes_the_conformance_suite() {
         "only {ran} scenario(s) reached the daemon's binding"
     );
     // Named, not counted: the suite reaching the daemon at all is the assertion above, and
-    // this is the one that fails if `eio:state` stops being linked here — which would
-    // otherwise show up as four more skips inside a total that still looked healthy. Every
+    // this is the one that fails if `eio:state` or `eio:timer` stops being linked here — which
+    // would otherwise show up as more skips inside a total that still looked healthy. Every
     // name is checked to *exist*, so a scenario renamed out from under this list is a failure
     // rather than a silently vacuous check.
     for scenario in [
@@ -136,6 +138,7 @@ fn the_daemon_passes_the_conformance_suite() {
         "state-put-is-throttled",
         "a-fresh-instance-starts-from-nothing",
         "a-denied-capability-answers-err-capability",
+        "a-timer-emits-with-no-inbound-batch",
     ] {
         assert!(
             summary
@@ -146,7 +149,7 @@ fn the_daemon_passes_the_conformance_suite() {
         );
         assert!(
             !skipped.contains(&scenario),
-            "{scenario} was skipped, so the daemon's eio:state linkage is unproven"
+            "{scenario} was skipped, so the daemon's eio:state or eio:timer linkage is unproven"
         );
     }
 }

@@ -112,6 +112,21 @@ pub mod state_fn {
     pub const ALL: [&str; 3] = [GET, PUT, DEL];
 }
 
+/// The `eio:timer` functions (ABI §7.3).
+///
+/// Named here for the reason [`state_fn`] is: the scheduler's host side is this crate's
+/// (`crate::timer`), and a namespace spelled at its registration site as well as in
+/// `eio_manifest`'s import cross-check would be two tables free to disagree.
+pub mod timer_fn {
+    /// `(delay_ms: i64, repeat: i32) -> i32` — arm a timer, id convention (ABI §8).
+    pub const SET: &str = "timer_set";
+    /// `(timer_id: i32) -> i32` — cancel a timer, status convention.
+    pub const CANCEL: &str = "timer_cancel";
+
+    /// Both of them.
+    pub const ALL: [&str; 2] = [SET, CANCEL];
+}
+
 /// The custom section a self-describing module carries its manifest in (ABI §4.4).
 pub const MANIFEST_SECTION: &str = "eio:manifest";
 
@@ -134,6 +149,16 @@ mod tests {
         assert_eq!(
             namespace::STATE,
             eio_manifest::Capability::State.namespace()
+        );
+    }
+
+    #[test]
+    fn timer_fn_names_match_the_capabilitys_table() {
+        // Same reasoning as `state_fn_names_match_the_capabilitys_table`, for `crate::timer`.
+        assert_eq!(timer_fn::ALL, eio_manifest::Capability::Timer.functions());
+        assert_eq!(
+            namespace::TIMER,
+            eio_manifest::Capability::Timer.namespace()
         );
     }
 }
