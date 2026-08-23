@@ -37,5 +37,26 @@ clap.workspace = true
 
 anyhow.workspace = true
 
+# The management API's transport (DAEMON §9). The same blocking client the daemon's own
+# block manager uses (DAEMON §4.1) — a CLI invocation is one process making one call and
+# exiting, which is exactly the shape a blocking client is for, and pulling in an async
+# runtime here would buy nothing this binary awaits concurrently.
+ureq.workspace = true
+
+# `~/.config/eieio/nodes.toml` (eieio-yck.1's DESIGN) and every JSON body/response the
+# management API speaks (DAEMON §9). `std` because this binary is std throughout — it is
+# not a ★ crate (CLAUDE.md's repository layout) — unlike the `alloc`-only build the ★
+# crates share.
+serde = { workspace = true, default-features = false, features = ["std", "derive"] }
+serde_json = { workspace = true, default-features = false, features = ["std"] }
+
+# `nodes.toml`'s reader *and* writer. The workspace default (`parse`, `serde`) is what
+# `eio-service`'s stage-1 validation needs and is deliberately reader-only (SERVICE §9
+# keeps writing to `toml_edit`'s preserving editor); `nodes.toml` is a machine-managed
+# file with no human trivia to preserve, so a value-tree round trip through `display`
+# is the whole of what it needs, added here rather than in the workspace table because
+# no other crate wants a TOML writer that forgets comments.
+toml = { workspace = true, features = ["display", "std"] }
+
 [lints]
 workspace = true

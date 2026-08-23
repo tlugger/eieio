@@ -47,6 +47,7 @@ pub struct FileArg {
     file: PathBuf,
 }
 
+/// `eio service new`'s arguments.
 #[derive(Debug, Args)]
 pub struct New {
     /// The service's name. It is also the file's stem (SERVICE §1).
@@ -59,6 +60,7 @@ pub struct New {
     autostart: bool,
 }
 
+/// `eio service add-block`'s arguments.
 #[derive(Debug, Args)]
 pub struct AddBlock {
     /// The service file.
@@ -77,6 +79,7 @@ pub struct AddBlock {
     props: Vec<String>,
 }
 
+/// `eio service remove-block`'s arguments.
 #[derive(Debug, Args)]
 pub struct RemoveBlock {
     /// The service file.
@@ -85,6 +88,7 @@ pub struct RemoveBlock {
     id: String,
 }
 
+/// A connection's two terminals: `eio service connect`'s and `disconnect`'s arguments.
 #[derive(Debug, Args)]
 pub struct Wire {
     /// The service file.
@@ -95,6 +99,7 @@ pub struct Wire {
     to: String,
 }
 
+/// `eio service set-prop`'s arguments.
 #[derive(Debug, Args)]
 pub struct SetProp {
     /// The service file.
@@ -107,6 +112,7 @@ pub struct SetProp {
     expression: String,
 }
 
+/// `eio service unset-prop`'s arguments.
 #[derive(Debug, Args)]
 pub struct UnsetProp {
     /// The service file.
@@ -117,6 +123,7 @@ pub struct UnsetProp {
     property: String,
 }
 
+/// `eio service set-autostart`'s arguments.
 #[derive(Debug, Args)]
 pub struct SetAutostart {
     /// The service file.
@@ -126,6 +133,7 @@ pub struct SetAutostart {
     autostart: bool,
 }
 
+/// `eio service validate`'s arguments.
 #[derive(Debug, Args)]
 pub struct Validate {
     /// The service file.
