@@ -63,6 +63,24 @@ dry_runnable := "eio-abi eio-signal"
 # The guest target (ABI §1). Blocks are core WASM modules and nothing else.
 guest_target := "wasm32-unknown-unknown"
 
+# ── compiler cache ───────────────────────────────────────────────────────────
+#
+# Optional: when `sccache` is on PATH, every recipe below that shells out to `cargo` routes
+# `rustc` through it, so a fresh git worktree does not repay wasmtime+cranelift's cold-build
+# cost from scratch (eieio-p0k.7 measured ~14 parallel agents each doing exactly that in one
+# session — the single largest waste of that day). Absent `sccache`, `sccache_present`
+# evaluates to "no" and `RUSTC_WRAPPER` is exported as an empty string, which cargo treats
+# identically to the variable being unset (verified: a build with `RUSTC_WRAPPER=""` behaves
+# the same as one with it absent) — so nothing here requires `sccache` to be installed.
+#
+# Deliberately NOT a shared `CARGO_TARGET_DIR`: that would move the cost onto cargo's own
+# build-lock file and serialize concurrent worktrees against each other instead of speeding
+# them up, which is the opposite of the goal (eieio-p0k.7 measured that failure mode too).
+# `sccache` caches compiler *output* keyed on its inputs, not cargo's own bookkeeping, so it
+# gets the win without the lock contention — each worktree keeps its own `target/`.
+sccache_present := `command -v sccache >/dev/null 2>&1 && echo yes || echo no`
+export RUSTC_WRAPPER := if sccache_present == "yes" { "sccache" } else { "" }
+
 
 # List the available recipes.
 default:
@@ -118,9 +136,34 @@ check-lint-optin:
 build:
     cargo build --workspace --all-targets
 
+# `cargo test` runs each test BINARY sequentially and threads only within one binary. This
+# workspace has one ~200s binary (eio-daemon's unit tests, dominated by 25 real sleeps/waits
+# under crates/daemon/src — eieio-p0k.7) and everything else is under 35s combined, so that
+# serialization is most of this recipe's wall time. `cargo nextest` runs one process per
+# test and schedules across binaries regardless of which binary a test came from, which is
+# exactly this suite's shape, so it is the default path; `cargo test` remains as a fallback
+# for an environment without `cargo-nextest` installed.
+#
+# nextest does NOT run doctests — they are compiled as their own throwaway binaries by
+# rustdoc, a mechanism nextest deliberately does not hook into (https://nexte.st/docs/faq).
+# `cargo test --doc` therefore always runs afterward, regardless of which branch above ran,
+# or doctest coverage silently disappears from the gate.
+
 # Run the workspace test suite.
 test:
-    cargo test --workspace
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v cargo-nextest >/dev/null 2>&1; then
+        echo "test: cargo nextest run --workspace"
+        cargo nextest run --workspace
+        # nextest cannot run doctests (see above), so the fallback's `cargo test --workspace`
+        # does not need this — but this branch does, or doctest coverage silently vanishes.
+        echo "test: cargo test --doc --workspace"
+        cargo test --doc --workspace
+    else
+        echo "test: cargo-nextest not found on PATH, falling back to cargo test --workspace"
+        cargo test --workspace
+    fi
 
 # The golden blocks (ABI §13.2) are their own cargo workspace under `examples/blocks/`, so
 # `cargo test --workspace` above never sees them. Their harness half is checked by the
@@ -179,8 +222,60 @@ publish-dry-run:
         cargo publish --dry-run -p "$crate"
     done
 
-ci: fmt-check lint build test test-golden check-nostd check-guest
-    @echo "ci: all gates passed"
+# `fmt-check`, `lint`, `check-nostd` and `check-guest` depend on neither `test` nor on each
+# other (eieio-p0k.7), so they run concurrently with `test` below rather than strictly
+# before it — `test`'s ~200s daemon binary was most of this recipe's wall time (see the
+# comment on `test` above), and the other four were never waiting on it for anything.
+# `build` still runs first as a fast-failing baseline compile, and `test-golden` still runs
+# last since it is examples/blocks' own cargo workspace.
+#
+# `just` has no built-in concurrent-dependency execution (there is no `--jobs` for recipe
+# prerequisites), so the fan-out is hand-rolled below. Each stage's stdout/stderr is
+# captured to its own file rather than left to interleave live on one terminal — five
+# `cargo` invocations printing at once is not a faster gate, it is a coin flip on whether
+# you can find the one that failed — and printed in full, labeled by stage name, once that
+# stage finishes. All five are allowed to run to completion even if one fails early, so a
+# second broken gate cannot hide behind "never got to run"; first-failure-aborts is restored
+# at the end by exiting non-zero, with every failed stage named on the final line, if any
+# stage did.
+
+# The one command CI runs: builds, then fmt/lint/test/nostd/guest concurrently, then the golden blocks.
+ci: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    logdir="$(mktemp -d)"
+    trap 'rm -rf "$logdir"' EXIT
+
+    stages=(fmt-check lint test check-nostd check-guest)
+    pids=()
+    for stage in "${stages[@]}"; do
+        just "$stage" > "$logdir/$stage.log" 2>&1 &
+        pids+=("$!")
+    done
+
+    failed=()
+    for i in "${!stages[@]}"; do
+        stage="${stages[$i]}"
+        pid="${pids[$i]}"
+        status=0
+        wait "$pid" || status=$?
+        echo "═══ ${stage} ═══"
+        cat "$logdir/$stage.log"
+        if [ "$status" -ne 0 ]; then
+            echo "═══ ${stage}: FAILED (exit $status) ═══"
+            failed+=("$stage")
+        else
+            echo "═══ ${stage}: passed ═══"
+        fi
+    done
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "ci: failed stage(s): ${failed[*]}" >&2
+        exit 1
+    fi
+
+    just test-golden
+    echo "ci: all gates passed"
 
 # ── run recipes ──────────────────────────────────────────────────────────────
 
