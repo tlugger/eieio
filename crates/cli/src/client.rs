@@ -342,6 +342,7 @@ pub const ENDPOINTS: &[(&str, &str)] = &[
     ("GET", SERVICES),
     ("GET", "/services/{service}"),
     ("PUT", "/services/{service}"),
+    ("DELETE", "/services/{service}"),
     ("GET", "/services/{service}/errors"),
     ("POST", "/services/{service}/start"),
     ("POST", "/services/{service}/stop"),
@@ -473,6 +474,16 @@ impl Client {
         let etag = response.header("etag").map(String::from);
         let value = serde_json::from_slice(&response.body).context("parsing the response")?;
         Ok((value, etag))
+    }
+
+    /// `DELETE /services/{s}`: removes the definition file. Refused with `409` while the
+    /// service is running (DAEMON §9) — stop it first.
+    pub fn delete_service(&self, name: &str) -> Result<()> {
+        let response = self.call(Request::new(Method::Delete, service_path(name)))?;
+        if response.status >= 400 {
+            return Err(envelope_error(response.status, &response.body));
+        }
+        Ok(())
     }
 
     /// `GET /services/{s}/errors`.

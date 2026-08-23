@@ -94,9 +94,11 @@ pub fn routes() -> Vec<Route> {
         (&["POST"], "/blocks/pull", post(blocks::pull)),
         (&["GET"], "/services", get(services::list)),
         (
-            &["GET", "PUT"],
+            &["GET", "PUT", "DELETE"],
             "/services/{service}",
-            get(services::get_service).put(services::put_service),
+            get(services::get_service)
+                .put(services::put_service)
+                .delete(services::delete_service),
         ),
         (
             &["GET"],

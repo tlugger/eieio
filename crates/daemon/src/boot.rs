@@ -235,6 +235,23 @@ impl Services {
         self.services.insert(String::from(name), state);
     }
 
+    /// Forgets `name` entirely, retiring whatever was there (DAEMON §9.7).
+    ///
+    /// The counterpart [`Services::set`] lacked. `set` can replace a state but never remove
+    /// one, so a deleted service stayed in this map and kept appearing in §9's listing — a
+    /// `DELETE` that answered 204 while the thing it deleted was still listed. Retires rather
+    /// than drops, for [`Services::set`]'s reason: a running service's instances are threads
+    /// holding guests mid-life and are told to stop (ABI §5.1 step 5).
+    ///
+    /// §9.7 refuses to delete a *running* service, so the retire here is for the states that
+    /// can be deleted — and it is written to be correct anyway rather than to assume the
+    /// caller checked.
+    pub async fn remove(&mut self, name: &str) {
+        if let Some(previous) = self.services.remove(name) {
+            retire(previous).await;
+        }
+    }
+
     /// One running instance's event stream (DAEMON §5), for a test that watches one.
     #[cfg(test)]
     pub fn events(

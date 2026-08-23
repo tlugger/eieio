@@ -44,6 +44,14 @@ pub enum Kind {
     PreconditionRequired,
     /// An overwrite whose `If-Match` is no longer the file on disk (§9.3).
     Conflict,
+    /// `DELETE /services/{s}` refused because the service is running (§9).
+    ///
+    /// A distinct slug from `Conflict` on purpose: that one is RFC 9110's "the precondition you
+    /// named is stale", and this one is "there is nothing wrong with your request, but this
+    /// operation does not touch a live service" — two different things a client would branch on
+    /// differently, and collapsing them would make a stopped-then-retry loop indistinguishable
+    /// from a re-`GET`-and-retry one.
+    Running,
     /// The node could not do it — a filesystem that refused, and the like.
     Internal,
 }
@@ -69,6 +77,9 @@ impl Kind {
             // carry no longer holds.
             Kind::PreconditionRequired => StatusCode::PRECONDITION_REQUIRED,
             Kind::Conflict => StatusCode::PRECONDITION_FAILED,
+            // 409: the request is fine and the resource exists, but its current state (running)
+            // makes this particular operation (delete) refuse rather than act.
+            Kind::Running => StatusCode::CONFLICT,
             Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

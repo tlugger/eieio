@@ -1,9 +1,10 @@
 {
   "_comment": [
-    "A hand transcription of DAEMON-SPEC §9's endpoint table, cross-checked on 2026-08-22",
+    "A hand transcription of DAEMON-SPEC §9's endpoint table, cross-checked on 2026-08-23",
     "against crates/daemon/src/api.rs's routes() and every #[utoipa::path] under",
-    "crates/daemon/src/api/*.rs at commit 93c9655. It excludes GET /openapi.json itself,",
-    "which is the schema-serving route rather than an operation eio-cli issues.",
+    "crates/daemon/src/api/*.rs at commit e09d968 plus eieio-8yq.17's DELETE",
+    "/services/{service}. It excludes GET /openapi.json itself, which is the",
+    "schema-serving route rather than an operation eio-cli issues.",
     "",
     "THIS IS NOT /openapi.json. crates/daemon has no lib target (eieio-yck.1's finding:",
     "see that issue's report for what would close this gap), so nothing in crates/cli can",
@@ -21,7 +22,7 @@
     "/blocks": ["GET"],
     "/blocks/pull": ["POST"],
     "/services": ["GET"],
-    "/services/{service}": ["GET", "PUT"],
+    "/services/{service}": ["GET", "PUT", "DELETE"],
     "/services/{service}/errors": ["GET"],
     "/services/{service}/start": ["POST"],
     "/services/{service}/stop": ["POST"],

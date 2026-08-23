@@ -30,6 +30,7 @@ use utoipa::OpenApi;
         super::services::list,
         super::services::get_service,
         super::services::put_service,
+        super::services::delete_service,
         super::services::errors,
         super::services::start,
         super::services::stop,

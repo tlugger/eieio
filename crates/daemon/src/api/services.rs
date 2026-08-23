@@ -10,7 +10,7 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -219,6 +219,64 @@ pub async fn put_service(
     // The version the client now holds, so an editor can make a second edit without a `GET`
     // between them. Computed over the same bytes that were written, a few lines above.
     Ok(([(ETAG, etag(&definition))], Json(summary)).into_response())
+}
+
+/// Deletes a service's definition file (DAEMON §9).
+///
+/// Removes **the file only**, never the running graph's memory of it and never its
+/// `eio:state` (§10's "nothing removes a namespace as a side effect" is untouched by this
+/// endpoint on purpose — a deleted service's namespaces become orphans, reclaimable only
+/// through `DELETE /state/orphans/{namespace}`).
+///
+/// **Refused while running**, with `409`: a `DELETE` that stopped a live service on a
+/// mistyped name is exactly the accident this API avoids elsewhere (§9.3's precondition,
+/// §10's orphan check), so this one asks for the same two calls rather than one that quietly
+/// does both. `POST /services/{s}/stop` first, then this.
+#[utoipa::path(
+    delete,
+    path = "/services/{service}",
+    tag = "services",
+    params(("service" = String, Path, description = "The service's name")),
+    responses(
+        (status = 204, description = "The definition file is gone"),
+        (status = 401, description = "Missing or wrong bearer token", body = ApiError),
+        (status = 404, description = "No such service on this node", body = ApiError),
+        (status = 409, description = "The service is running; stop it first", body = ApiError),
+    ),
+)]
+pub async fn delete_service(
+    State(shared): State<crate::api::State>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let path = boot::service_path(&shared.node, &name).ok_or_else(|| bad_name(&name))?;
+
+    // The lock first: a concurrent `start` racing this `DELETE` must land on one side or the
+    // other of the running check, not in between it and the removal below.
+    let mut services = shared.services.lock().await;
+    if matches!(services.get(&name), Some(crate::boot::State::Running(_))) {
+        return Err(ApiError::new(
+            Kind::Running,
+            format!("`{name}` is running; `POST /services/{name}/stop` it first"),
+        ));
+    }
+
+    if !path.exists() {
+        return Err(ApiError::no_such_service(&name));
+    }
+
+    std::fs::remove_file(&path).map_err(|error| {
+        ApiError::new(
+            Kind::Internal,
+            format!("removing {}: {error}", path.display()),
+        )
+    })?;
+
+    // Forget it here too, or §9's listing keeps answering with a service whose file this
+    // request just removed — a 204 for something still visible. The file is the source of
+    // truth (SCOPE §3.8), and this map is a view of it that has to be told.
+    services.remove(&name).await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// RFC 9110's `If-Match`, over the definition on disk (§9.3).

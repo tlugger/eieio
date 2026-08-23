@@ -434,6 +434,7 @@ POST   /blocks/pull                   {reference} -> pull into the cache (§4.1)
 GET    /services                      every service and its state
 GET    /services/{s}                  definition text + state
 PUT    /services/{s}                  write definition (validate first, §9.3)
+DELETE /services/{s}                  remove the definition file; 409 while running (§9.7)
 GET    /services/{s}/errors           why a service is errored, structured
 POST   /services/{s}/start            load from file and start
 POST   /services/{s}/stop             stop, keep the definition
@@ -513,6 +514,27 @@ A conforming implementation MUST test that every route it serves is described in
 **The ring buffer is bounded, and a slow reader is told exactly what it missed.** A tap holds a fixed number of observations for a client that is not keeping up, and the oldest go first — an operator watching a firehose through a browser should see recent signals, not a stalled node. What a tap MUST NOT do is skip silently: a debugging tool that quietly shows a subset is worse than one that shows less and says so. So a client that falls behind receives a `lagged` event carrying the exact number of observations it did not see, before the stream resumes. **That count is the sampling report**, and it is why "sampled" here needs no rate knob: the stream is complete until a reader cannot keep up, and precisely quantified from then on.
 
 **Teardown is either explicit or a disconnect.** `DELETE /taps/{id}` removes a tap; so does the client going away, detected when the stream's send fails. A tap holds a subscription and a ring and nothing else, so releasing it releases everything — there is no separate reclaim, and a tap that outlived its reader would be a leak of exactly the kind §11's drain exists to prevent.
+
+### 9.7 `DELETE /services/{s}` removes the definition, and refuses while running
+
+Removes `services/{s}.toml` and nothing else. **Two calls, deliberately** — `POST
+/services/{s}/stop` and then this — rather than one endpoint that silently stops what it is
+about to delete. A `DELETE` that took down a live service on a mistyped name would be the one
+door in this API that skipped the care §9.3's precondition and §10's orphan check take
+everywhere else.
+
+**`409` while running, not `412`.** That status is reserved for a stale `If-Match` (§9.3), and
+a running service has offered no precondition to be stale. `stopped` and `errored` delete
+cleanly; `running` is the only state refused. A name this node has no file for is `404`.
+
+**Only the file — and the listing that mirrors it.** SCOPE §3.8's file is the source of truth,
+so removing it is the whole of the operation, and §10's rule holds without exception: nothing
+removes an `eio:state` namespace as a side effect, a deleted service included. The instances it
+declared become orphans the moment the file is gone, reclaimable only through `DELETE
+/state/orphans/{namespace}`, exactly as if the file had been removed by hand. What the
+operation must *also* do is forget the service in §5's registry, because §9's listing is served
+from that map rather than from the directory — a `DELETE` that removed only the file would
+answer `204` while still advertising what it had deleted.
 
 ## 10. State store
 

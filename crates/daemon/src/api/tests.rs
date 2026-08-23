@@ -1641,3 +1641,136 @@ async fn delete_orphans_reclaims_an_orphan_and_refuses_a_declared_namespace() {
         .await;
     assert_eq!(unauthorized.status, 401);
 }
+
+#[tokio::test]
+async fn deleting_a_stopped_service_removes_its_file() {
+    // DAEMON §9's decision: `DELETE /services/{s}` removes the definition file, and only that,
+    // once the service is not running.
+    let harness = Harness::start("api-delete-stopped").await;
+    let manual = definition("kitchen").replace("autostart = true", "autostart = false");
+    harness.put_definition("/services/kitchen", &manual).await;
+    assert_eq!(
+        harness.state_of("kitchen").await.as_deref(),
+        Some("stopped")
+    );
+
+    let path = harness.root.join("services").join("kitchen.toml");
+    assert!(path.exists(), "the file exists before deleting it");
+
+    let deleted = harness.delete("/services/kitchen").await;
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+    assert!(!path.exists(), "the file is gone");
+
+    // And a `GET` afterward is a clean not-found, straight off the now-missing file.
+    let after = harness.get("/services/kitchen").await;
+    assert_eq!(after.status, 404, "{}", after.body);
+
+    // And it is gone from the *listing* too, which is a separate answer: the list is served
+    // from the in-memory map rather than the directory, so a `DELETE` that removed only the
+    // file would answer 204 while still advertising what it deleted.
+    let listed = harness.get("/services").await;
+    assert_eq!(listed.status, 200, "{}", listed.body);
+    assert!(
+        !listed.body.contains("kitchen"),
+        "a deleted service must not still be listed: {}",
+        listed.body
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_running_service_is_refused_and_the_file_survives() {
+    // The two-call design this issue settles: a `DELETE` never stops a live service on the
+    // strength of a mistyped name. `POST .../stop` first, then this.
+    let harness = Harness::start("api-delete-running").await;
+    harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+    assert_eq!(
+        harness.state_of("kitchen").await.as_deref(),
+        Some("running")
+    );
+
+    let refused = harness.delete("/services/kitchen").await;
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(refused.json()["error"], "running");
+    let message = refused.json()["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("kitchen") && message.contains("stop"),
+        "the refusal names the service and says what to do: {message}"
+    );
+
+    // Still there, and still running: refusing must not have touched a thing.
+    let path = harness.root.join("services").join("kitchen.toml");
+    assert!(path.exists(), "the file survives a refused delete");
+    assert_eq!(
+        harness.state_of("kitchen").await.as_deref(),
+        Some("running")
+    );
+
+    // Stop it, then the same `DELETE` succeeds — the two calls this decision asks for.
+    assert_eq!(harness.post("/services/kitchen/stop").await.status, 200);
+    let deleted = harness.delete("/services/kitchen").await;
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn deleting_an_unknown_service_is_a_clean_not_found() {
+    let harness = Harness::start("api-delete-missing").await;
+    let answer = harness.delete("/services/nobody-home").await;
+    assert_eq!(answer.status, 404, "{}", answer.body);
+    assert_eq!(answer.json()["error"], "not_found");
+}
+
+#[tokio::test]
+async fn deleting_a_service_through_the_api_leaves_its_state_intact() {
+    // The invariant most at risk here: DAEMON §10's "nothing removes a namespace as a side
+    // effect" survives the *API* path to deletion, not only a file removed by hand
+    // (`deleting_a_service_leaves_its_state_intact` above covers that one).
+    let harness = Harness::start("api-delete-state-survives").await;
+    let manual = definition("kitchen").replace("autostart = true", "autostart = false");
+    harness.put_definition("/services/kitchen", &manual).await;
+
+    {
+        use eio_host_core::StateStore as _;
+        harness
+            .shared
+            .executor
+            .state()
+            .namespace("kitchen", "t1")
+            .put(b"count", b"41")
+            .expect("write");
+    }
+
+    let deleted = harness.delete("/services/kitchen").await;
+    assert_eq!(deleted.status, 204, "{}", deleted.body);
+
+    // The keys are exactly as they were — reachable only through the orphan-reclaim endpoint
+    // from here on.
+    assert_eq!(
+        harness
+            .shared
+            .executor
+            .state()
+            .entries("kitchen", "t1")
+            .expect("a scan"),
+        vec![(b"count".to_vec(), b"41".to_vec())]
+    );
+    let orphans = harness.get("/state/orphans").await.json();
+    assert_eq!(orphans[0]["namespace"], "kitchen:t1");
+}
+
+#[tokio::test]
+async fn deleting_a_service_is_guarded_like_everything_else() {
+    let harness = Harness::start("api-delete-guard").await;
+    let manual = definition("kitchen").replace("autostart = true", "autostart = false");
+    harness.put_definition("/services/kitchen", &manual).await;
+
+    let unauthorized = harness.unauthenticated_delete("/services/kitchen").await;
+    assert_eq!(unauthorized.status, 401);
+    // Unauthenticated and refused: the file must still be there.
+    assert!(harness.root.join("services").join("kitchen.toml").exists());
+}

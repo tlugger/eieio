@@ -25,11 +25,10 @@ use crate::client::Client;
 
 /// What `eio services` can do.
 ///
-/// DAEMON §9's table has no `DELETE /services/{s}` — deleting a service is removing its file
-/// (SCOPE §3.8: the file is the source of truth), which is outside this API's surface. A
-/// `delete` subcommand here would therefore either invent an endpoint the daemon does not
-/// serve or silently mean `stop`, and either is worse than not having one; eieio-yck.1's report
-/// flags this against the issue's own wording, which asked for one.
+/// eieio-8yq.17 gave DAEMON §9's table a `DELETE /services/{s}`, so `delete` here is the same
+/// two-call shape as the API: refused with `409` while the service is running, and never a
+/// side door onto `stop`. `eieio-yck.1`'s report — this file's earlier doc comment — flagged the
+/// gap; §9 closing it is what this variant answers.
 #[derive(Debug, Subcommand)]
 pub enum Services {
     /// `GET /services`: every service on the node and its state.
@@ -48,6 +47,9 @@ pub enum Services {
     Stop(Name),
     /// `POST /services/{s}/reload`: re-read the file and apply it, including `autostart`.
     Reload(Name),
+    /// `DELETE /services/{s}`: removes the definition file. Refused with `409` while the
+    /// service is running — `eio services stop` it first, same as the API (DAEMON §9).
+    Delete(Name),
 }
 
 /// Names a service: `show`'s, `errors`'s, `start`'s, `stop`'s and `reload`'s arguments.
@@ -94,7 +96,19 @@ pub fn run(command: Services, node: Option<&str>) -> Result<()> {
         Services::Start(args) => crate::client::print_json(&client.start_service(&args.name)?),
         Services::Stop(args) => crate::client::print_json(&client.stop_service(&args.name)?),
         Services::Reload(args) => crate::client::print_json(&client.reload_service(&args.name)?),
+        Services::Delete(args) => delete(&client, &args.name),
     }
+}
+
+fn delete(client: &Client, name: &str) -> Result<()> {
+    client.delete_service(name).with_context(|| {
+        format!(
+            "delete {name} (a running service answers 409; \
+             `eio services stop {name}` first)"
+        )
+    })?;
+    println!("deleted {name}");
+    Ok(())
 }
 
 fn pull(client: &Client, args: Pull) -> Result<()> {
