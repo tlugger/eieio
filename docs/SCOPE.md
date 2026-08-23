@@ -121,6 +121,8 @@ Blocks live in separate source repos. Each repo's CI compiles the block to WASM 
 
 The **block manifest** is a core design artifact: properties schema (JSON Schema — drives Designer config panels _and_ agent tooling), input/output ports, required host capabilities, block version, ABI version.
 
+- **OPEN:** what `cargo eio publish` does with a SemVer build-metadata suffix. ABI §11.1 requires `version` to be SemVer, which admits `+build`; the OCI distribution spec does not admit `+` in a tag, so a legal block version can be an illegal reference. `publish` refuses such a version today, naming both specifications rather than picking a rewrite — dropping the suffix silently changes what was published, and escaping it invents a convention no other registry client would read back. Deferred because no block has needed build metadata yet, and the refusal is the safe reading until one does.
+
 ### 3.7 Node tiers (embedded north star)
 
 Two node classes, one wire protocol:

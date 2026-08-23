@@ -1,18 +1,23 @@
-# The gate for this block.
+# The gate for this block, plus the tag-triggered publish SDK §5 describes.
 #
 # `cargo eio test` runs both of SDK §6's layers — the native tests and the conformance
-# scenarios against the built module — so this workflow is the same command a developer
-# runs locally. Anything added here that cannot be run locally is a failure nobody can
-# reproduce.
+# scenarios against the built module — so the `ci` job is the same command a developer runs
+# locally. Anything added there that cannot be run locally is a failure nobody can reproduce.
 #
-# SDK §5 describes a tag-triggered publish job as well; `cargo eio publish` is still
-# PROPOSED and unimplemented, so there is nothing to call yet. When the registry work
-# lands (SCOPE §3.6), that job goes here.
+# `publish` is the "block repos independently released to the registry" flow of SCOPE §3.6,
+# made concrete: pushing a `v*` tag packages the module as an OCI artifact and pushes it to
+# `ghcr.io/<this repository's owner>` — chosen because it needs no configuration for the
+# common case of a block repo hosted on GitHub, using the token every workflow run already
+# has. Signing is optional (DAEMON §4.2's `require_signed` defaults to `false`, and a first
+# publish will not have a key): add a repository secret named `COSIGN_KEY` (the output of
+# `cosign generate-key-pair`) and one named `COSIGN_PASSWORD` to turn it on, and leave both
+# unset to publish unsigned.
 name: ci
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -43,3 +48,53 @@ jobs:
 
       - name: Build the module and its manifest
         run: cargo eio build
+
+  publish:
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Pushing to ghcr.io needs this; DAEMON §4.1's registry client only ever pulls
+      # anonymously, so this is a write permission a pull-side job would never need.
+      packages: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install the guest target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install cargo-eio
+        run: cargo install cargo-eio
+
+      - name: Install cosign
+        # sigstore/cosign-installer v4.1.2, pinned to a commit rather than a tag. Run
+        # unconditionally rather than only when a key is configured: a step that sometimes
+        # exists and sometimes does not is a harder workflow to read than one that always
+        # installs a tool `publish` below may or may not end up using.
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+
+      - name: Write the signing key, if one is configured
+        # A repository secret named COSIGN_KEY — the output of `cosign generate-key-pair` —
+        # added once a block author wants signed publishes. Its absence is not an error:
+        # `cargo eio publish` runs unsigned when no key file exists (DAEMON §4.2's
+        # `require_signed` defaults to `false`, and a first publish will not have a key).
+        if: ${{ secrets.COSIGN_KEY != '' }}
+        run: echo "${{ secrets.COSIGN_KEY }}" > cosign.key
+
+      - name: Publish the OCI artifact
+        env:
+          # The token this job already has, reused for the registry push
+          # (`EIO_REGISTRY_USERNAME`/`_PASSWORD`) rather than asking a block author to mint
+          # and store a second credential for the common case of publishing to GHCR under
+          # the account this repository lives in.
+          EIO_REGISTRY_USERNAME: ${{ github.actor }}
+          EIO_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+        run: |
+          if [ -f cosign.key ]; then
+            cargo eio publish --key cosign.key "ghcr.io/${{ github.repository_owner }}"
+          else
+            cargo eio publish "ghcr.io/${{ github.repository_owner }}"
+          fi

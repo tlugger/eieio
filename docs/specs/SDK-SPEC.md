@@ -253,21 +253,44 @@ cargo eio build              wasm32-unknown-unknown, panic=abort, opt for size,
                              rustc emits by default, and the flag this line
                              used to carry was measured to do nothing)   §5.2
 cargo eio test               native tests + harness run (§6)             §5.3
+cargo eio publish <registry> OCI artifact, push, optional cosign signature   §5.4
 ```
 
 **PROPOSED**, and unimplemented:
 
 ```
 cargo eio aot --target esp32s3   WAMR AOT artifact for leaf targets
-cargo eio publish            package OCI artifact (+ AOT variants), push, sign (cosign)
 ```
 
-Both belong to the registry work of SCOPE §3.6, which has not happened: there is nothing to
-push to and no signing story to sign against, and a `publish` that wrote to a place nobody
-has agreed on would be a decision made by a tool. They stay marked until that epic reaches
-them.
+`aot` stays marked because it depends on AOT variants the leaf tier has not specified yet.
+`publish` no longer does: DAEMON §4 has a puller with a verified artifact shape, so there is
+something concrete to produce rather than a place nobody has agreed on.
 
-The template repo's CI runs build/test/publish on tag — this is the "block repos independently released to the registry" flow from SCOPE §3.6 made concrete. Until `publish` exists the generated workflow runs build and test, and says in place what the tag job is waiting for; a workflow that referenced a subcommand nobody can run would fail on the first tag anyone pushed.
+The template repo's CI runs build/test/publish on a `v*` tag — SCOPE §3.6's "block repos
+independently released to the registry" made concrete. Signing is conditional on the signing
+secrets being present, so a repo that has not set them still publishes.
+
+### 5.4 `cargo eio publish <registry>`
+
+Takes `<host>/<namespace>`; the reference is `<name>:<version>` from the manifest, so what is
+published is what `build` already validated rather than anything restated on a command line.
+
+**The artifact's shape is pinned to the puller, not to a specification of its own.** DAEMON
+§4 verifies media types, the digest, and — when signed — a signature at the `sha256-<hex>.sig`
+tag carrying `application/vnd.dev.cosign.simplesigning.v1+json` and the
+`dev.cosignproject.cosign/signature` annotation (§4.2). A publish is correct when that puller
+accepts it, which is a stronger and more useful test than any assertion about the pusher.
+
+**Signing is optional**, because §4.2's `require_signed` defaults to false and a first publish
+has no key. A missing `cosign` is an actionable error naming the alternative, never a panic —
+the same posture §5.2 takes on `wasm-opt`.
+
+**`cosign` needs pinning down, and this is why.** cosign 3.1.3 defaults to the new Sigstore
+bundle format, an image index that §4.2's verifier does not parse and refuses outright. The
+legacy simplesigning shape it does verify requires `--use-signing-config=false
+--new-bundle-format=false --tlog-upload=false` together, which also keeps the operation
+offline. A signature this tool produces is therefore deliberately the older format, and the
+day that stops being available is the day §4.2 needs to learn the new one.
 
 ### 5.1 The template (normative)
 

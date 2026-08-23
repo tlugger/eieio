@@ -228,6 +228,31 @@ fn the_template_is_rustfmt_clean() {
 }
 
 #[test]
+fn the_generated_workflow_carries_the_tag_triggered_publish_job() {
+    // SDK §5's "the template repo's CI runs build/test/publish on tag" — checked as a string
+    // match rather than parsed as YAML, because the claim under test is "the job is there and
+    // calls the right subcommand", not "this is well-formed GitHub Actions", which a schema
+    // nobody here owns would be a stranger thing for this crate to depend on. Costs no compile.
+    let scratch = scratch("workflow");
+    let root = new_block(&scratch);
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/ci.yml"))
+        .expect("the workflow was written");
+
+    assert!(
+        workflow.contains("tags:"),
+        "triggers on a tag push: {workflow}"
+    );
+    assert!(
+        workflow.contains("publish:") && workflow.contains("cargo eio publish"),
+        "a publish job that calls the subcommand this issue implements: {workflow}"
+    );
+    assert!(
+        workflow.contains("COSIGN_KEY") && workflow.contains("if [ -f cosign.key ]"),
+        "signing stays optional — no key configured means no --key flag (DAEMON §4.2): {workflow}"
+    );
+}
+
+#[test]
 fn a_name_abi_11_1_refuses_is_refused_before_anything_is_written() {
     let scratch = scratch("refused-name");
 

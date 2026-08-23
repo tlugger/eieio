@@ -10,10 +10,14 @@
 //!   validation a node runs, so a module that builds is a module a node accepts (§5.2).
 //! - [`test`] runs both of SDK §6's layers: the native `TestHost` tests, then the built
 //!   module under the reference conformance harness (§5.3).
+//! - [`publish`] packages the module and its manifest as an OCI artifact, pushes it, and
+//!   signs it with cosign when a key is given — the "block repos independently released to
+//!   the registry" flow of SCOPE §3.6, made concrete against exactly what
+//!   `crates/daemon/src/registry.rs` pulls back (DAEMON §4.1, §4.2).
 //!
-//! `aot` and `publish` are PROPOSED and unimplemented; they belong to the registry work of
-//! SCOPE §3.6, and a `publish` that wrote to a place nobody has agreed on would be a
-//! decision made by a tool.
+//! `aot` is still PROPOSED and unimplemented — a precompiled variant is a second artifact
+//! this command does not produce yet, and nothing pulls one (eieio-8yq.3's block manager
+//! reads the portable module).
 //!
 //! # Why the binary is not called `eio-*`
 //!
@@ -22,7 +26,11 @@
 //! the one exception to the workspace's naming rule.
 
 mod build;
+#[cfg(test)]
+mod fake_registry;
 mod new;
+mod oci;
+mod publish;
 mod template;
 mod test;
 
@@ -53,6 +61,9 @@ enum Command {
     Build(build::BuildArgs),
     /// Run the native tests, then the module under the conformance harness (SDK §5.3).
     Test(test::TestArgs),
+    /// Package the module and its manifest as an OCI artifact, push it, and sign it with
+    /// cosign when a key is given (SDK §5, SCOPE §3.6).
+    Publish(publish::PublishArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,5 +72,6 @@ fn main() -> anyhow::Result<()> {
         Command::New(args) => new::run(&args),
         Command::Build(args) => build::run(&args).map(|_| ()),
         Command::Test(args) => test::run(&args),
+        Command::Publish(args) => publish::run(&args),
     }
 }

@@ -395,11 +395,15 @@ name = "cargo-eio"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "eio-conformance",
  "eio-manifest",
+ "p256",
  "serde",
  "serde_json",
+ "sha2",
+ "ureq",
 ]
 
 [[package]]

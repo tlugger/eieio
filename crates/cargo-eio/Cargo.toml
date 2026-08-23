@@ -35,5 +35,22 @@ serde_json.workspace = true
 # Same reason as the daemon's: every `?` in a std binary wants one error type.
 anyhow.workspace = true
 
+# `publish`'s push side of the daemon's pull (`crates/daemon/src/registry.rs`), which is why
+# these three are the exact ones its `Cargo.toml` pins for the same job: `ureq` for the HTTP,
+# `sha2` for the layer and manifest digests a pull recomputes and checks, `base64` for the
+# cosign signature annotation §4.2 both sides read. Blocking is fine here for the reason it is
+# there — this runs to completion once, from a CLI invocation, with nothing to yield to.
+ureq.workspace = true
+sha2.workspace = true
+base64.workspace = true
+
+[dev-dependencies]
+# `publish`'s own tests verify a cosign signature the way
+# `crates/daemon/src/registry.rs`'s puller does — the round trip this crate can prove without
+# reaching into that crate (eieio-7d8.22) — which needs the same ECDSA-P256 verification `p256`
+# gives the daemon. Not a runtime dependency: this binary never verifies anything itself, only
+# pushes and shells out to cosign to sign.
+p256.workspace = true
+
 [lints]
 workspace = true

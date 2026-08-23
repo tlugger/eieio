@@ -36,13 +36,31 @@ pub struct BuildArgs {
     pub manifest_path: Option<PathBuf>,
 }
 
-/// Builds the block, validates the module, writes its manifest, and answers with the block
-/// repo's root — the directory holding the `Cargo.toml` cargo compiled.
+/// What a build produced: the block repo's root, the module's own bytes and path, and its
+/// validated manifest.
 ///
-/// The root comes from cargo's own artifact message rather than from `--manifest-path` or the
-/// working directory, which are two guesses at the same question; `cargo eio test` resolves
-/// `conformance/` against it.
-pub fn run(args: &BuildArgs) -> anyhow::Result<PathBuf> {
+/// `publish` (§5) needs all four to package an OCI artifact, and derives none of them a
+/// second way: the wasm bytes it hashes into a layer digest are the exact bytes this
+/// validated, and the name and version it tags a push with are the exact ones `manifest.json`
+/// was written from.
+pub struct Built {
+    /// The directory holding the `Cargo.toml` cargo compiled.
+    ///
+    /// From cargo's own artifact message rather than from `--manifest-path` or the working
+    /// directory, which are two guesses at the same question; `cargo eio test` resolves
+    /// `conformance/` against it.
+    pub root: PathBuf,
+    /// Where the built `.wasm` sits on disk.
+    pub wasm_path: PathBuf,
+    /// The module's bytes, already read once so a caller does not read them a second time.
+    pub wasm: Vec<u8>,
+    /// The manifest `validate_unaided` read out of the module — the same one written to
+    /// `manifest.json` beside it.
+    pub manifest: eio_manifest::Manifest,
+}
+
+/// Builds the block, validates the module, and writes its manifest.
+pub fn run(args: &BuildArgs) -> anyhow::Result<Built> {
     let artifact = compile(args)?;
 
     let wasm =
@@ -73,7 +91,12 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<PathBuf> {
     println!("    module   {}", artifact.wasm.display());
     println!("    manifest {}", manifest_json.display());
 
-    Ok(artifact.root)
+    Ok(Built {
+        root: artifact.root,
+        wasm_path: artifact.wasm,
+        wasm,
+        manifest,
+    })
 }
 
 /// Where cargo put the one `cdylib` it built.

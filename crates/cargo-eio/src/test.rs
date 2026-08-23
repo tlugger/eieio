@@ -31,11 +31,11 @@ pub fn run(args: &TestArgs) -> anyhow::Result<()> {
     }
 
     // The harness layer needs the module the block actually ships, not a native build of it.
-    let root = build::run(&BuildArgs {
+    let built = build::run(&BuildArgs {
         manifest_path: args.manifest_path.clone(),
     })?;
 
-    let scenarios = root.join(SCENARIOS);
+    let scenarios = built.root.join(SCENARIOS);
     if !scenarios.is_dir() {
         // Said plainly rather than passed over: a suite nobody notices is missing is a suite
         // nobody writes, and the native layer cannot see the boundary at all (SDK §6).
