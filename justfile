@@ -156,14 +156,18 @@ test:
     if command -v cargo-nextest >/dev/null 2>&1; then
         echo "test: cargo nextest run --workspace"
         cargo nextest run --workspace
-        # nextest cannot run doctests (see above), so the fallback's `cargo test --workspace`
-        # does not need this — but this branch does, or doctest coverage silently vanishes.
-        echo "test: cargo test --doc --workspace"
-        cargo test --doc --workspace
     else
         echo "test: cargo-nextest not found on PATH, falling back to cargo test --workspace"
+        # This branch runs doctests too, which is why `ci` only schedules `test-doc`
+        # separately when nextest is present — otherwise they would run twice.
         cargo test --workspace
     fi
+
+# Doctests, which `cargo nextest` cannot run (measured: 974 tests in 42s under nextest, while
+# the doctest pass costs minutes — each doctest is its own compile). Its own recipe so `ci`
+# can run it beside the other stages instead of after them, which is where the time was going.
+test-doc:
+    cargo test --doc --workspace
 
 # The golden blocks (ABI §13.2) are their own cargo workspace under `examples/blocks/`, so
 # `cargo test --workspace` above never sees them. Their harness half is checked by the
@@ -246,7 +250,12 @@ ci: build
     logdir="$(mktemp -d)"
     trap 'rm -rf "$logdir"' EXIT
 
+    # `test-doc` only when nextest is present: without it, `test` already ran doctests
+    # via `cargo test --workspace`, and scheduling both would run them twice.
     stages=(fmt-check lint test check-nostd check-guest)
+    if command -v cargo-nextest >/dev/null 2>&1; then
+        stages+=(test-doc)
+    fi
     pids=()
     for stage in "${stages[@]}"; do
         just "$stage" > "$logdir/$stage.log" 2>&1 &
