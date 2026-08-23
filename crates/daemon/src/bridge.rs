@@ -12,7 +12,7 @@
 //! messages, `rumqttc`'s own types) and fails the build if it finds any. A second transport —
 //! `rumqttc`'s, when it lands — is a second `impl Bridge` and changes nothing outside this file.
 //!
-//! # This module ships one transport: in-process
+//! # This module ships two transports: in-process, and MQTT
 //!
 //! [`InProcessBridge`] and the [`Broker`] behind it are not a stand-in for MQTT; they are a
 //! transport in their own right, chosen so the whole cross-node flow — DAEMON §6.3's
@@ -24,10 +24,23 @@
 //! the same trait, the trait would be wrong; proving it holds for one transport is what
 //! justifies writing the second.
 //!
-//! `rumqttc` itself is not a dependency of this crate yet (eieio-2vm.2's scope decision): every
-//! `rumqttc` API that would carry a real MQTT connection either needs a live broker process or
-//! blocks on the network in a way this crate's tests must not. Wiring it in is a follow-up with
-//! its own test story, not a comment here.
+//! [`MqttBridge`] is that second transport (eieio-2vm.4): DAEMON §7 over `rumqttc`, real
+//! sockets, QoS 0, never retained. `rumqttc` was deliberately absent until now (eieio-2vm.2)
+//! because every API that carries a live connection needs either a broker process or the
+//! network, and this crate's tests must have neither. What makes it testable without a
+//! manually-started broker or a reachable non-loopback address (see
+//! [`tests::mqtt_bridge_delivers_a_publish_across_a_real_broker`] and its neighbours) is
+//! `rumqttd`, a dev-dependency: the same wire protocol as a library rather than a subprocess, so
+//! a test spins one up on `127.0.0.1` and tears it down with the process — no fixture anyone has
+//! to remember to start, no CI service container, no network beyond the loopback interface.
+//! [`tests::mqtt_bridge_drops_and_counts_when_nothing_answers`] proves the loss path the same
+//! way DAEMON §7.1 states it: nothing needs to be *running* to prove a bridge with no broker
+//! drops rather than blocks, only a loopback address nothing is listening on.
+//!
+//! **Out of scope, by the issue that added this:** hosting a broker when nothing answers
+//! (§7.1's "this node would host one" branch) and SCOPE §3.11's node-to-node auth. Both are
+//! separate decisions this transport does not make — see [`MqttBridge::connect`]'s docs for the
+//! first and the module's forced no-TLS build (`crates/daemon/Cargo.toml`) for the second.
 //!
 //! # System blocks are manifests, not modules
 //!
@@ -43,7 +56,9 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use eio_manifest::{Abi, Manifest, Port, Property, PropertyType};
 use eio_signal::{Batch, Value};
@@ -457,6 +472,493 @@ impl Bridge for InProcessBridge {
     }
 }
 
+/// The QoS this transport maps SCOPE §3.4's at-most-once onto (DAEMON §7). Stated once, as a
+/// constant never read from configuration: "the mapping belongs here and nowhere above", and a
+/// mapping with one entry needs no knob.
+const QOS: rumqttc::QoS = rumqttc::QoS::AtMostOnce;
+
+/// How many outstanding requests (a publish or a subscribe not yet handed to the socket)
+/// `rumqttc`'s internal channel holds before [`MqttBridge::publish`] and
+/// [`MqttBridge::subscribe`] refuse rather than wait — the same non-blocking posture
+/// [`SUBSCRIBER_CAPACITY`] gives the in-process transport, for the same reason (SCOPE §3.4: "a
+/// publisher that cannot send drops"). Small on purpose: this is a depth against a momentary
+/// stall in the client's own event loop, not a durable queue, and a `Bridge::publish` that could
+/// still be "sent" long after the caller moved on would be this crate inventing the stronger
+/// guarantee SCOPE §3.4 declines to make.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read only by `dial`, which is read only by `run`, which is read only by \
+                  `MqttBridge::connect` — see that function's own `expect` for why nothing on \
+                  the daemon's production path calls it yet"
+    )
+)]
+const REQUEST_CAPACITY: usize = 16;
+
+/// How long [`MqttBridge::connect`]'s ranked walk waits for one candidate to answer before
+/// trying the next (DAEMON §7.1: "connects as an ordinary client"). Not a normative value —
+/// DAEMON §7.1 states the walk, not a duration — chosen short because a candidate that is going
+/// to accept a plain loopback-speed TCP connection does so in milliseconds, and a walk that
+/// lingers on an unreachable rank-1 candidate delays every candidate behind it.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read only by `dial`; see `MqttBridge::connect`'s own `expect`"
+    )
+)]
+const DIAL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long [`MqttBridge::connect`]'s background task waits before repeating the whole ranked
+/// walk when nothing in it answered (DAEMON §7.1: "retries with backoff while its publishes
+/// drop"). Also not a normative value, for the same reason as [`DIAL_TIMEOUT`].
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read only by `run`; see `MqttBridge::connect`'s own `expect`"
+    )
+)]
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// One entry from `pubsub.toml`'s ranked `candidates` list (DAEMON §7.1): `<node-id>@<host>:<port>`.
+///
+/// Deliberately holds no MQTT vocabulary — `id`, a host and a port are what *any* transport
+/// would need to dial an address in rank order, which is the property the boundary asks for:
+/// nothing here is a reason this type could not sit above [`Bridge`] instead of behind it.  It
+/// stays in this module anyway, because parsing and walking a candidate list is exactly the
+/// "real transport's job" `crate::pubsub`'s own docs already deferred to this issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "constructed only by a caller that has parsed `pubsub.toml`'s `candidates`; \
+                  no production call site exists yet — see `MqttBridge::connect`'s own `expect`"
+    )
+)]
+pub struct Candidate {
+    /// The candidate's own node id — what `pinned` in `pubsub.toml` names (DAEMON §7.1).
+    pub id: String,
+    /// The host or IP a client dials to reach this candidate.
+    pub host: String,
+    /// The port a client dials to reach this candidate.
+    pub port: u16,
+}
+
+impl Candidate {
+    /// Parses one `pubsub.toml` `candidates` entry: `<id>@<host>:<port>`, DAEMON §7.1's own
+    /// example (`n7k2p4qv@10.0.0.5:1883`) verbatim. `<host>` is taken up to the *last* `:`, so
+    /// an IPv6 literal would need bracket syntax this parser does not yet accept — nothing in
+    /// DAEMON §7.1's example or SCOPE §3.9's static-discovery posture asks for one yet, so that
+    /// is a gap to close when an address shaped like one actually shows up, not a case to guess
+    /// at here.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller parses a raw `candidates` entry yet — see \
+                      `MqttBridge::connect`'s own `expect`; today's only caller is this \
+                      module's own parsing tests"
+        )
+    )]
+    pub fn parse(raw: &str) -> anyhow::Result<Candidate> {
+        let (id, address) = raw.split_once('@').ok_or_else(|| {
+            anyhow::anyhow!("\"{raw}\" is not `<id>@<host>:<port>` (DAEMON §7.1): no `@`")
+        })?;
+        let (host, port) = address.rsplit_once(':').ok_or_else(|| {
+            anyhow::anyhow!("\"{raw}\" is not `<id>@<host>:<port>` (DAEMON §7.1): no `:`")
+        })?;
+        anyhow::ensure!(!id.is_empty(), "\"{raw}\" names no id before `@`");
+        anyhow::ensure!(
+            !host.is_empty(),
+            "\"{raw}\" names no host between `@` and `:`"
+        );
+        let port: u16 = port
+            .parse()
+            .map_err(|error| anyhow::anyhow!("\"{raw}\": \"{port}\" is not a port: {error}"))?;
+        Ok(Candidate {
+            id: String::from(id),
+            host: String::from(host),
+            port,
+        })
+    }
+}
+
+/// One topic's current subscribers on an [`MqttBridge`] — the same shape as [`Subscribers`],
+/// kept as its own alias so a change to one transport's fan-out never silently reaches for the
+/// other's type.
+type MqttSubscribers = Mutex<HashMap<String, Vec<mpsc::Sender<Batch>>>>;
+
+/// The MQTT transport (module docs, DAEMON §7): [`Bridge`] over `rumqttc`, DAEMON §7.1's
+/// ranked-candidate walk, QoS 0, never retained.
+///
+/// Every field is shared with the background task [`MqttBridge::connect`] spawns: this handle's
+/// [`publish`](Bridge::publish) and [`subscribe`](Bridge::subscribe) are synchronous and never
+/// touch the network directly, so they read whatever the task last published to these — the
+/// same non-blocking shape [`InProcessBridge`] already has, over a real socket instead of a
+/// broker in this process.
+#[derive(Debug, Clone)]
+pub struct MqttBridge {
+    /// The live client, if the background task currently has a broker connection. `None` is
+    /// exactly [`InProcessBridge::disconnected`]'s state for this transport: nothing to publish
+    /// or subscribe onto, so every publish drops.
+    client: Arc<Mutex<Option<rumqttc::AsyncClient>>>,
+    /// Mirrors whether `client` is currently `Some`, as an atomic so [`Bridge::is_connected`]
+    /// and the hot path of [`Bridge::publish`] need no lock to answer.
+    connected: Arc<AtomicBool>,
+    /// Every topic an instance has asked to hear, and where to deliver it — reinstated against
+    /// a fresh client after every reconnect, because a clean MQTT session remembers no
+    /// subscription across one (module docs: "handover has nothing to hand over").
+    subscribers: Arc<MqttSubscribers>,
+    /// Every publish this bridge could not hand to the client, whether because nothing was
+    /// connected or because the client's own request channel was full (DAEMON §6.2).
+    dropped: Arc<AtomicU64>,
+}
+
+impl MqttBridge {
+    /// Starts the background connection task and returns a handle to it immediately —
+    /// disconnected until the task's first successful dial, exactly like
+    /// [`InProcessBridge::disconnected`] until then.
+    ///
+    /// Runs DAEMON §7.1's walk forever, on its own OS thread with its own current-thread tokio
+    /// runtime (so a caller need not already be inside one): with `pinned` unset, it dials
+    /// `candidates` in rank order and stays on the first that accepts a full MQTT connection;
+    /// with `pinned` set, it dials only the candidate whose `id` matches and never considers the
+    /// rest, honouring §7.1's "while it is present, candidates do not self-promote". Losing a
+    /// connection — however it was chosen — restarts the same walk from the top, which is
+    /// deliberately the same code path as the first connect (module docs: "handover has nothing
+    /// to hand over").
+    ///
+    /// **What this does not do, by this issue's scope:** when nothing in the walk answers, DAEMON
+    /// §7.1 says "this node would host one" — hosting a broker is out of scope here, so this
+    /// task instead does what §7.1 already calls the ordinary case of "nothing reachable": retry
+    /// the walk on [`RETRY_INTERVAL`] while every [`Bridge::publish`] on this handle drops,
+    /// logged and counted like any other discard (DAEMON §6.2). A future that does implement
+    /// hosting adds a branch here; it does not change this method's signature or its callers.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no production caller yet: wiring this into a running node is `main.rs`'s \
+                      one-line swap of `InProcessBridge::disconnected` (module docs), and \
+                      `main.rs` is outside this change's file-ownership boundary. Today's only \
+                      caller is this module's own tests"
+        )
+    )]
+    pub fn connect(
+        client_id: String,
+        candidates: Vec<Candidate>,
+        pinned: Option<String>,
+    ) -> MqttBridge {
+        let client: Arc<Mutex<Option<rumqttc::AsyncClient>>> = Arc::new(Mutex::new(None));
+        let connected = Arc::new(AtomicBool::new(false));
+        let subscribers: Arc<MqttSubscribers> = Arc::new(Mutex::new(HashMap::new()));
+        let dropped = Arc::new(AtomicU64::new(0));
+
+        let bridge = MqttBridge {
+            client: Arc::clone(&client),
+            connected: Arc::clone(&connected),
+            subscribers: Arc::clone(&subscribers),
+            dropped: Arc::clone(&dropped),
+        };
+
+        std::thread::Builder::new()
+            .name(String::from("eio-mqtt-bridge"))
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("building the bridge task's own tokio runtime");
+                runtime.block_on(run(
+                    client_id,
+                    candidates,
+                    pinned,
+                    client,
+                    connected,
+                    subscribers,
+                    dropped,
+                ));
+            })
+            .expect("spawning the bridge's connection thread");
+
+        bridge
+    }
+
+    /// Every publish this bridge has dropped since it was created — the real-transport
+    /// equivalent of [`InProcessBridge::dropped`], read by the same kind of test.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no metrics endpoint reads this yet; today's only caller is a test \
+                      asserting the loss path"
+        )
+    )]
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::SeqCst)
+    }
+}
+
+impl Bridge for MqttBridge {
+    fn publish(&self, topic: &str, batch: Batch) -> Delivery {
+        if !self.connected.load(Ordering::SeqCst) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            tracing::warn!(topic, "dropped a publish: no broker connection");
+            return Delivery::Dropped;
+        }
+
+        let sent = {
+            let guard = self
+                .client
+                .lock()
+                .expect("the bridge's lock is never held across a panic");
+            match guard.as_ref() {
+                // QoS 0, never retained (DAEMON §7): the two are stated once, here, as the
+                // literal arguments rather than anything read from configuration.
+                Some(client) => client
+                    .try_publish(topic, QOS, false, batch.to_cbor())
+                    .is_ok(),
+                None => false,
+            }
+        };
+        if sent {
+            Delivery::Sent
+        } else {
+            // Either `connected` was stale (the task disconnected between the check above and
+            // this lock) or `rumqttc`'s own request channel is full — either way, this publish
+            // was not hand to the client, so it is dropped and counted exactly like the
+            // disconnected case (DAEMON §6.2).
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+            tracing::warn!(
+                topic,
+                "dropped a publish: could not hand it to the mqtt client"
+            );
+            Delivery::Dropped
+        }
+    }
+
+    fn subscribe(&self, topic: &str) -> Subscription {
+        let (tx, rx) = mpsc::channel(SUBSCRIBER_CAPACITY);
+        self.subscribers
+            .lock()
+            .expect("the bridge's lock is never held across a panic")
+            .entry(String::from(topic))
+            .or_default()
+            .push(tx);
+        // Best-effort: if nothing is connected yet, `run`'s reconnect path resubscribes every
+        // recorded topic once it dials successfully (see its docs), so this call never needs to
+        // retry on its own.
+        if let Some(client) = self
+            .client
+            .lock()
+            .expect("the bridge's lock is never held across a panic")
+            .as_ref()
+        {
+            let _ = client.try_subscribe(topic, QOS);
+        }
+        Subscription { rx }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::SeqCst)
+    }
+}
+
+/// Delivers every inbound `Publish` this connection receives to whichever subscribers are
+/// currently registered for its topic, decoding the wire bytes back into a [`Batch`]
+/// (`Batch::to_cbor`/`from_cbor`, ABI §6.3.1) — the same canonical form every transport carries.
+///
+/// A payload that will not decode is logged and dropped rather than panicking: once this
+/// crate's own daemons are not the only possible publisher on a bus (SCOPE §3.9's shared-broker
+/// posture), a malformed payload is a fact about the wire, not a bug in this process.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called only from `drive`, which runs only inside `MqttBridge::connect`'s \
+                  background task — see that function's own `expect`"
+    )
+)]
+fn dispatch(topic: &str, payload: &[u8], subscribers: &MqttSubscribers, dropped: &AtomicU64) {
+    let batch = match Batch::from_cbor(payload) {
+        Ok(batch) => batch,
+        Err(error) => {
+            dropped.fetch_add(1, Ordering::SeqCst);
+            tracing::warn!(topic, %error, "dropped an inbound publish: not a valid batch");
+            return;
+        }
+    };
+    let mut subscribers = subscribers
+        .lock()
+        .expect("the bridge's lock is never held across a panic");
+    if let Some(senders) = subscribers.get_mut(topic) {
+        // The same bounded, never-waited-on fan-out as `InProcessBridge::publish` (SCOPE §3.4):
+        // a subscriber behind on its own queue loses this batch rather than stalling delivery
+        // to every other subscriber of this connection.
+        senders.retain_mut(|sender| match sender.try_send(batch.clone()) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                dropped.fetch_add(1, Ordering::SeqCst);
+                tracing::warn!(
+                    topic,
+                    "dropped an inbound publish: a subscriber's queue is full"
+                );
+                true
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+        });
+    }
+}
+
+/// Attempts one full MQTT connection to `candidate` — DAEMON §7.1's "connects as an ordinary
+/// client" — bounded by [`DIAL_TIMEOUT`]. `Ok` means `candidate` answered and is now the broker
+/// this call sees; `Err` covers everything else a candidate walk treats alike: refused,
+/// unreachable, or slower than the timeout.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called only from `run`, which runs only inside `MqttBridge::connect`'s \
+                  background task — see that function's own `expect`"
+    )
+)]
+async fn dial(
+    client_id: &str,
+    candidate: &Candidate,
+) -> anyhow::Result<(rumqttc::AsyncClient, rumqttc::EventLoop)> {
+    let mut options = rumqttc::MqttOptions::new(client_id, candidate.host.clone(), candidate.port);
+    options.set_keep_alive(Duration::from_secs(30));
+    let (client, mut eventloop) = rumqttc::AsyncClient::new(options, REQUEST_CAPACITY);
+    eventloop
+        .network_options
+        .set_connection_timeout(DIAL_TIMEOUT.as_secs());
+
+    match tokio::time::timeout(DIAL_TIMEOUT, eventloop.poll()).await {
+        Ok(Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(ack))))
+            if ack.code == rumqttc::ConnectReturnCode::Success =>
+        {
+            Ok((client, eventloop))
+        }
+        Ok(Ok(other)) => anyhow::bail!("expected a ConnAck, got {other:?}"),
+        Ok(Err(error)) => Err(error.into()),
+        Err(_) => anyhow::bail!("no answer within {DIAL_TIMEOUT:?}"),
+    }
+}
+
+/// Polls one live connection until it ends, dispatching every inbound publish to `subscribers`
+/// along the way. Returns — never with an error a caller need inspect — the moment the
+/// connection is no longer usable, so [`run`] can restart DAEMON §7.1's walk from the top.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "called only from `run`, which runs only inside `MqttBridge::connect`'s \
+                  background task — see that function's own `expect`"
+    )
+)]
+async fn drive(
+    mut eventloop: rumqttc::EventLoop,
+    subscribers: &MqttSubscribers,
+    dropped: &AtomicU64,
+) {
+    loop {
+        match eventloop.poll().await {
+            Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(publish))) => {
+                dispatch(&publish.topic, &publish.payload, subscribers, dropped);
+            }
+            Ok(rumqttc::Event::Incoming(rumqttc::Packet::Disconnect)) => return,
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::warn!(%error, "the mqtt connection ended");
+                return;
+            }
+        }
+    }
+}
+
+/// [`MqttBridge::connect`]'s background task: DAEMON §7.1's walk, forever.
+///
+/// `pinned` is applied once, up front, as a filter over `candidates` rather than a branch taken
+/// per attempt — "while it is present, candidates do not self-promote" holds automatically if
+/// the only candidate this loop ever sees is the pinned one.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "spawned only by `MqttBridge::connect` — see that function's own `expect`"
+    )
+)]
+async fn run(
+    client_id: String,
+    candidates: Vec<Candidate>,
+    pinned: Option<String>,
+    client: Arc<Mutex<Option<rumqttc::AsyncClient>>>,
+    connected: Arc<AtomicBool>,
+    subscribers: Arc<MqttSubscribers>,
+    dropped: Arc<AtomicU64>,
+) {
+    let candidates: Vec<Candidate> = match &pinned {
+        Some(id) => candidates.into_iter().filter(|c| &c.id == id).collect(),
+        None => candidates,
+    };
+    if candidates.is_empty() {
+        tracing::warn!(
+            pinned = pinned.as_deref(),
+            "no dialable candidate (an empty list, or a pin naming none of them): every \
+             publish on this bridge will drop until `pubsub.toml` changes"
+        );
+        return;
+    }
+
+    loop {
+        let mut answered = false;
+        for candidate in &candidates {
+            let (new_client, eventloop) = match dial(&client_id, candidate).await {
+                Ok(pair) => pair,
+                Err(error) => {
+                    tracing::debug!(candidate = %candidate.id, %error, "candidate did not answer");
+                    continue;
+                }
+            };
+            answered = true;
+            tracing::info!(candidate = %candidate.id, "connected to the pub/sub broker");
+
+            // A fresh session remembers no subscription (module docs): reinstate every topic
+            // an instance is currently waiting on before this connection starts fanning batches
+            // out, so a subscriber that existed before this (re)connect never misses a publish
+            // that arrives right after it.
+            for topic in subscribers
+                .lock()
+                .expect("the bridge's lock is never held across a panic")
+                .keys()
+            {
+                let _ = new_client.try_subscribe(topic.clone(), QOS);
+            }
+
+            *client
+                .lock()
+                .expect("the bridge's lock is never held across a panic") = Some(new_client);
+            connected.store(true, Ordering::SeqCst);
+
+            drive(eventloop, &subscribers, &dropped).await;
+
+            connected.store(false, Ordering::SeqCst);
+            *client
+                .lock()
+                .expect("the bridge's lock is never held across a panic") = None;
+            // Handover has nothing to hand over (module docs): restart the walk from rank 1
+            // rather than falling through to the next candidate, so a higher-ranked candidate
+            // that comes back is preferred again immediately.
+            break;
+        }
+        if !answered {
+            tokio::time::sleep(RETRY_INTERVAL).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,6 +1322,250 @@ mod tests {
              inside the bridge"
         );
         assert_eq!(bridge.dropped(), 1);
+    }
+
+    // ── `MqttBridge` (DAEMON §7, §7.1) ───────────────────────────────────────────────────────
+    //
+    // No test below reaches a non-loopback address, and none requires a broker anyone started
+    // by hand: `spawn_embedded_broker` below runs `rumqttd` — a dev-dependency, not part of
+    // this crate's own tree — in this process, on an OS-assigned `127.0.0.1` port. See the
+    // module docs' "This module ships two transports" section for why that is the whole of
+    // this issue's test story.
+
+    #[test]
+    fn candidate_parses_the_spec_example() {
+        // DAEMON §7.1's own example, verbatim.
+        let candidate = Candidate::parse("n7k2p4qv@10.0.0.5:1883").unwrap();
+        assert_eq!(candidate.id, "n7k2p4qv");
+        assert_eq!(candidate.host, "10.0.0.5");
+        assert_eq!(candidate.port, 1883);
+    }
+
+    #[test]
+    fn candidate_refuses_a_missing_at() {
+        assert!(Candidate::parse("10.0.0.5:1883").is_err());
+    }
+
+    #[test]
+    fn candidate_refuses_a_missing_port() {
+        assert!(Candidate::parse("n7k2p4qv@10.0.0.5").is_err());
+    }
+
+    #[test]
+    fn candidate_refuses_a_port_that_is_not_a_number() {
+        assert!(Candidate::parse("n7k2p4qv@10.0.0.5:mqtt").is_err());
+    }
+
+    #[test]
+    fn candidate_refuses_an_empty_id_or_host() {
+        assert!(Candidate::parse("@10.0.0.5:1883").is_err());
+        assert!(Candidate::parse("n7k2p4qv@:1883").is_err());
+    }
+
+    /// A free `127.0.0.1` port nothing is listening on yet — used both to size an embedded
+    /// broker's listener and, dropped instead of handed to one, to name an address a candidate
+    /// walk will never get an answer from.
+    fn free_loopback_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("binding an ephemeral loopback port")
+            .local_addr()
+            .expect("reading back the bound address")
+            .port()
+    }
+
+    /// Runs a real `rumqttd` broker, plain TCP, on its own OS thread for the life of the test
+    /// process — the mechanism the module docs describe: a broker as a library dependency
+    /// rather than a process a person or CI has to start. Returns the loopback port it is
+    /// listening on.
+    fn spawn_embedded_broker() -> u16 {
+        let port = free_loopback_port();
+        let mut v4 = HashMap::new();
+        v4.insert(
+            String::from("1"),
+            rumqttd::ServerSettings {
+                name: String::from("test"),
+                listen: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                tls: None,
+                next_connection_delay_ms: 1,
+                connections: rumqttd::ConnectionSettings {
+                    connection_timeout_ms: 5_000,
+                    max_payload_size: 20_480,
+                    max_inflight_count: 100,
+                    auth: None,
+                    external_auth: None,
+                    dynamic_filters: false,
+                },
+            },
+        );
+        let config = rumqttd::Config {
+            id: 0,
+            router: rumqttd::RouterConfig {
+                max_connections: 10,
+                max_outgoing_packet_count: 200,
+                max_segment_size: 1024 * 1024,
+                max_segment_count: 10,
+                custom_segment: None,
+                initialized_filters: None,
+                shared_subscriptions_strategy: Default::default(),
+            },
+            v4: Some(v4),
+            v5: None,
+            ws: None,
+            cluster: None,
+            console: None,
+            bridge: None,
+            prometheus: None,
+            metrics: None,
+        };
+        std::thread::Builder::new()
+            .name(String::from("test-embedded-broker"))
+            .spawn(move || {
+                let mut broker = rumqttd::Broker::new(config);
+                // `start` blocks for as long as the broker runs, which for this test is the
+                // life of the process — there is no shutdown call to make, the same way the
+                // test never joins the thread.
+                let _ = broker.start();
+            })
+            .expect("spawning the embedded broker's thread");
+        port
+    }
+
+    /// Polls `connected` until it is `true` or `timeout` elapses, panicking in the latter case
+    /// with `what` — a small wait loop rather than a fixed sleep, since a fixed sleep is either
+    /// too short under load or, made safely long, the slowest thing about every test using it.
+    async fn wait_connected(bridge: &MqttBridge, what: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !bridge.is_connected() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what} never connected"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn mqtt_bridge_delivers_a_publish_across_a_real_broker() {
+        let port = spawn_embedded_broker();
+        let candidates = vec![Candidate {
+            id: String::from("only"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+
+        let publisher = MqttBridge::connect(String::from("publisher"), candidates.clone(), None);
+        let subscriber = MqttBridge::connect(String::from("subscriber"), candidates, None);
+        wait_connected(&publisher, "the publisher").await;
+        wait_connected(&subscriber, "the subscriber").await;
+
+        let mut sub = subscriber.subscribe("eieio/greenhouse/temperature");
+        // The subscribe request above is asynchronous by construction (`Bridge::subscribe`
+        // does not block on the round trip to the broker) — give it a moment to land before
+        // the publish that must reach it.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            publisher.publish("eieio/greenhouse/temperature", batch(9)),
+            Delivery::Sent
+        );
+
+        let arrived = tokio::time::timeout(Duration::from_secs(5), sub.recv())
+            .await
+            .expect("a batch arrived before the timeout")
+            .expect("the subscription is still open");
+        assert_eq!(n_of(&arrived), 9, "node B received what node A published");
+    }
+
+    #[tokio::test]
+    async fn mqtt_bridge_never_retains() {
+        // The real-transport half of what `a_subscription_never_sees_what_was_published_
+        // before_it_existed` already proves for the in-process transport: DAEMON §7's "retained
+        // messages are never set" over an actual MQTT broker, not just this crate's stand-in.
+        let port = spawn_embedded_broker();
+        let candidates = vec![Candidate {
+            id: String::from("only"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+
+        let publisher = MqttBridge::connect(String::from("publisher"), candidates.clone(), None);
+        wait_connected(&publisher, "the publisher").await;
+        assert_eq!(
+            publisher.publish("eieio/greenhouse/temperature", batch(1)),
+            Delivery::Sent
+        );
+        // Give the publish time to actually reach the broker before anyone subscribes late.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let late = MqttBridge::connect(String::from("late"), candidates, None);
+        wait_connected(&late, "the late subscriber").await;
+        let mut sub = late.subscribe("eieio/greenhouse/temperature");
+
+        let result = tokio::time::timeout(Duration::from_millis(500), sub.recv()).await;
+        assert!(
+            result.is_err(),
+            "a subscriber that connected after the publish must not receive it: retained was \
+             not set (DAEMON §7)"
+        );
+    }
+
+    #[tokio::test]
+    async fn mqtt_bridge_drops_and_counts_when_nothing_answers() {
+        // No broker anywhere, real or embedded — a loopback port dropped the instant it is
+        // free again is DAEMON §7.1's "nothing reachable", the ordinary case rather than an
+        // error, proved with no network beyond the loopback interface and nothing running.
+        let port = free_loopback_port();
+        let candidates = vec![Candidate {
+            id: String::from("nobody-home"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+        let bridge = MqttBridge::connect(String::from("node"), candidates, None);
+
+        // Long enough for at least one full walk-and-fail, short of the retry actually firing
+        // twice — either way `is_connected` must read false, never block.
+        tokio::time::sleep(DIAL_TIMEOUT + Duration::from_millis(200)).await;
+        assert!(!bridge.is_connected());
+
+        assert_eq!(
+            bridge.publish("eieio/greenhouse/temperature", batch(1)),
+            Delivery::Dropped,
+            "a publish with no broker connection must drop rather than block or error out"
+        );
+        assert_eq!(bridge.dropped(), 1, "the drop was logged and counted");
+    }
+
+    #[tokio::test]
+    async fn a_pin_dials_only_the_pinned_candidate() {
+        // Two candidates: one a real embedded broker that would answer if tried, one an
+        // address nothing is listening on. Ranked first, the reachable one would normally win
+        // DAEMON §7.1's walk — pinning the unreachable one must still leave this bridge
+        // disconnected, because "while it is present, candidates do not self-promote".
+        let reachable_port = spawn_embedded_broker();
+        let unreachable_port = free_loopback_port();
+        let candidates = vec![
+            Candidate {
+                id: String::from("reachable"),
+                host: String::from("127.0.0.1"),
+                port: reachable_port,
+            },
+            Candidate {
+                id: String::from("pinned-target"),
+                host: String::from("127.0.0.1"),
+                port: unreachable_port,
+            },
+        ];
+
+        let bridge = MqttBridge::connect(
+            String::from("node"),
+            candidates,
+            Some(String::from("pinned-target")),
+        );
+        tokio::time::sleep(DIAL_TIMEOUT + Duration::from_millis(200)).await;
+        assert!(
+            !bridge.is_connected(),
+            "a pin naming an unreachable candidate must not fall back to a higher-ranked one"
+        );
     }
 
     /// The mechanical enforcement of DAEMON §7's boundary: no other module in this crate may

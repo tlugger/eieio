@@ -14,17 +14,21 @@
 //! [`crate::executor::Executor::build`] left it. A node need never have heard of pub/sub to
 //! run every other kind of block.
 //!
-//! # What this crate implements of §7.1, and what it does not
+//! # What this module implements of §7.1, and what it does not
 //!
-//! Only `bus` is wired anywhere below this module: it is the one thing
-//! [`crate::bridge::wire_topic`] needs, and this daemon's only transport
-//! ([`crate::bridge::InProcessBridge`]) has no broker to dial at all. `candidates` and
-//! `pinned` are parsed and carried on [`Pubsub`] — parsing them is cheap and worth getting
-//! right now — but nothing in this crate reads either field. The ranked-list walk, the
-//! self-election debounce and the pin's exclusive-dial behavior §7.1 describes are the real
-//! transport's — a follow-up to eieio-2vm.2, alongside the MQTT client itself: stubbing a
-//! walk over addresses this daemon cannot yet connect to would be pretending election works
-//! when nothing here dials anything.
+//! `bus` is the one field [`crate::bridge::wire_topic`] needs, and this module validates it as
+//! ABI §11.1's name pattern the same way a block's own name is. `candidates` and `pinned` are
+//! parsed and carried on [`Pubsub`] as plain strings, structurally: this module's job is
+//! reading the file, not dialing an address, so it does not split a candidate into an id, a
+//! host and a port, and it accepts whatever the ranked list contains without judging it —
+//! splitting `<id>@<host>:<port>` is `crate::bridge::Candidate::parse`'s job, because parsing
+//! and walking a candidate list belongs to the transport (its module docs say why).
+//!
+//! `crate::bridge::MqttBridge::connect` is what actually reads `candidates` and `pinned`:
+//! DAEMON §7.1's ranked walk, its retry-on-nothing-reachable posture, and the pin's
+//! exclusive-dial behavior all live there now (eieio-2vm.4). Wiring that bridge into a running
+//! node from this module's `Pubsub` — the one line `main.rs` changes — is a separate change
+//! from this one and stays `InProcessBridge::disconnected` until it lands.
 
 use std::path::Path;
 

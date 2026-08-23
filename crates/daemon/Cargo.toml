@@ -83,7 +83,24 @@ serde_json = { workspace = true, default-features = false, features = ["std"] }
 toml.workspace = true
 serde = { workspace = true, default-features = false, features = ["std", "derive"] }
 
+# The pub/sub bridge's transport (DAEMON §7, SCOPE §3.9), entirely inside `src/bridge.rs` —
+# `the_bridge_boundary_holds` fails the build if this name reaches any other module. Version
+# and dev-dependency pinned here rather than in the workspace table (unlike every other
+# dependency above): this crate's `Cargo.toml` is this change's whole footprint, deliberately,
+# so it does not touch a manifest shared with unrelated work in flight. `default-features =
+# false` drops `use-rustls`, rumqttc's only default feature — SCOPE §3.11 (transport security
+# on the bus) is OPEN, so this bridge speaks plain TCP and invents no TLS posture; pulling in
+# rustls for a feature nothing here turns on would be a heavier tree for no capability.
+rumqttc = { version = "0.25", default-features = false }
+
 [dev-dependencies]
+# The bridge's transport is real MQTT and its tests must prove that without a broker anyone
+# has to start by hand (eieio-2vm.2's constraint, restated in eieio-2vm.4): `rumqttd` is the
+# same wire protocol `rumqttc` speaks, embeddable as a library rather than a subprocess, so a
+# test spins one up on a loopback port and tears it down with the process. `default-features
+# = false` drops `use-rustls` and `websocket`, matching `rumqttc` above — the fixture broker
+# needs to accept exactly the plain-TCP connections this bridge makes, nothing more.
+rumqttd = { version = "0.20", default-features = false }
 # ABI §13's "both the daemon and the leaf runtime MUST pass the harness". A dev-dependency
 # and not a lib target on this crate: DAEMON §1's table gives `eio-daemon` no import path,
 # so the harness reaches the daemon's wasmtime binding from inside its own test module
