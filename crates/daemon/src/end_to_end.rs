@@ -1226,6 +1226,98 @@ async fn restarting_an_instance_a_service_does_not_have_is_an_error() {
     service.join();
 }
 
+#[tokio::test]
+async fn a_restart_that_fails_to_configure_empties_only_its_own_slot() {
+    // eieio-35h.13: `restart_toggle.wat` (`tests/blocks/`) configures on odd lives and
+    // refuses on even ones, keeping the count in `eio:state` (ABI §7.2) — the continuity a
+    // restart's fresh linear memory cannot supply (ABI §5.1 step 6). A counter rather than a
+    // one-shot flag, because the acceptance needs both halves at once: a permanent-after-
+    // first-success marker could show "refuses the second time" but never "a later restart
+    // refills the slot". Life 1 (the `Service::spawn` below) is odd and configures; the
+    // first `restart` is life 2 (even, refused); a later `restart` of the same index is
+    // life 3 (odd, configures again).
+    let executor = Executor::new(Budgets::default(), 4).expect("an executor");
+    let mut service = Service::spawn(
+        &executor,
+        vec![
+            instance("echo.wat", "a", echo_props()),
+            instance("restart_toggle.wat", "flaky", BTreeMap::new()),
+            instance("echo.wat", "c", echo_props()),
+        ],
+        &[connect(("a", "out"), ("c", "in"))],
+    )
+    .await
+    .expect("life 1 is odd and configures");
+
+    // Kept before the restart: a mailbox nobody is reading from answers `send` with a
+    // closed channel, and nothing does that but a thread that has already finished. If
+    // `restart` left this old life running rather than stopping and joining it first (ABI
+    // §1.2 admits one caller), this send would still get in.
+    let old_mailbox = service
+        .instance("flaky")
+        .expect("it is there")
+        .mailbox()
+        .clone();
+
+    let error = service
+        .restart(&executor, 1)
+        .await
+        .expect_err("life 2 is even and the block refuses it");
+    assert!(
+        error.to_string().contains("rejected its configuration"),
+        "{error}"
+    );
+
+    assert!(
+        old_mailbox.send(Work::Stop).await.is_err(),
+        "the old life was stopped and joined before the replacement was even attempted"
+    );
+
+    // The slot itself: emptied, not removed, and only this one — `Service::instance` and
+    // `Service::events` answer by id, off `prepared`, so a `None` here is the slot itself
+    // and not merely a lookup that gave up (DAEMON §8).
+    assert!(
+        service.instance("flaky").is_none(),
+        "the failed slot is empty"
+    );
+    assert!(
+        service.events("flaky").is_none(),
+        "and carries no event stream"
+    );
+    assert!(
+        service.instance("a").is_some(),
+        "untouched by flaky's restart"
+    );
+    assert!(
+        service.instance("c").is_some(),
+        "untouched by flaky's restart"
+    );
+
+    // The rest of the service does not notice: "a" still reaches "c" straight past the
+    // empty middle slot.
+    post(service.instance("a").expect("it is there"), deliver(0)).await;
+    let seen = until_statuses(service.events("c").expect("its events"), 3).await;
+    assert_eq!(
+        statuses(&seen),
+        [Status::Ok, Status::Ok, Status::Ok],
+        "c's configure, start and the delivery, none of them touched by flaky's failure: \
+         {seen:#?}"
+    );
+
+    // Indices stay intact, so a later restart of the same index can try again — life 3 is
+    // odd, and this is the retry DAEMON §8's supervisor needs to be able to make.
+    service
+        .restart(&executor, 1)
+        .await
+        .expect("life 3 is odd and configures");
+    assert!(service.instance("flaky").is_some(), "the slot is refilled");
+    assert!(service.instance("a").is_some(), "still untouched");
+    assert!(service.instance("c").is_some(), "still untouched");
+
+    service.stop().await;
+    service.join();
+}
+
 // ── the milestone (implementation order item 4's exit criterion) ─────────────
 
 #[tokio::test]
