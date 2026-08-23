@@ -309,7 +309,7 @@ async fn run_node(
 
     let shared = std::sync::Arc::new(api::Shared {
         bus,
-        registry: registry::Registry::new(node.signing.clone()),
+        registry: registry::Registry::new(node.signing.clone(), node.credentials.clone()),
         services: tokio::sync::Mutex::new(services),
         executor,
         node,

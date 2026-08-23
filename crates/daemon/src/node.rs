@@ -28,6 +28,7 @@
 //! throughout, for the reason ABI §11.1 and SERVICE §3 both give: a typo'd knob that silently
 //! meant nothing is a node running on a default its operator believes they changed.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -37,7 +38,7 @@ use eio_host_core::{ExprBudgets, Limits};
 use serde::Deserialize;
 
 use crate::engine::Budgets;
-use crate::registry::Signing;
+use crate::registry::{Credential, Signing};
 
 /// The default management API address (DAEMON §2.1, §9).
 ///
@@ -160,6 +161,9 @@ pub struct Node {
     pub mailbox: usize,
     /// What this node will accept a block on the strength of (DAEMON §4.2).
     pub signing: Signing,
+    /// Credentials for private OCI registries, keyed by host (DAEMON §2.1, §13). Read from
+    /// `auth/registries.toml`, not `node.toml` — see that file's own doc comment for why.
+    pub credentials: BTreeMap<String, Credential>,
     /// The management API's bearer token (DAEMON §9.1).
     pub token: String,
     /// The data directory this node was opened on.
@@ -187,6 +191,7 @@ impl Node {
         }
         provision_auth(&layout.auth())?;
         let token = provision_token(&layout.token())?;
+        let credentials = load_registries(&layout.registries())?;
 
         let path = layout.node_toml();
         if !path.exists() {
@@ -200,7 +205,7 @@ impl Node {
             .with_context(|| format!("reading {}", path.display()))?;
         let file: File = toml::from_str(&text)
             .with_context(|| format!("{} is not a valid node configuration", path.display()))?;
-        file.into_node(root.to_path_buf(), token)
+        file.into_node(root.to_path_buf(), token, credentials)
     }
 
     /// Where this node's files are (DAEMON §2).
@@ -280,6 +285,15 @@ impl Layout<'_> {
     pub fn token(&self) -> PathBuf {
         self.auth().join("token")
     }
+
+    /// `auth/registries.toml`: OCI registry credentials, keyed by host (DAEMON §2.1, §13).
+    ///
+    /// Not a `node.toml` table: `node.toml` is the templated file an operator reads and edits,
+    /// and DAEMON §9's API may expose it, and a bearer token has no business in either. Beside
+    /// the management API's own token and `cosign.pub`, inside the same owner-only directory.
+    pub fn registries(&self) -> PathBuf {
+        self.auth().join("registries.toml")
+    }
 }
 
 /// Creates `auth/` with owner-only permissions (DAEMON §2.1, SCOPE §3.11).
@@ -296,7 +310,24 @@ fn provision_auth(path: &Path) -> anyhow::Result<()> {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("restricting {}", path.display()))?;
     }
-    Ok(())
+    provision_gitignore(path)
+}
+
+/// Writes `auth/.gitignore` containing `*`, unless this node already has one (DAEMON §2.1,
+/// §13).
+///
+/// An operator who version-controls their node data directory is one `git add -A` away from
+/// committing the management API token, a registry credential, or both — a committed secret
+/// is the failure that actually matters here, more than any one file's placement. So the whole
+/// directory is made to ignore itself, on the same first boot that creates it. Written once,
+/// like `node.toml`: an existing `auth/.gitignore` is left exactly as an operator left it,
+/// including one they deliberately narrowed or deleted.
+fn provision_gitignore(auth: &Path) -> anyhow::Result<()> {
+    let path = auth.join(".gitignore");
+    if path.exists() {
+        return Ok(());
+    }
+    std::fs::write(&path, "*\n").with_context(|| format!("writing {}", path.display()))
 }
 
 /// Reads the API token, minting one if this node has none yet (DAEMON §9.1).
@@ -366,7 +397,12 @@ struct File {
 
 impl File {
     /// Turns the file into the node it describes, checking what the types could not.
-    fn into_node(self, root: PathBuf, token: String) -> anyhow::Result<Node> {
+    fn into_node(
+        self,
+        root: PathBuf,
+        token: String,
+        credentials: BTreeMap<String, Credential>,
+    ) -> anyhow::Result<Node> {
         anyhow::ensure!(!self.id.is_empty(), "`id` must not be empty");
         anyhow::ensure!(
             self.executor.mailbox > 0,
@@ -399,6 +435,7 @@ impl File {
             },
             mailbox: self.executor.mailbox,
             signing: self.blocks.signing(&root)?,
+            credentials,
             token,
             root,
         })
@@ -561,6 +598,68 @@ impl BlocksSection {
     }
 }
 
+/// One host's entry in `auth/registries.toml` (DAEMON §2.1, §13).
+///
+/// `deny_unknown_fields`, for the same reason `node.toml`'s sections carry it: a typo'd key
+/// here is a credential silently not applied, discovered only when a pull that should have
+/// worked does not.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryEntry {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+impl RegistryEntry {
+    /// Turns one entry into the credential it names, or says which way it is ambiguous.
+    fn credential(self, host: &str) -> anyhow::Result<Credential> {
+        match (self.token, self.username, self.password) {
+            (Some(token), None, None) => Ok(Credential::Bearer(token)),
+            (None, Some(username), Some(password)) => Ok(Credential::Basic { username, password }),
+            (None, Some(_), None) => anyhow::bail!(
+                "`auth/registries.toml`'s entry for {host} has a `username` and no `password`"
+            ),
+            (None, None, Some(_)) => anyhow::bail!(
+                "`auth/registries.toml`'s entry for {host} has a `password` and no `username`"
+            ),
+            (None, None, None) => anyhow::bail!(
+                "`auth/registries.toml`'s entry for {host} names neither a `token` nor a \
+                 `username` and `password`"
+            ),
+            (Some(_), _, _) => anyhow::bail!(
+                "`auth/registries.toml`'s entry for {host} names both a `token` and a \
+                 `username`/`password`; a registry takes one or the other"
+            ),
+        }
+    }
+}
+
+/// Reads `auth/registries.toml`, if this node has one (DAEMON §2.1, §13).
+///
+/// Absent is the ordinary case — most nodes pull only public registries — and is not an error.
+/// Keyed by host exactly as `Registry::pull` looks one up: see [`Registry::credential`]'s doc
+/// comment for why an exact string, and not a suffix or prefix match, is the whole of what
+/// keeps a credential meant for one host from ever reaching another.
+fn load_registries(path: &Path) -> anyhow::Result<BTreeMap<String, Credential>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let raw: BTreeMap<String, RegistryEntry> = toml::from_str(&text)
+        .with_context(|| format!("{} is not a valid registries file", path.display()))?;
+    raw.into_iter()
+        .map(|(host, entry)| {
+            let credential = entry.credential(&host)?;
+            Ok((host, credential))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,7 +670,13 @@ mod tests {
     fn node(text: &str) -> anyhow::Result<Node> {
         toml::from_str::<File>(text)
             .map_err(anyhow::Error::from)
-            .and_then(|file| file.into_node(PathBuf::from("/nonexistent"), String::from("t")))
+            .and_then(|file| {
+                file.into_node(
+                    PathBuf::from("/nonexistent"),
+                    String::from("t"),
+                    BTreeMap::new(),
+                )
+            })
     }
 
     #[test]
@@ -785,6 +890,64 @@ mod tests {
         assert_eq!(mode(&auth), 0o755, "the test really did widen it");
         Node::open(&root).expect("a later boot");
         assert_eq!(mode(&auth), 0o700, "and the daemon narrowed it back");
+    }
+
+    #[test]
+    fn auth_gitignore_is_provisioned_once_and_never_overwritten() {
+        // The whole secret directory protects itself against a version-controlled data
+        // directory: the API token and any registry credential, not just one filename
+        // (DAEMON §2.1, §13).
+        let root = scratch("auth-gitignore");
+        Node::open(&root).expect("a fresh node");
+        let gitignore = root.join("auth").join(".gitignore");
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).expect("auth/.gitignore exists"),
+            "*\n"
+        );
+
+        // An operator's own edit survives a later boot -- idempotent, not "resets every time".
+        std::fs::write(&gitignore, "*\n!keep-me\n").expect("an operator's edit");
+        Node::open(&root).expect("a later boot");
+        assert_eq!(
+            std::fs::read_to_string(&gitignore).expect("still there"),
+            "*\n!keep-me\n",
+            "an existing auth/.gitignore is not overwritten"
+        );
+    }
+
+    #[test]
+    fn registries_toml_is_read_into_credentials_keyed_by_host() {
+        let root = scratch("node-registries");
+        let node = Node::open(&root).expect("a fresh node");
+        assert!(node.credentials.is_empty(), "no file, no credentials");
+
+        std::fs::write(
+            root.join("auth").join("registries.toml"),
+            "[\"ghcr.io\"]\ntoken = \"abc\"\n\n\
+             [\"registry.internal:5000\"]\nusername = \"node\"\npassword = \"secret\"\n",
+        )
+        .expect("a registries.toml");
+        let node = Node::open(&root).expect("a second boot");
+        assert!(
+            matches!(node.credentials.get("ghcr.io"), Some(Credential::Bearer(t)) if t == "abc")
+        );
+        assert!(matches!(
+            node.credentials.get("registry.internal:5000"),
+            Some(Credential::Basic { username, password })
+                if username == "node" && password == "secret"
+        ));
+    }
+
+    #[test]
+    fn a_registries_toml_entry_naming_neither_a_token_nor_a_login_is_refused_at_load() {
+        let root = scratch("node-registries-ambiguous");
+        Node::open(&root).expect("a fresh node");
+        std::fs::write(root.join("auth").join("registries.toml"), "[\"ghcr.io\"]\n")
+            .expect("an entry naming nothing");
+        assert!(
+            Node::open(&root).is_err(),
+            "an entry naming neither a token nor a username/password is ambiguous"
+        );
     }
 
     #[test]

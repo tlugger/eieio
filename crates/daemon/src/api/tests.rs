@@ -86,7 +86,7 @@ impl Harness {
         let services = boot::boot(&node, &executor).await;
         let shared = Arc::new(Shared {
             bus,
-            registry: Registry::new(node.signing.clone()),
+            registry: Registry::new(node.signing.clone(), node.credentials.clone()),
             services: tokio::sync::Mutex::new(services),
             executor,
             node,

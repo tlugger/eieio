@@ -105,6 +105,8 @@ The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batc
   node.toml                    node identity, listen addr, limits, budgets (§2.1)
   auth/                        token, TLS material (OPEN, SCOPE §3.11)
     token                      the management API's bearer token (§9.1)
+    registries.toml            per-registry credentials, host-keyed (§4.1)
+    .gitignore                 `*`, written once at first boot (§2.1)
   services/
     <name>.toml                one service definition per file
   pubsub.toml                  bus name, broker candidates, optional pin
@@ -163,6 +165,8 @@ key = "auth/cosign.pub"          # The public key it is verified against; relati
 **`id` is the node's identity, and `name` is not.** This is SERVICE §2's decision one level up and for the same reason: the Designer's registry (DESIGNER §3) keys a node by something that has to survive a rename and a new DHCP lease, and a name that identified a node would make renaming one a migration. An id is opaque, and a host MUST NOT parse meaning out of it.
 
 **First boot provisions.** A data directory with no `node.toml` is a fresh node, not an error: the daemon creates the directory tree of §2, mints an `id`, and writes a `node.toml` carrying it. `auth/` is created with owner-only permissions (0700 where the platform has them) because it is where SCOPE §3.11's token material lands (§9), and the management API's token is minted into it and printed once — the only time this node will show it (§9.1). Provisioning happens once — a second boot reads the id it wrote and MUST NOT mint another, since an id that changed per boot would identify nothing.
+
+The same first boot writes **`auth/.gitignore` containing `*`**, and MUST NOT overwrite one already there. Operators version-control their node data directories, and 0700 is no defence against `git add`: it stops another user reading the file and does nothing about the token being pushed to a remote. The directory is made to protect itself rather than one filename at a time, so whatever lands in `auth/` later — a registry credential (§4.1), a signing key, TLS material when SCOPE §3.11 settles — is covered without anyone remembering to extend a list.
 
 **`listen` defaults to loopback** while transport security is OPEN (SCOPE §3.11). The management API deploys arbitrary WASM to the node, its only gate is a bearer token, and it has no transport security yet; a default that published that to every interface would make "install the package" the exposing act rather than a deliberate one. Making a node reachable is one line in the generated file, and the generated file says so.
 
@@ -223,7 +227,11 @@ Resolution is therefore two halves with one seam. The **read** half — referenc
 
 **Digest verification is unconditional.** The layer's `digest` is recomputed over the received bytes and MUST match; the layer's `size` MUST match too, and is also what bounds the read, so a registry cannot answer a small blob with an unbounded stream. Only `sha256` is accepted. This is the verification that makes the rest of the section meaningful: everything below is about *which* artifact, and this is about whether these are its bytes.
 
-**Anonymous pull only.** v1 talks to registries that serve a public repository — including those that answer `401` and mint an anonymous token for one, which is what `ghcr.io` and `docker.io` do. A registry that demands credentials is refused with an error that says so rather than one that says "not found", because the two are different things for an operator to do about. Credentialed access to private registries is §13's expansion item and is tracked as its own work; when it lands, where the credentials live is a decision about the data directory (SCOPE §3.8) and not about this client.
+**Anonymous by default, credentialed when configured.** A registry with no entry in `auth/registries.toml` is talked to anonymously, which covers a public repository — including registries that answer `401` and mint an anonymous token for one, as `ghcr.io` and `docker.io` do. An entry keyed by the reference's host supplies either a `token`, used directly as the retried request's bearer credential, or a `username` and `password`, exchanged for one over HTTP Basic at the challenge's realm — the standard OCI flow, and the same retry machinery either way.
+
+**A credential is offered to the host it was written for and to no other.** The lookup is an exact match on the host parsed from the reference; there is no suffix, prefix or substring matching anywhere between a reference and an `Authorization` header. That is the whole of the rule, deliberately, because the failure it prevents — a token for one registry sent to another — is not one an operator would find out about.
+
+**A rejected credential is not a missing one.** A `401` on an anonymous pull keeps the error it always had; a `401` when credentials *were* configured is a distinct failure, because "this registry wants credentials" and "the credentials you gave it are wrong" are different things to go and fix.
 
 ### 4.2 Signatures
 
@@ -572,4 +580,4 @@ NaN and infinity need no rule here: a literal that overflows `binary64` is refus
 
 ## 13. Expansion list (for the in-depth pass)
 
-Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), OCI auth for private registries (§4.1 states the anonymous-only v1 posture this replaces), mailbox sizing defaults, multi-arch AOT artifact selection.
+Per-subsystem deep specs needed: router semantics under reload (in-flight signal disposition), mailbox sizing defaults, multi-arch AOT artifact selection.

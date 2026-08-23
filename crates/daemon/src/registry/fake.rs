@@ -63,6 +63,14 @@ struct State {
     require_token: bool,
     /// Refuse to mint an anonymous token, as a private repository does.
     require_credentials: bool,
+    /// Mint a token only for a `/token` request carrying exactly this `Authorization: Basic`
+    /// value — the private-registry-with-a-login case (eieio-8yq.10).
+    expected_basic: Option<String>,
+    /// Answer the registry API only to exactly this `Authorization: Bearer` value, skipping
+    /// the token endpoint entirely — the private-registry-with-a-static-token case
+    /// (eieio-8yq.10). `require_token` still gates it: unset, any bearer is accepted, as
+    /// before this existed.
+    expected_bearer: Option<String>,
 }
 
 /// A registry serving on loopback (DAEMON §4.1's plain-HTTP case).
@@ -71,6 +79,10 @@ pub struct Fake {
     port: u16,
     state: Arc<Mutex<State>>,
     minted: Arc<AtomicUsize>,
+    /// The `Authorization` header value of the most recent request this registry answered, if
+    /// it carried one — for a test that has to prove a *different* registry's credential was
+    /// never even offered here (eieio-8yq.10).
+    last_authorization: Arc<Mutex<Option<String>>>,
 }
 
 impl Fake {
@@ -80,21 +92,41 @@ impl Fake {
         let port = listener.local_addr().expect("the bound address").port();
         let state = Arc::new(Mutex::new(State::default()));
         let minted = Arc::new(AtomicUsize::new(0));
+        let last_authorization = Arc::new(Mutex::new(None));
 
         let served = Arc::clone(&state);
         let counted = Arc::clone(&minted);
+        let seen = Arc::clone(&last_authorization);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 // One connection at a time: a pull is sequential, and a test that deadlocked
                 // on concurrency it never asked for would be a puzzle about the harness.
-                serve(stream, &served, &counted);
+                serve(stream, &served, &counted, &seen);
             }
         });
         Fake {
             port,
             state,
             minted,
+            last_authorization,
         }
+    }
+
+    /// The host string this registry answers to — exactly what `Registry` parses out of one
+    /// of its references, and so exactly what a credential for it must be keyed by
+    /// (eieio-8yq.10).
+    pub fn host(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    /// The `Authorization` header value of the most recent request this registry answered, if
+    /// any — for proving a credential meant for a *different* registry never arrived here
+    /// (eieio-8yq.10).
+    pub fn last_authorization(&self) -> Option<String> {
+        self.last_authorization
+            .lock()
+            .expect("the registry")
+            .clone()
     }
 
     /// A port nothing is listening on, for the unreachable case.
@@ -161,6 +193,27 @@ impl Fake {
         let mut state = self.state.lock().expect("the registry");
         state.require_token = true;
         state.require_credentials = true;
+    }
+
+    /// Mint a token only for a `/token` request presenting exactly `username`/`password` over
+    /// HTTP Basic — the private-registry-with-a-login case (eieio-8yq.10).
+    pub fn require_basic_auth(&self, username: &str, password: &str) {
+        use base64::Engine as _;
+        let mut state = self.state.lock().expect("the registry");
+        state.require_token = true;
+        state.expected_basic = Some(format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))
+        ));
+    }
+
+    /// Answer the registry API only to exactly `token` as an `Authorization: Bearer` header,
+    /// with no token endpoint involved — the private-registry-with-a-static-token case
+    /// (eieio-8yq.10).
+    pub fn require_bearer_token(&self, token: &str) {
+        let mut state = self.state.lock().expect("the registry");
+        state.require_token = true;
+        state.expected_bearer = Some(String::from(token));
     }
 
     /// Publishes `wasm` as a block at `name:version`.
@@ -312,19 +365,25 @@ fn payload(digest: &str) -> String {
 }
 
 /// Answers one connection's requests.
-fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>, minted: &Arc<AtomicUsize>) {
+fn serve(
+    mut stream: TcpStream,
+    state: &Arc<Mutex<State>>,
+    minted: &Arc<AtomicUsize>,
+    last_authorization: &Arc<Mutex<Option<String>>>,
+) {
     let Some(request) = read_request(&mut stream) else {
         return;
     };
+    *last_authorization.lock().expect("the registry") = request.authorization.clone();
     let (path, query) = request
         .path
         .split_once('?')
         .unwrap_or((request.path.as_str(), ""));
 
     let response = if path == "/token" {
-        token(state, minted, query)
+        token(state, minted, query, request.authorization.as_deref())
     } else {
-        registry_api(state, path, request.authorized)
+        registry_api(state, path, request.authorization.as_deref())
     };
 
     let (status, kind, body) = response;
@@ -353,11 +412,20 @@ fn serve(mut stream: TcpStream, state: &Arc<Mutex<State>>, minted: &Arc<AtomicUs
 fn registry_api(
     state: &Arc<Mutex<State>>,
     path: &str,
-    authorized: bool,
+    authorization: Option<&str>,
 ) -> (&'static str, &'static str, Vec<u8>) {
     let state = state.lock().expect("the registry");
-    if state.require_token && !authorized {
-        return ("401 Unauthorized", "application/json", b"{}".to_vec());
+    if state.require_token {
+        let authorized = match &state.expected_bearer {
+            // A static-token registry checks the value, not merely the presence, of the
+            // header — the only way a test can tell "the right credential" from "some
+            // credential" apart, which is what the wrong-host isolation guarantee rests on.
+            Some(expected) => authorization == Some(&format!("Bearer {expected}")),
+            None => authorization.is_some(),
+        };
+        if !authorized {
+            return ("401 Unauthorized", "application/json", b"{}".to_vec());
+        }
     }
 
     let Some(rest) = path.strip_prefix("/v2/") else {
@@ -388,14 +456,22 @@ fn token(
     state: &Arc<Mutex<State>>,
     minted: &Arc<AtomicUsize>,
     query: &str,
+    authorization: Option<&str>,
 ) -> (&'static str, &'static str, Vec<u8>) {
     assert!(
         query.contains("scope="),
         "the client sent no scope: {query:?}"
     );
-    if state.lock().expect("the registry").require_credentials {
+    let state = state.lock().expect("the registry");
+    if state.require_credentials {
         return ("401 Unauthorized", "application/json", b"{}".to_vec());
     }
+    if let Some(expected) = &state.expected_basic
+        && authorization != Some(expected.as_str())
+    {
+        return ("401 Unauthorized", "application/json", b"{}".to_vec());
+    }
+    drop(state);
     minted.fetch_add(1, Ordering::SeqCst);
     (
         "200 OK",
@@ -412,7 +488,8 @@ fn last(repository: &str) -> &str {
 /// The parts of a request this registry reads.
 struct Request {
     path: String,
-    authorized: bool,
+    /// The `Authorization` header's value, exactly as sent, if the request carried one.
+    authorization: Option<String>,
 }
 
 /// Reads a request line and its headers, discarding any body.
@@ -422,15 +499,20 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     reader.read_line(&mut line).ok()?;
     let path = String::from(line.split_whitespace().nth(1)?);
 
-    let mut authorized = false;
+    let mut authorization = None;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).ok()? == 0 || header.trim().is_empty() {
             break;
         }
-        if header.to_ascii_lowercase().starts_with("authorization:") {
-            authorized = true;
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("authorization")
+        {
+            authorization = Some(String::from(value.trim()));
         }
     }
-    Some(Request { path, authorized })
+    Some(Request {
+        path,
+        authorization,
+    })
 }

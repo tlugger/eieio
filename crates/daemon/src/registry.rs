@@ -92,6 +92,18 @@ pub enum PullError {
         /// What was asked for.
         url: String,
     },
+    /// The registry wants credentials, this node has some configured for it, and the
+    /// registry rejected them (DAEMON §2.1, §13).
+    ///
+    /// Distinct from [`Unauthorized`](PullError::Unauthorized) on purpose: "you may not have
+    /// this" and "you typed the wrong password" are different things for an operator to do
+    /// next, and collapsing them would send whoever hits this looking in the wrong place —
+    /// `auth/registries.toml` rather than a registry's access list. Never carries the
+    /// credential itself, only the URL that was being asked for.
+    InvalidCredentials {
+        /// What was asked for.
+        url: String,
+    },
     /// The registry's answer was not the shape it has to be.
     Malformed {
         /// What was asked for.
@@ -150,6 +162,11 @@ impl std::fmt::Display for PullError {
                 "{url} requires credentials; this node pulls anonymously and from public \
                  repositories only"
             ),
+            PullError::InvalidCredentials { url } => write!(
+                f,
+                "{url} rejected the credentials configured for this registry in \
+                 `auth/registries.toml`"
+            ),
             PullError::Malformed { url, detail } => write!(f, "{url} answered {detail}"),
             PullError::Unusable { detail } => f.write_str(detail),
             PullError::Digest { expected, got } => {
@@ -185,6 +202,44 @@ pub struct Signing {
     /// Where a key was looked for, whether or not one was found — for the message when
     /// `require_signed` is set and none was.
     pub key_path: String,
+}
+
+/// A credential this node holds for one registry host (DAEMON §2.1, §13).
+///
+/// Read from `auth/registries.toml`, never from `node.toml` — a bearer token has no business
+/// in the file DAEMON §9's API may expose (DAEMON §2.1). Looked up by [`Registry::credential`],
+/// which matches the exact host string a reference names and nothing looser.
+#[derive(Clone)]
+pub enum Credential {
+    /// A bearer token this node already holds, used as-is on the request the pull path would
+    /// otherwise have minted one for — there is nothing to exchange it for, since a minted
+    /// token and this one are used identically once either is in hand (DAEMON §13).
+    Bearer(String),
+    /// A username and password, exchanged for a scoped bearer token at the registry's token
+    /// endpoint via HTTP Basic — the standard OCI/Docker distribution flow, and the one the
+    /// existing challenge-and-retry path already knows how to finish once it has a token.
+    Basic {
+        /// The registry account.
+        username: String,
+        /// Its password.
+        password: String,
+    },
+}
+
+impl std::fmt::Debug for Credential {
+    /// Redacts the secret, so a `{credential:?}` anywhere — a log line, a panic message, a
+    /// future `derive(Debug)` on something that holds one — cannot print it. The one thing
+    /// this type exists to carry is the one thing it must never render.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Credential::Bearer(_) => f.write_str("Bearer(REDACTED)"),
+            Credential::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"REDACTED")
+                .finish(),
+        }
+    }
 }
 
 /// What a manifest is fetched by: a tag, or a digest that pins one artifact (DAEMON §4,
@@ -285,11 +340,13 @@ fn locate(reference: &str) -> Result<Location, PullError> {
 pub struct Registry {
     agent: ureq::Agent,
     signing: std::sync::Arc<Signing>,
+    credentials: std::sync::Arc<BTreeMap<String, Credential>>,
 }
 
 impl Registry {
-    /// A client that verifies against `signing`'s key, if it has one.
-    pub fn new(signing: Signing) -> Registry {
+    /// A client that verifies against `signing`'s key, if it has one, and authenticates to
+    /// whichever of `credentials`' hosts a pull actually reaches (DAEMON §2.1, §13).
+    pub fn new(signing: Signing, credentials: BTreeMap<String, Credential>) -> Registry {
         let config = ureq::Agent::config_builder()
             // Statuses are read, not raised: a `401` is the token dance's opening move
             // and not a failure, and the difference is this client's whole auth handling.
@@ -301,7 +358,22 @@ impl Registry {
         Registry {
             agent: ureq::Agent::new_with_config(config),
             signing: std::sync::Arc::new(signing),
+            credentials: std::sync::Arc::new(credentials),
         }
+    }
+
+    /// The credential configured for `host`, if this node has one (DAEMON §2.1, §13).
+    ///
+    /// A `BTreeMap` lookup on the exact host string [`locate`] parsed out of the reference —
+    /// never a suffix, prefix, or substring match. `ghcr.io` and `evil.example.com` are simply
+    /// different keys, so a credential for one is never even a candidate for the other; there
+    /// is no normalization step in between that a crafted host could exploit. Every call site
+    /// that attaches a credential to a request — [`Registry::token`]'s realm exchange and the
+    /// final-status check in [`Registry::fetch`] — reaches it through this one function, keyed
+    /// by the *reference's* host, so there is one place this property has to hold rather than
+    /// one per call site.
+    fn credential(&self, host: &str) -> Option<&Credential> {
+        self.credentials.get(host)
     }
 
     /// Pulls `reference` and answers the block's bytes, verified (DAEMON §4.1, §4.2).
@@ -319,7 +391,7 @@ impl Registry {
         let mut token = None;
 
         let url = at.url("manifests", at.pin.as_str());
-        let raw = self.fetch(&url, MANIFEST_TYPES, MANIFEST_LIMIT, &mut token)?;
+        let raw = self.fetch(&url, &at.host, MANIFEST_TYPES, MANIFEST_LIMIT, &mut token)?;
         let manifest = parse_manifest(&url, &raw)?;
         let digest = hex_digest(&raw);
 
@@ -378,7 +450,7 @@ impl Registry {
     ) -> Result<Option<Signed>, PullError> {
         let tag = format!("sha256-{}.sig", digest.trim_start_matches("sha256:"));
         let url = at.url("manifests", &tag);
-        let raw = match self.fetch(&url, MANIFEST_TYPES, MANIFEST_LIMIT, token) {
+        let raw = match self.fetch(&url, &at.host, MANIFEST_TYPES, MANIFEST_LIMIT, token) {
             Ok(raw) => raw,
             // A registry with no signature for this artifact answers `404`, and one that has
             // never been signed at all may answer `401` for a tag that does not exist. Both
@@ -434,7 +506,7 @@ impl Registry {
         }
 
         let url = at.url("blobs", &layer.digest);
-        let bytes = self.fetch(&url, "*/*", layer.size, token)?;
+        let bytes = self.fetch(&url, &at.host, "*/*", layer.size, token)?;
         if bytes.len() as u64 != layer.size {
             return Err(PullError::Malformed {
                 url,
@@ -463,6 +535,7 @@ impl Registry {
     fn fetch(
         &self,
         url: &str,
+        host: &str,
         accept: &str,
         limit: u64,
         token: &mut Option<String>,
@@ -475,7 +548,7 @@ impl Registry {
                     .get("www-authenticate")
                     .and_then(|value| value.to_str().ok())
                     .map(String::from);
-                let Some(minted) = self.token(url, challenge.as_deref())? else {
+                let Some(minted) = self.token(url, host, challenge.as_deref())? else {
                     return Err(PullError::Unauthorized {
                         url: String::from(url),
                     });
@@ -489,8 +562,18 @@ impl Registry {
 
         let status = response.status().as_u16();
         if status == 401 || status == 403 {
-            return Err(PullError::Unauthorized {
-                url: String::from(url),
+            // A credential configured for this host and rejected is a different failure from
+            // no credential at all (DAEMON §2.1, §13) — see `PullError::InvalidCredentials`.
+            // This is the one place both the anonymous path and a rejected direct bearer
+            // credential (which skips `Registry::token`'s own such check) surface, so it is
+            // the one place this distinction is made for every request a pull sends.
+            return Err(match self.credential(host).is_some() {
+                true => PullError::InvalidCredentials {
+                    url: String::from(url),
+                },
+                false => PullError::Unauthorized {
+                    url: String::from(url),
+                },
             });
         }
         if !(200..300).contains(&status) {
@@ -533,12 +616,35 @@ impl Registry {
         })
     }
 
-    /// Answers a `WWW-Authenticate: Bearer` challenge, anonymously (DAEMON §4.1).
+    /// Answers a `WWW-Authenticate: Bearer` challenge — anonymously, unless `host` has a
+    /// credential configured (DAEMON §4.1, §2.1, §13).
     ///
-    /// `None` means the challenge is one this node cannot answer — `Basic`, or a `Bearer`
-    /// with no realm — which is the private-registry case and is reported as such rather than
-    /// as a failed request.
-    fn token(&self, url: &str, challenge: Option<&str>) -> Result<Option<String>, PullError> {
+    /// A [`Credential::Bearer`] is already the finished article and is returned as-is, with no
+    /// request made at all: there is nothing to exchange it for, since it is used on the retry
+    /// exactly as a minted token would be. A [`Credential::Basic`] is exchanged for one at the
+    /// realm the challenge names, via HTTP Basic — the standard OCI/Docker distribution flow,
+    /// layered onto the same anonymous request this always made. `host` is looked up through
+    /// [`Registry::credential`], so the same exact-match guarantee holds here.
+    ///
+    /// `None` means the challenge is one this node cannot answer with what it has — `Basic`,
+    /// or a `Bearer` with no realm, and no credential configured for `host` either — which is
+    /// the private-registry-with-no-credentials case and is reported as such rather than as a
+    /// failed request. A configured credential that the exchange rejects is a different
+    /// failure ([`PullError::InvalidCredentials`]), never this one, because an operator needs
+    /// to tell "you may not have this" from "you typed the wrong password" apart.
+    fn token(
+        &self,
+        url: &str,
+        host: &str,
+        challenge: Option<&str>,
+    ) -> Result<Option<String>, PullError> {
+        let credential = self.credential(host);
+
+        // Nothing to mint: this is already the credential the retried request needs.
+        if let Some(Credential::Bearer(token)) = credential {
+            return Ok(Some(token.clone()));
+        }
+
         let Some(challenge) = challenge else {
             return Ok(None);
         };
@@ -559,16 +665,26 @@ impl Registry {
                 request = request.query(key, value);
             }
         }
+        if let Some(Credential::Basic { username, password }) = credential {
+            request = request.header("authorization", basic_auth(username, password));
+        }
         let mut response = request.call().map_err(|error| PullError::Unreachable {
             url: realm.clone(),
             error: error.to_string(),
         })?;
         if !(200..300).contains(&response.status().as_u16()) {
-            // The token endpoint refusing an anonymous request is exactly how a private
-            // repository presents itself, so it is reported against the thing the operator
-            // asked for rather than against the realm they have never heard of.
-            return Err(PullError::Unauthorized {
-                url: String::from(url),
+            // The token endpoint refusing the request is exactly how a private repository
+            // presents itself. With no credential configured that is `Unauthorized` (§4.1);
+            // with one, the registry has just said it is wrong, which is a different thing
+            // for an operator to fix (§13) — and is reported against the manifest or blob
+            // that was actually being pulled, not against a realm the operator never named.
+            return Err(match credential {
+                Some(_) => PullError::InvalidCredentials {
+                    url: String::from(url),
+                },
+                None => PullError::Unauthorized {
+                    url: String::from(url),
+                },
             });
         }
 
@@ -601,6 +717,15 @@ fn challenge_params(params: &str) -> BTreeMap<String, String> {
             )
         })
         .collect()
+}
+
+/// `Basic <base64(username:password)>`, the header value HTTP Basic sends (DAEMON §13).
+fn basic_auth(username: &str, password: &str) -> String {
+    let raw = format!("{username}:{password}");
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    )
 }
 
 /// `sha256:<hex>` over `bytes`, in the form an OCI digest is written in.
@@ -757,18 +882,26 @@ mod tests {
         })
     }
 
-    /// A client that requires nothing and verifies nothing.
+    /// A client that requires nothing, verifies nothing, and holds no credentials.
     fn anonymous() -> Registry {
-        Registry::new(Signing::default())
+        Registry::new(Signing::default(), BTreeMap::new())
     }
 
     /// A client holding the fake registry's public key.
     fn with_key(require_signed: bool) -> Registry {
-        Registry::new(Signing {
-            require_signed,
-            key: Some(KEY.verifying()),
-            key_path: String::from("auth/cosign.pub"),
-        })
+        Registry::new(
+            Signing {
+                require_signed,
+                key: Some(KEY.verifying()),
+                key_path: String::from("auth/cosign.pub"),
+            },
+            BTreeMap::new(),
+        )
+    }
+
+    /// A client holding `credentials` and verifying nothing.
+    fn with_credentials(credentials: BTreeMap<String, Credential>) -> Registry {
+        Registry::new(Signing::default(), credentials)
     }
 
     #[test]
@@ -921,6 +1054,169 @@ mod tests {
     }
 
     #[test]
+    fn a_basic_credential_configured_for_a_host_is_offered_and_the_pull_succeeds() {
+        // The standard OCI/Docker flow: a username and password, exchanged for a token at the
+        // realm the challenge names (DAEMON §2.1, §13).
+        let fake = Fake::start();
+        fake.require_basic_auth("node", "s3cr3t");
+        fake.publish("filter", "1.0.0", b"\0asm");
+
+        let mut credentials = BTreeMap::new();
+        credentials.insert(
+            fake.host(),
+            Credential::Basic {
+                username: String::from("node"),
+                password: String::from("s3cr3t"),
+            },
+        );
+        assert_eq!(
+            with_credentials(credentials).pull(&fake.reference("filter", "1.0.0")),
+            Ok(b"\0asm".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_bearer_credential_is_used_directly_with_no_token_endpoint_involved() {
+        // A bearer credential is already the finished article: nothing is minted for it
+        // (DAEMON §2.1, §13).
+        let fake = Fake::start();
+        fake.require_bearer_token("a-real-token");
+        fake.publish("filter", "1.0.0", b"\0asm");
+
+        let mut credentials = BTreeMap::new();
+        credentials.insert(
+            fake.host(),
+            Credential::Bearer(String::from("a-real-token")),
+        );
+        assert_eq!(
+            with_credentials(credentials).pull(&fake.reference("filter", "1.0.0")),
+            Ok(b"\0asm".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_registry_with_no_configured_credential_stays_anonymous() {
+        // Absence is not refused, and is not distinguished from before this existed
+        // (DAEMON §2.1, §13): a public registry that merely mints anonymous tokens keeps
+        // working with no entry in `auth/registries.toml` at all.
+        let fake = Fake::start();
+        fake.require_token();
+        fake.publish("filter", "1.0.0", b"\0asm");
+        assert_eq!(
+            with_credentials(BTreeMap::new()).pull(&fake.reference("filter", "1.0.0")),
+            Ok(b"\0asm".to_vec())
+        );
+    }
+
+    #[test]
+    fn wrong_credentials_are_a_different_failure_from_no_credentials_at_all() {
+        // An operator needs to tell "you may not have this" from "you typed the wrong
+        // password" apart (DAEMON §2.1, §13).
+        let fake = Fake::start();
+        fake.require_basic_auth("node", "correct-password");
+        fake.publish("filter", "1.0.0", b"\0asm");
+        let reference = fake.reference("filter", "1.0.0");
+
+        // No credentials at all: DAEMON §4.1's original posture, unchanged.
+        assert!(matches!(
+            anonymous().pull(&reference),
+            Err(PullError::Unauthorized { .. })
+        ));
+
+        // Credentials configured, and wrong.
+        let mut wrong = BTreeMap::new();
+        wrong.insert(
+            fake.host(),
+            Credential::Basic {
+                username: String::from("node"),
+                password: String::from("not-it"),
+            },
+        );
+        assert!(matches!(
+            with_credentials(wrong).pull(&reference),
+            Err(PullError::InvalidCredentials { .. })
+        ));
+    }
+
+    #[test]
+    fn a_credential_for_one_host_is_never_offered_to_another() {
+        // The property this whole feature rests on: a lookup by the exact host a reference
+        // names, so `Registry::credential` cannot hand `a`'s bearer token to `b`
+        // (DAEMON §2.1, §13).
+        let a = Fake::start();
+        a.require_bearer_token("only-for-a");
+        a.publish("filter", "1.0.0", b"\0asm-a");
+
+        let b = Fake::start();
+        b.require_credentials();
+        b.publish("filter", "1.0.0", b"\0asm-b");
+
+        let mut credentials = BTreeMap::new();
+        credentials.insert(a.host(), Credential::Bearer(String::from("only-for-a")));
+        let registry = with_credentials(credentials);
+
+        // `a`'s credential is offered to `a`, and the pull succeeds.
+        assert_eq!(
+            registry.pull(&a.reference("filter", "1.0.0")),
+            Ok(b"\0asm-a".to_vec())
+        );
+
+        // `b` has no configured credential, so pulling from it takes the anonymous path —
+        // `Unauthorized`, not `InvalidCredentials` — which is only possible if `a`'s bearer
+        // token was never even offered to it.
+        assert!(matches!(
+            registry.pull(&b.reference("filter", "1.0.0")),
+            Err(PullError::Unauthorized { .. })
+        ));
+        assert_ne!(
+            b.last_authorization().as_deref(),
+            Some("Bearer only-for-a"),
+            "a credential meant for one host must never be sent to another"
+        );
+    }
+
+    #[test]
+    fn a_rejected_basic_credential_never_appears_in_the_error_or_its_debug_form() {
+        let fake = Fake::start();
+        fake.require_basic_auth("node", "the-actual-password");
+        fake.publish("filter", "1.0.0", b"\0asm");
+
+        let mut credentials = BTreeMap::new();
+        credentials.insert(
+            fake.host(),
+            Credential::Basic {
+                username: String::from("node"),
+                password: String::from("wrong-guess-at-the-password"),
+            },
+        );
+        let error = with_credentials(credentials.clone())
+            .pull(&fake.reference("filter", "1.0.0"))
+            .expect_err("the wrong password is refused");
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains("wrong-guess-at-the-password"));
+
+        // And the credential's own `Debug` redacts it too, in case anything ever prints one.
+        assert!(!format!("{credentials:?}").contains("wrong-guess-at-the-password"));
+    }
+
+    #[test]
+    fn a_rejected_bearer_credential_never_appears_in_the_error_or_its_debug_form() {
+        let fake = Fake::start();
+        fake.require_bearer_token("the-right-token");
+        fake.publish("filter", "1.0.0", b"\0asm");
+
+        let credential = Credential::Bearer(String::from("configured-token-that-is-wrong"));
+        let mut credentials = BTreeMap::new();
+        credentials.insert(fake.host(), credential.clone());
+        let error = with_credentials(credentials)
+            .pull(&fake.reference("filter", "1.0.0"))
+            .expect_err("the wrong bearer token is refused");
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains("configured-token-that-is-wrong"));
+        assert!(!format!("{credential:?}").contains("configured-token-that-is-wrong"));
+    }
+
+    #[test]
     fn a_blob_that_is_not_what_the_manifest_said_is_refused() {
         // The verification the rest of §4 rests on: everything else decides *which* artifact,
         // and this decides whether these are its bytes.
@@ -993,11 +1289,14 @@ mod tests {
         let fake = Fake::start();
         fake.publish("filter", "1.0.0", b"\0asm");
         fake.sign("filter", "1.0.0");
-        let keyless = Registry::new(Signing {
-            require_signed: true,
-            key: None,
-            key_path: String::from("auth/cosign.pub"),
-        });
+        let keyless = Registry::new(
+            Signing {
+                require_signed: true,
+                key: None,
+                key_path: String::from("auth/cosign.pub"),
+            },
+            BTreeMap::new(),
+        );
         assert_eq!(
             keyless.pull(&fake.reference("filter", "1.0.0")),
             Err(PullError::NoKey {

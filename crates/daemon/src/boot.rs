@@ -269,7 +269,7 @@ pub async fn boot(node: &Node, executor: &Executor) -> Services {
     let directory = node.layout().services();
     // One client for the whole boot, not one per service: a registry is a connection pool and
     // a TLS configuration, and a node whose blocks are all cached builds it and never uses it.
-    let registry = Registry::new(node.signing.clone());
+    let registry = Registry::new(node.signing.clone(), node.credentials.clone());
     let mut services = Services::default();
     for (stem, path) in service_files(&directory) {
         let state = load(
@@ -764,8 +764,12 @@ mod tests {
             &std::fs::read_to_string(root.join("services/alpha.toml")).expect("readable"),
         )
         .expect("valid");
-        let resolved = resolve(&node, &Registry::new(node.signing.clone()), &parsed)
-            .expect("both references resolve");
+        let resolved = resolve(
+            &node,
+            &Registry::new(node.signing.clone(), node.credentials.clone()),
+            &parsed,
+        )
+        .expect("both references resolve");
         assert_eq!(
             resolved.entries.len(),
             1,

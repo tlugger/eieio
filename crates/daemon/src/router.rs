@@ -3,7 +3,7 @@
 //! The table itself is `eio_host_core`'s — which instance's output reaches which instance's
 //! input, and the fan-out that duplicates a batch per receiver, are about the service graph
 //! and have no engine and no queue in them (DAEMON §1 lists router core among the shared
-//! subsystems). What is here is the delivery: mailboxes, the per-connection overflow policy,
+//! subsystems). What is here is the delivery: mailboxes, the overflow policy a service chooses once,
 //! and the service that wires the two together.
 //!
 //! # Routing happens on the emitter's thread, not on a router's
