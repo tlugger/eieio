@@ -60,9 +60,12 @@ impl Endpoint {
 
 /// What a connection does when the destination's queue is full (DAEMON §6).
 ///
-/// The two answers a bounded mailbox can be given, as a per-connection choice. The
-/// cross-*device* question — delivery guarantees and backpressure between nodes — is a
-/// different one and stays OPEN (SCOPE §3.4); this enum is about one node's own graph.
+/// The two answers a bounded mailbox can be given. A service chooses once for all of its
+/// connections (SERVICE §5, DAEMON §6.2); the field is carried per connection because the
+/// one-batch slot drop-oldest uses is per connection, which is what makes a sender answerable
+/// for its own backlog and nobody else's. The cross-*device* question is a different one and
+/// is settled: SCOPE §3.4 makes cross-node delivery at-most-once with no backpressure. This
+/// enum is about one node's own graph.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Overflow {
     /// Wait for room, so the pressure propagates back to whoever is producing too fast.

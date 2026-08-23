@@ -264,7 +264,7 @@ No such workload has been measured, and this decision stands until one is. It is
 
 The choice is confined to this crate. `host-core` and the ABI know nothing of threads, and the leaf runtime has its own executor, so neither the shared driver nor a second host implementation is affected by whichever way it goes.
 
-**Mailbox bound and what a full one means.** The mailbox is bounded and its depth is host configuration, with no floor. The executor offers a sender both answers to a full one and takes neither on the sender's behalf: a *waiting* send (backpressure, which propagates to whoever is producing too fast) and a *refusing* send that hands the work item back. Which one a connection uses is §6's per-connection overflow policy; the cross-device question is OPEN (SCOPE §3.4) and is not settled by the executor having a bound.
+**Mailbox bound and what a full one means.** The mailbox is bounded and its depth is host configuration, with no floor. The executor offers a sender both answers to a full one and takes neither on the sender's behalf: a *waiting* send (backpressure, which propagates to whoever is producing too fast) and a *refusing* send that hands the work item back. Which one a connection uses is §6.2's overflow policy, chosen once for the service; the cross-*device* question is a different one — SCOPE §3.4's at-most-once, where a publisher that cannot send drops — and neither is settled by the executor having a bound.
 
 **Every sender gone is a stop, and a serviced instance stops on an explicit `Stop`.** A mailbox no sender can reach again cannot receive work, so the instance runs `eio_stop` (ABI §5.1 step 5) rather than idling; an instance is never left running with nothing that can reach it. That is the terminator for an instance with no service around it — the single-block path.
 
@@ -348,7 +348,7 @@ Two consequences worth stating:
 
 ### 6.2 Bounded mailboxes and the overflow policy
 
-**Bounded mailboxes; overflow policy per service.** The default is to **block the emitter's queue-drain** — natural backpressure within a node. **Drop-oldest** is available as an opt-in for sensor-style flows, selected once for the whole service by SERVICE §5's `overflow` key. It is not a property of each edge: a service is the unit a deployer reasons about here, and a file where two edges into one block behaved differently would be harder to read than the guarantee is worth. The cross-*device* question — delivery guarantees, ordering, and backpressure between nodes — is a different one and stays OPEN (SCOPE §3.4).
+**Bounded mailboxes; overflow policy per service.** The default is to **block the emitter's queue-drain** — natural backpressure within a node. **Drop-oldest** is available as an opt-in for sensor-style flows, selected once for the whole service by SERVICE §5's `overflow` key. It is not a property of each edge: a service is the unit a deployer reasons about here, and a file where two edges into one block behaved differently would be harder to read than the guarantee is worth. The cross-*device* question is a different one and is settled elsewhere: SCOPE §3.4 makes cross-node delivery at-most-once with no backpressure at all, so a publisher that cannot send drops (§7). Nothing here reaches past this node's own graph.
 
 The two policies are the two answers §5's mailbox offers a sender, and neither is free-standing:
 
