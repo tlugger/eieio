@@ -186,6 +186,8 @@ LLM agents are a first-class client for designing, building, deploying, and intr
   |A mode of the CLI|Chosen. The multi-node context, the token handling and the API client already exist there (5.1), and an agent gets the same reach an operator has, through the same credentials file, with nothing added to any node.|
 
   What this buys is the target capability below at System scope rather than node scope: the agent addresses nodes by the names the operator gave them, and a tool that needs two nodes is an ordinary tool call. What it costs is that the agent must run the CLI locally — acceptable, because an agent that cannot run a local binary also cannot author the service files (3.8) it is being asked to deploy.
+
+  **This is the only MCP surface.** The Designer serves none of its own (DESIGNER §8): it drives the same daemon API, so a second implementation would be the same tools twice with drift as the only possible difference. The peer-client rule below is unaffected and is in fact what makes one surface sufficient — a Designer capability an agent cannot reach means the *daemon* is missing an operation, not that the Designer is missing a tool.
 - **Agent-legible expressions.** The micro-Lisp (3.5) is trivially generated and validated by an LLM.
 
 Target capability: a whole service can be built, configured, deployed, started, and introspected from a single agent prompt — in the Designer or via CLI.

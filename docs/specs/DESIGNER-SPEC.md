@@ -31,6 +31,8 @@ manifest_cache (block_ref, manifest_json, fetched_at)
 
 Notably absent: services, blocks-in-services, connections, layout — all of that lives in service definition files on nodes. The Designer reads them through the daemon API, edits them, and writes them back.
 
+**`nodes` duplicates the CLI's `~/.config/eieio/nodes.toml`, and that is deliberate.** Both hold an address and a token per node, and neither is the other's cache. The CLI's file is a local operator's own credentials, on the machine they are sitting at, deliberately never inside a working tree (SCOPE §5.1); this table belongs to a *service* that may run in a container on another host and, per §3, is expected to reach nodes the operator's laptop cannot. Sharing one file would mean either putting the browser-facing process's writes into an operator's dotfile or giving the CLI a Designer to depend on — and `eio` needing nothing running is what makes it the tool that bootstraps a node before any Designer exists. What they MUST NOT do is disagree about what a node is called: node names are the operator's, and a node registered in both is the same node under the same name. Moving a set between them is a CLI export/import, not a sync protocol — there is no reconciliation here and none is wanted.
+
 ## 3. Backend responsibilities
 
 - **Proxy, not peer-to-daemon-from-browser** (PROPOSED): all daemon API calls route browser → Designer backend → daemon. Rationale: node tokens never reach the browser, CORS/TLS mess stays server-side, and mixed-reachability networks (Designer can reach nodes the operator's laptop can't) work. Streams (taps, logs) are re-streamed over the same hop.
@@ -66,9 +68,10 @@ One design flow, two deploy pipelines, selected by target node class:
 
 ## 8. Agent integration (SCOPE §4)
 
-- The Designer backend exposes an **MCP server** wrapping its own operations (list systems/nodes, read/write service files, deploy, start/stop, open taps, query manifests) — an agent connected to it can do everything the canvas can, because both drive the same daemon APIs.
-- **PROPOSED, v1-optional:** an in-Designer agent panel (chat pane driving the MCP surface) — "build me a service that reads the BME280 every 30s and publishes to sensors/office" materializing on the canvas. Architecturally free given the MCP server; sequenced after core editing works.
-- No Designer feature may exist that an agent can't reach through MCP + daemon APIs. (Test: the golden-path demo script runs twice — once clicked, once prompted.)
+- **The Designer serves no MCP of its own.** SCOPE §4 settles the packaging: MCP is a mode of the CLI (`eio mcp`), and it already covers every operation DAEMON §9 exposes, across every node at once. A second implementation here would be nineteen tools that must not drift from the first, to reach the same daemon the first one reaches. An earlier draft of this section specified one; it is withdrawn rather than left as an option, because two agent surfaces over one API is a maintenance cost with no capability behind it.
+- **The parity rule stands, and is what §8 is actually for.** No Designer feature may exist that an agent cannot reach through `eio mcp` plus the daemon API. This is a *constraint on the canvas*, not a description of a component: a canvas capability with no counterpart in DAEMON §9 is a bug in the daemon's surface, and the fix is to add the operation there — where the CLI, the Designer and an agent all reach it — never to add a private path the canvas alone can take. (Test: the golden-path demo script runs twice — once clicked, once prompted.)
+- The Designer's own registry (§2) is the one thing `eio mcp` does not reach, and it needs no tools: it holds node addresses and tokens an operator types in once, not a surface an agent drives.
+- **PROPOSED, v1-optional:** an in-Designer agent panel — "build me a service that reads the BME280 every 30s and publishes to sensors/office" materializing on the canvas. Sequenced after core editing works, and note it is no longer architecturally free: with no Designer-side MCP, a panel needs a path to an agent runtime, which is its own decision when it is taken.
 
 ## 9. Explicitly out of scope (v1)
 
