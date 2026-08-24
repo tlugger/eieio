@@ -2,7 +2,7 @@
 
 Build a distributed stream-processing system by wiring blocks together — then deploy it across a fleet of Raspberry Pis, or bake it into an ESP32's firmware, from the same design.
 
-> **Status: early implementation, and further along than "skeleton."** Blocks are written in Rust against a real SDK, built and tested with `cargo eio`, and driven by a two-engine conformance suite. A daemon loads them, routes signals, serves a management API, and moves signals *between nodes* over MQTT. The Designer does not exist yet and the leaf runtime is unstarted. See [Status](#status).
+> **Status: early implementation, and further along than "skeleton."** Blocks are written in Rust against a real SDK, built and tested with `cargo eio`, and driven by a conformance suite that runs on three engines. A daemon loads them, routes signals, serves a management API, and moves signals *between nodes* over MQTT. The `eio` CLI reaches every node in a System, and `eio mcp` gives an agent the same reach. The Designer's scaffold stands — server, shell, and the expression language compiled to WASM — but the canvas does not edit yet. The leaf runtime is unstarted. See [Status](#status).
 
 ---
 
@@ -70,6 +70,8 @@ A rebuild of [nio](https://web.archive.org/web/20190716020124/https://docs.n.io/
 (str "sensor/" $device_id "/" (lower $kind))
 ```
 
+Because it is `no_std` and dependency-free, the *same crate* compiles to WASM and runs in the Designer, linting a property as you type it. Not a JavaScript reimplementation — that would be a second definition of the language, free to disagree with the first, and nothing would notice. The browser build is checked against the same 484 conformance vectors the daemon is.
+
 **Missing data is an error, not null.** `$temp` on a signal without `temp` fails that signal, visibly. Silent nulls turn config typos into 2 a.m. mysteries.
 
 **Two node classes, one design flow.** Daemon-class nodes hot-load blocks and expose a management API. Leaf-class nodes get services AOT-compiled into firmware. Deploying to a leaf takes extra steps, not a different way of designing.
@@ -95,10 +97,16 @@ crates/
                   MQTT pub/sub bridge
   cli/          the `eio` binary — management-API parity, multi-node, and `eio mcp`,
                   the MCP surface an agent drives a whole System through
-  cargo-eio/    `cargo eio new | build | test` for block authors
+  designer/     the Designer's server: axum, SQLite registry, and one catch-all proxy
+                  to the nodes — a node's token never reaches the browser
+  expr-wasm/    `expr` compiled for the browser, so the Designer lints a property
+                  with the interpreter the daemon runs, not a copy of it
+  cargo-eio/    `cargo eio new | build | test | publish` for block authors
   test-host/    runs a block natively, no wasm — SDK §6.1's fast inner loop
   conformance/  the reference wasmtime harness plus its scenario suite, run against
                   three engines: wasmtime, wasm3 and WAMR
+designer/       the Designer's web app: Vite, Svelte 5, Svelte Flow. Built into
+                `designer/dist`, which the server above embeds and serves
 expr-tests/     host-agnostic vectors: the expression language, ABI property types,
                 canonical CBOR
 examples/
@@ -110,23 +118,26 @@ docs/
   specs/        ABI-SPEC · EXPR-SPEC · SDK-SPEC · SERVICE-SPEC · DAEMON-SPEC · DESIGNER-SPEC
 ```
 
-★ crates are shared with the future leaf runtime and stay `no_std` (`alloc` allowed); `just check-nostd` enforces it against two bare-metal targets. Blocks live in their own repositories and publish to an OCI registry independently. The Designer will be a sibling SvelteKit app.
+★ crates are shared with the future leaf runtime and stay `no_std` (`alloc` allowed); `just check-nostd` enforces it against two bare-metal targets. It is why `expr-wasm` is a crate of its own rather than a feature of `expr`: a `wasm-bindgen` dependency added there would ship in every block. Blocks live in their own repositories and publish to an OCI registry independently.
 
 **The specs are normative, not descriptive.** Code does not drift from them, and a spec change lands in the same commit as the code it governs — the whole architecture depends on two independent host implementations agreeing byte for byte. [`CLAUDE.md`](CLAUDE.md) is the working guide.
 
 ## Developing
 
-You need [`just`](https://just.systems) and `rustup`. The toolchain is pinned in `rust-toolchain.toml`; there is nothing else to set up.
+You need [`just`](https://just.systems) and `rustup`. The toolchain is pinned in `rust-toolchain.toml`. Node is needed for the Designer's web app and for nothing else — without it `just ci` runs everything but that suite, and says so rather than skipping quietly.
 
 |Recipe|What it does|
 |---|---|
-|`just ci`|**The gate.** `fmt-check`, `lint`, `build`, `test`, `test-golden`, `check-nostd`, `check-guest`. CI runs this and nothing else.|
+|`just ci`|**The gate.** `fmt-check`, `lint`, `build`, `test`, `test-doc`, `test-golden`, `check-nostd`, `check-guest`, and `test-designer` where npm exists. Stages run concurrently. CI runs this and nothing else.|
 |`just fmt` / `just fmt-check`|Format in place / fail instead of rewriting|
 |`just lint`|`clippy` with warnings denied, plus a per-crate lint opt-in check|
 |`just test` / `just test-golden`|The workspace suite / the golden blocks' own native tests|
 |`just check-nostd`|Compile the ★ crates for Cortex-M4F and a no-atomics RISC-V target. A `std` dependency that sneaks in fails here|
 |`just check-guest`|Build the SDK for `wasm32-unknown-unknown` with `panic=abort`, as a guest actually is|
 |`just publish-dry-run`|Prove the crates.io publish set is publishable before a release tag needs it|
+|`just run-daemon` / `just eio`|Run a node / run the CLI. Arguments pass through|
+|`just run-designer`|Build the web app, then serve it from the Designer's own binary|
+|`just designer-build` / `just test-designer`|The web app alone: build it, or run its suite|
 
 Warnings are denied in `just lint`, never in a `Cargo.toml`, so a plain `cargo build` stays usable while the gate stays strict.
 
@@ -141,7 +152,7 @@ Bottom-up, most-specified first:
 - [x] Service files, node config, block cache and management API
 - [x] Pub/sub transport and cross-node signals — MQTT behind a swappable bridge
 - [x] CLI and agent tooling — `eio` reaches every node, and `eio mcp` is the same surface for an agent
-- [ ] Designer UI
+- [ ] Designer UI — *in progress.* The server, the app shell and `expr`-in-the-browser are built; editing on the canvas is next
 - [ ] Leaf runtime and firmware build pipeline
 
 Still **OPEN** in [`docs/SCOPE.md`](docs/SCOPE.md), and tracked there rather than here: normative floors for `max_payload`/`max_batch`; transport security on the LAN, per-node identity and revocation on the bus, and token rotation (the bus pre-shared key is a floor, not an answer); what `cargo eio publish` does with a SemVer `+build` suffix an OCI tag cannot hold; the metrics surface; and block failure policy.
