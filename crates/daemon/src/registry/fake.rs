@@ -19,7 +19,10 @@ use std::sync::{Arc, Mutex};
 
 use p256::ecdsa::signature::Signer as _;
 
-use super::{COSIGN_LAYER, COSIGN_SIGNATURE, WASM_LAYER, hex_digest};
+use super::{
+    BUNDLE_ARTIFACT_TYPE, COSIGN_LAYER, COSIGN_SIGN_PREDICATE, COSIGN_SIGNATURE, WASM_LAYER,
+    dsse_pae, hex_digest,
+};
 
 /// The keypair the fake registry signs with, fixed rather than generated.
 ///
@@ -297,6 +300,116 @@ impl Fake {
             &payload(&hex_digest(b"some other artifact")),
             true,
         );
+    }
+
+    /// Signs `name:version` the way cosign 3.x's *default* flags do (DAEMON §4.2): a Sigstore
+    /// bundle at the referrers-fallback tag, rather than [`sign`](Fake::sign)'s legacy shape.
+    ///
+    /// Hand-rolled from what `cosign sign` was measured to actually emit (this module's own
+    /// doc comment), for the unit tests that check `registry.rs`'s parsing and two-shape
+    /// lookup order without paying for a real `cosign` process per case. The round trip against
+    /// the real binary lives in `crates/cargo-eio`'s own suite (eieio-8yq.18).
+    pub fn sign_bundle(&self, name: &str, version: &str) {
+        let digest = self.manifest_digest(name, version);
+        let subject = String::from(digest.trim_start_matches("sha256:"));
+        self.attach_bundle(name, &digest, &subject, COSIGN_SIGN_PREDICATE, true);
+    }
+
+    /// Attaches a bundle whose DSSE signature is not over the payload it travels with.
+    pub fn sign_bundle_badly(&self, name: &str, version: &str) {
+        let digest = self.manifest_digest(name, version);
+        let subject = String::from(digest.trim_start_matches("sha256:"));
+        self.attach_bundle(name, &digest, &subject, COSIGN_SIGN_PREDICATE, false);
+    }
+
+    /// Attaches a validly-signed bundle whose in-toto statement names a different artifact.
+    pub fn sign_bundle_for_another_digest(&self, name: &str, version: &str) {
+        let digest = self.manifest_digest(name, version);
+        let other = hex_digest(b"some other artifact");
+        let subject = String::from(other.trim_start_matches("sha256:"));
+        self.attach_bundle(name, &digest, &subject, COSIGN_SIGN_PREDICATE, true);
+    }
+
+    /// Attaches a validly-signed bundle that is an *attestation*, not a signature — the exact
+    /// same wire shape, distinguished only by its in-toto `predicateType` (DAEMON §4.2), for
+    /// the test that proves one is never mistaken for the other.
+    pub fn attest_bundle(&self, name: &str, version: &str) {
+        let digest = self.manifest_digest(name, version);
+        let subject = String::from(digest.trim_start_matches("sha256:"));
+        self.attach_bundle(
+            name,
+            &digest,
+            &subject,
+            "https://example.com/not-a-cosign-signature",
+            true,
+        );
+    }
+
+    /// Publishes a Sigstore bundle at `name`'s referrers-fallback tag (`sha256-<hex>`, no
+    /// `.sig` suffix — DAEMON §4.2): an index with one entry, pointing at a manifest whose one
+    /// layer is the bundle, whose DSSE envelope wraps an in-toto statement naming
+    /// `subject_digest` under `predicate`.
+    fn attach_bundle(
+        &self,
+        name: &str,
+        digest: &str,
+        subject_digest: &str,
+        predicate: &str,
+        honestly: bool,
+    ) {
+        let payload_type = "application/vnd.in-toto+json";
+        let statement = format!(
+            r#"{{"_type":"https://in-toto.io/Statement/v1","subject":[{{"digest":{{"sha256":"{subject_digest}"}},"annotations":{{}}}}],"predicateType":"{predicate}","predicate":{{}}}}"#,
+        );
+        let signature: p256::ecdsa::Signature = match honestly {
+            true => KEY
+                .signing()
+                .sign(&dsse_pae(payload_type, statement.as_bytes())),
+            false => KEY.signing().sign(b"a payload nobody will see"),
+        };
+        let (payload_b64, sig_b64) = {
+            use base64::Engine as _;
+            (
+                base64::engine::general_purpose::STANDARD.encode(statement.as_bytes()),
+                base64::engine::general_purpose::STANDARD.encode(signature.to_der().as_bytes()),
+            )
+        };
+
+        let bundle = format!(
+            r#"{{"mediaType":"{BUNDLE_ARTIFACT_TYPE}","dsseEnvelope":{{"payloadType":"{payload_type}","payload":"{payload_b64}","signatures":[{{"sig":"{sig_b64}"}}]}}}}"#,
+        );
+        let inner_manifest = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json",
+                 "config":{{"mediaType":"application/vnd.oci.empty.v1+json",
+                            "digest":"{empty}","size":2}},
+                 "layers":[{{"mediaType":"{BUNDLE_ARTIFACT_TYPE}","digest":"{bundle_digest}",
+                             "size":{bundle_size}}}],
+                 "subject":{{"mediaType":"application/vnd.oci.image.manifest.v1+json","size":0,
+                             "digest":"{digest}"}},
+                 "artifactType":"{BUNDLE_ARTIFACT_TYPE}"}}"#,
+            empty = hex_digest(b"{}"),
+            bundle_digest = hex_digest(bundle.as_bytes()),
+            bundle_size = bundle.len(),
+        );
+        let inner_digest = hex_digest(inner_manifest.as_bytes());
+        let index = format!(
+            r#"{{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json",
+                 "manifests":[{{"mediaType":"application/vnd.oci.image.manifest.v1+json",
+                                "size":{inner_size},"digest":"{inner_digest}",
+                                "artifactType":"{BUNDLE_ARTIFACT_TYPE}"}}]}}"#,
+            inner_size = inner_manifest.len(),
+        );
+
+        let tag = format!("{name}:sha256-{}", digest.trim_start_matches("sha256:"));
+        let mut state = self.state.lock().expect("the registry");
+        state
+            .blobs
+            .insert(hex_digest(bundle.as_bytes()), bundle.into_bytes());
+        state.manifests.insert(
+            format!("{name}:{inner_digest}"),
+            inner_manifest.into_bytes(),
+        );
+        state.manifests.insert(tag, index.into_bytes());
     }
 
     /// The digest of the manifest served for `name:version`, which is what cosign signs.

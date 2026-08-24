@@ -285,12 +285,16 @@ accepts it, which is a stronger and more useful test than any assertion about th
 has no key. A missing `cosign` is an actionable error naming the alternative, never a panic —
 the same posture §5.2 takes on `wasm-opt`.
 
-**`cosign` needs pinning down, and this is why.** cosign 3.1.3 defaults to the new Sigstore
-bundle format, an image index that §4.2's verifier does not parse and refuses outright. The
-legacy simplesigning shape it does verify requires `--use-signing-config=false
---new-bundle-format=false --tlog-upload=false` together, which also keeps the operation
-offline. A signature this tool produces is therefore deliberately the older format, and the
-day that stops being available is the day §4.2 needs to learn the new one.
+**cosign's default shape, kept offline.** §4.2 verifies both of cosign's shapes — legacy
+simplesigning and, since eieio-8yq.18, cosign 3.x's default Sigstore bundle — so `publish`
+forces neither. Two flags remain, and both are about staying offline rather than about format:
+`--use-signing-config=false`, because cosign otherwise fetches a TUF-provided signing config
+over the network before signing anything, and `--tlog-upload=false`, which keeps the signature
+off the public transparency log. The second is not independent — cosign 3.1.3 *refuses* it
+unless the first is given too, which is worth knowing before anyone tries to drop one.
+
+The bundle this produces carries no transparency-log inclusion proof and no signing-config
+certificate: nothing §4.2 consults, and nothing a verifier would need a network call for.
 
 ### 5.1 The template (normative)
 

@@ -37,6 +37,17 @@ const COSIGN_LAYER: &str = "application/vnd.dev.cosign.simplesigning.v1+json";
 /// The annotation the base64 signature travels in (DAEMON §4.2).
 const COSIGN_SIGNATURE: &str = "dev.cosignproject.cosign/signature";
 
+/// The `artifactType`/layer media type cosign 3.x's default (Sigstore bundle) format uses, on
+/// both the referrers-fallback index's entry and the manifest it points to (DAEMON §4.2).
+const BUNDLE_ARTIFACT_TYPE: &str = "application/vnd.dev.sigstore.bundle.v0.3+json";
+
+/// The in-toto `predicateType` `cosign sign` (never `cosign attest`) writes.
+///
+/// A signature and an attestation share the exact same bundle wire shape — a DSSE envelope
+/// wrapping an in-toto statement — so this is the one field that tells them apart. Checked so
+/// that an attestation attached to the same artifact is never mistaken for a signature over it.
+const COSIGN_SIGN_PREDICATE: &str = "https://sigstore.dev/cosign/sign/v1";
+
 /// What a manifest request will accept.
 ///
 /// Index types are listed deliberately, though an index is refused (DAEMON §4.1): a registry
@@ -441,8 +452,30 @@ impl Registry {
         }
     }
 
-    /// Fetches the cosign artifact for `digest`, if the registry has one (DAEMON §4.2).
+    /// Fetches the cosign artifact for `digest`, if the registry has one — legacy simple
+    /// signing first, then cosign 3.x's default Sigstore bundle format (DAEMON §4.2).
+    ///
+    /// Checked in that order and the first hit wins: a block published before this format was
+    /// understood carries only the legacy tag, and a block published since carries either or
+    /// both, since `cargo eio publish` never overwrites one with the other. There is no case
+    /// where checking both and reconciling them would answer anything checking one first does
+    /// not.
     fn signature(
+        &self,
+        at: &Location,
+        digest: &str,
+        token: &mut Option<String>,
+    ) -> Result<Option<Signed>, PullError> {
+        if let Some(signed) = self.legacy_signature(at, digest, token)? {
+            return Ok(Some(signed));
+        }
+        self.bundle_signature(at, digest, token)
+    }
+
+    /// Cosign's legacy "simple signing" shape: an image manifest at `sha256-<hex>.sig`, one
+    /// `{COSIGN_LAYER}` layer, the signature carried as the `{COSIGN_SIGNATURE}` annotation
+    /// (DAEMON §4.2).
+    fn legacy_signature(
         &self,
         at: &Location,
         digest: &str,
@@ -481,7 +514,110 @@ impl Registry {
             })?;
 
         let payload = self.blob(at, layer, PAYLOAD_LIMIT, token)?;
-        Ok(Some(Signed { signature, payload }))
+        Ok(Some(Signed::SimpleSigning { signature, payload }))
+    }
+
+    /// Cosign 3.x's default shape: the OCI 1.1 referrers-*fallback* tag, `sha256-<hex>` with no
+    /// `.sig` suffix — a tag `cosign` shares with every other kind of referrer (attestations,
+    /// SBOMs, …) a tool might attach to the same artifact, so this is a *shared* index rather
+    /// than a signature-specific one (DAEMON §4.2).
+    ///
+    /// Read as an index deliberately, unlike [`parse_manifest`]'s refusal of one for the block
+    /// artifact itself (§4.1): an index is exactly cosign's shape here, so refusing it would
+    /// make every default-flags signature unreadable, which is the whole defect this exists to
+    /// fix. Every entry whose `artifactType` is a Sigstore bundle is inspected, in order, and
+    /// the first whose in-toto `predicateType` is `cosign sign`'s (not an attestation's) is the
+    /// one returned — an attestation sharing the tag is skipped over as "not a signature",
+    /// exactly as if it were not there, rather than either authenticating anything or being
+    /// treated as a malformed signature. A signature entry that verifies badly is not skipped
+    /// this way: only its *kind* is decided here, never whether it is valid, which is
+    /// [`Signed::check`]'s job once one is chosen.
+    fn bundle_signature(
+        &self,
+        at: &Location,
+        digest: &str,
+        token: &mut Option<String>,
+    ) -> Result<Option<Signed>, PullError> {
+        let tag = format!("sha256-{}", digest.trim_start_matches("sha256:"));
+        let url = at.url("manifests", &tag);
+        let raw = match self.fetch(&url, &at.host, MANIFEST_TYPES, MANIFEST_LIMIT, token) {
+            Ok(raw) => raw,
+            Err(PullError::Status { status: 404, .. }) | Err(PullError::Unauthorized { .. }) => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let index: ImageIndex =
+            serde_json::from_slice(&raw).map_err(|error| PullError::Malformed {
+                url: url.clone(),
+                detail: format!("a referrers index that is not one: {error}"),
+            })?;
+
+        for entry in index
+            .manifests
+            .iter()
+            .filter(|entry| entry.artifact_type.as_deref() == Some(BUNDLE_ARTIFACT_TYPE))
+        {
+            let manifest_url = at.url("manifests", &entry.digest);
+            let inner_raw = self.fetch(
+                &manifest_url,
+                &at.host,
+                MANIFEST_TYPES,
+                MANIFEST_LIMIT,
+                token,
+            )?;
+            let inner = parse_manifest(&manifest_url, &inner_raw)?;
+            let Some(layer) = inner
+                .layers
+                .iter()
+                .find(|layer| layer.media_type == BUNDLE_ARTIFACT_TYPE)
+            else {
+                return Err(PullError::Signature {
+                    detail: format!(
+                        "a Sigstore bundle manifest with no `{BUNDLE_ARTIFACT_TYPE}` layer"
+                    ),
+                });
+            };
+
+            let bytes = self.blob(at, layer, PAYLOAD_LIMIT, token)?;
+            let bundle: Bundle =
+                serde_json::from_slice(&bytes).map_err(|error| PullError::Signature {
+                    detail: format!("its payload is not a Sigstore bundle: {error}"),
+                })?;
+            let Some(sig_entry) = bundle.dsse_envelope.signatures.into_iter().next() else {
+                return Err(PullError::Signature {
+                    detail: String::from("its DSSE envelope carries no signature"),
+                });
+            };
+            let signature = base64::engine::general_purpose::STANDARD
+                .decode(&sig_entry.sig)
+                .map_err(|error| PullError::Signature {
+                    detail: format!("its signature's base64 does not decode: {error}"),
+                })?;
+            let payload = base64::engine::general_purpose::STANDARD
+                .decode(&bundle.dsse_envelope.payload)
+                .map_err(|error| PullError::Signature {
+                    detail: format!("its DSSE payload's base64 does not decode: {error}"),
+                })?;
+
+            // Read only to sort a signature from an attestation — never trusted for anything,
+            // since nothing here has been verified against a key yet. [`Signed::check`] parses
+            // this same payload again once it has, and checks it there for real.
+            let peek: InTotoStatement =
+                serde_json::from_slice(&payload).map_err(|error| PullError::Signature {
+                    detail: format!("its payload is not an in-toto statement: {error}"),
+                })?;
+            if peek.predicate_type != COSIGN_SIGN_PREDICATE {
+                continue;
+            }
+
+            return Ok(Some(Signed::Bundle {
+                signature,
+                payload_type: bundle.dsse_envelope.payload_type,
+                payload,
+            }));
+        }
+        Ok(None)
     }
 
     /// Fetches a layer's blob and checks it is the blob the layer named (DAEMON §4.1).
@@ -806,40 +942,122 @@ fn parse_manifest(url: &str, raw: &[u8]) -> Result<ImageManifest, PullError> {
     Ok(manifest)
 }
 
-/// A cosign signature and the payload it was made over (DAEMON §4.2).
+/// A cosign signature and the payload it was made over, in either shape §4.2 verifies
+/// (DAEMON §4.2).
 #[derive(Debug)]
-struct Signed {
-    signature: Vec<u8>,
-    payload: Vec<u8>,
+enum Signed {
+    /// The legacy "simple signing" shape: a raw ECDSA signature over the payload's own bytes.
+    SimpleSigning {
+        signature: Vec<u8>,
+        payload: Vec<u8>,
+    },
+    /// Cosign 3.x's default shape: a DSSE envelope, whose signature is over the envelope's
+    /// *Pre-Authentication Encoding* of `payload_type` and `payload` — never over the payload
+    /// bytes directly, which is what makes this a distinct check from the legacy one rather
+    /// than the same check with an extra field along for the ride.
+    Bundle {
+        signature: Vec<u8>,
+        payload_type: String,
+        payload: Vec<u8>,
+    },
 }
 
 impl Signed {
     /// §4.2's remaining two checks, the payload's digest having been checked on the way in.
     fn check(&self, key: &p256::ecdsa::VerifyingKey, digest: &str) -> Result<(), PullError> {
-        let signature = p256::ecdsa::Signature::from_der(&self.signature).map_err(|error| {
-            PullError::Signature {
-                detail: format!("it is not an ECDSA signature: {error}"),
-            }
-        })?;
-        key.verify(&self.payload, &signature)
-            .map_err(|error| PullError::Signature {
-                detail: format!("not under this node's key: {error}"),
-            })?;
+        match self {
+            Signed::SimpleSigning { signature, payload } => {
+                let signature = p256::ecdsa::Signature::from_der(signature).map_err(|error| {
+                    PullError::Signature {
+                        detail: format!("it is not an ECDSA signature: {error}"),
+                    }
+                })?;
+                key.verify(payload, &signature)
+                    .map_err(|error| PullError::Signature {
+                        detail: format!("not under this node's key: {error}"),
+                    })?;
 
-        // The check that makes the other two mean anything: a signature over *some* artifact
-        // is not a signature over this one.
-        let payload: SimpleSigning =
-            serde_json::from_slice(&self.payload).map_err(|error| PullError::Signature {
-                detail: format!("its payload is not a simple signing envelope: {error}"),
-            })?;
-        let signed = payload.critical.image.docker_manifest_digest;
-        if signed != digest {
-            return Err(PullError::Signature {
-                detail: format!("it is over {signed}, and the artifact pulled is {digest}"),
-            });
+                // The check that makes the other two mean anything: a signature over *some*
+                // artifact is not a signature over this one.
+                let payload: SimpleSigning =
+                    serde_json::from_slice(payload).map_err(|error| PullError::Signature {
+                        detail: format!("its payload is not a simple signing envelope: {error}"),
+                    })?;
+                let signed = payload.critical.image.docker_manifest_digest;
+                if signed != digest {
+                    return Err(PullError::Signature {
+                        detail: format!("it is over {signed}, and the artifact pulled is {digest}"),
+                    });
+                }
+                Ok(())
+            }
+            Signed::Bundle {
+                signature,
+                payload_type,
+                payload,
+            } => {
+                let signature = p256::ecdsa::Signature::from_der(signature).map_err(|error| {
+                    PullError::Signature {
+                        detail: format!("it is not an ECDSA signature: {error}"),
+                    }
+                })?;
+                // DSSE's Pre-Authentication Encoding (draft-…-dsse §3.3): what is actually
+                // signed is never the payload bytes alone, unlike simple signing — a bundle
+                // whose signature verified over `payload` directly would be verifying the
+                // wrong thing and accepting a forgery that changed `payload_type`.
+                key.verify(&dsse_pae(payload_type, payload), &signature)
+                    .map_err(|error| PullError::Signature {
+                        detail: format!("not under this node's key: {error}"),
+                    })?;
+
+                let statement: InTotoStatement =
+                    serde_json::from_slice(payload).map_err(|error| PullError::Signature {
+                        detail: format!("its payload is not an in-toto statement: {error}"),
+                    })?;
+                // Tells a signature apart from an attestation sharing the identical bundle
+                // wire shape (DAEMON §4.2) — an attestation verifying under this node's key
+                // must never be mistaken for a signature over the artifact.
+                if statement.predicate_type != COSIGN_SIGN_PREDICATE {
+                    return Err(PullError::Signature {
+                        detail: format!(
+                            "its predicate is {:?}, not a `cosign sign` signature",
+                            statement.predicate_type
+                        ),
+                    });
+                }
+                // The check that makes the other two mean anything, restated for the bundle
+                // shape: the *signed* subject digest, from inside the DSSE payload — never the
+                // surrounding OCI manifest's own unsigned `subject` field, which a registry
+                // could rewrite without touching anything the signature actually covers.
+                let Some(subject) = statement.subject.first() else {
+                    return Err(PullError::Signature {
+                        detail: String::from("its in-toto statement names no subject"),
+                    });
+                };
+                let signed = format!("sha256:{}", subject.digest.sha256);
+                if signed != digest {
+                    return Err(PullError::Signature {
+                        detail: format!("it is over {signed}, and the artifact pulled is {digest}"),
+                    });
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
+}
+
+/// DSSE's Pre-Authentication Encoding: `"DSSEv1" SP LEN(type) SP type SP LEN(body) SP body`,
+/// `LEN` the ASCII decimal byte length and `SP` a single space — what a DSSE signature is
+/// actually made over, not the payload bytes alone (DAEMON §4.2).
+fn dsse_pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
+    let mut pae = Vec::from(*b"DSSEv1");
+    for part in [payload_type.as_bytes(), payload] {
+        pae.push(b' ');
+        pae.extend_from_slice(part.len().to_string().as_bytes());
+        pae.push(b' ');
+        pae.extend_from_slice(part);
+    }
+    pae
 }
 
 /// The part of cosign's simple signing envelope that binds it to an artifact.
@@ -859,6 +1077,77 @@ struct Critical {
 #[serde(rename_all = "kebab-case")]
 struct Image {
     docker_manifest_digest: String,
+}
+
+/// An OCI image index, read only for cosign's referrers-fallback tag (DAEMON §4.2) — distinct
+/// from [`ImageManifest`], which refuses to *be* one (§4.1), because here being one is exactly
+/// the shape expected.
+#[derive(Debug, Deserialize)]
+struct ImageIndex {
+    #[serde(default)]
+    manifests: Vec<IndexEntry>,
+}
+
+/// One descriptor in an [`ImageIndex`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexEntry {
+    digest: String,
+    /// What kind of referrer this entry is — absent on an index with no artifact-type
+    /// discipline, which then simply never matches [`BUNDLE_ARTIFACT_TYPE`].
+    #[serde(default)]
+    artifact_type: Option<String>,
+}
+
+/// A Sigstore bundle's one field this reads: the DSSE envelope. `verificationMaterial` (a
+/// public-key hint, or an X.509 chain for keyless signing) is deliberately not parsed — the
+/// ECDSA check above already answers the only question it could: a keyless-signed bundle's
+/// signature is made by an ephemeral Fulcio-issued key, which does not verify under this
+/// node's static key regardless of what the bundle claims about itself, so keyless bundles are
+/// refused by the same check that verifies a legitimate one, with no separate case needed
+/// (DAEMON §4.2 — key-based verification only, by construction rather than by inspection).
+#[derive(Debug, Deserialize)]
+struct Bundle {
+    #[serde(rename = "dsseEnvelope")]
+    dsse_envelope: DsseEnvelope,
+}
+
+/// See [`Bundle`].
+#[derive(Debug, Deserialize)]
+struct DsseEnvelope {
+    /// Base64, decoded only after the signature that covers it (via [`dsse_pae`]) is checked.
+    payload: String,
+    #[serde(rename = "payloadType")]
+    payload_type: String,
+    signatures: Vec<DsseSignature>,
+}
+
+/// See [`Bundle`].
+#[derive(Debug, Deserialize)]
+struct DsseSignature {
+    /// Base64 DER, exactly like simple signing's own signature annotation.
+    sig: String,
+}
+
+/// The in-toto statement a bundle's DSSE payload carries — cosign's binding of a signature (or
+/// attestation) to the artifact it is about (DAEMON §4.2).
+#[derive(Debug, Deserialize)]
+struct InTotoStatement {
+    #[serde(rename = "predicateType")]
+    predicate_type: String,
+    subject: Vec<InTotoSubject>,
+}
+
+/// See [`InTotoStatement`].
+#[derive(Debug, Deserialize)]
+struct InTotoSubject {
+    digest: InTotoDigest,
+}
+
+/// See [`InTotoStatement`]. Cosign writes only the `sha256` algorithm.
+#[derive(Debug, Deserialize)]
+struct InTotoDigest {
+    sha256: String,
 }
 
 #[cfg(test)]
@@ -1330,5 +1619,76 @@ mod tests {
             }
             other => panic!("a signature over another artifact gave {other:?}"),
         }
+    }
+
+    // Cosign 3.x's *default* shape (eieio-8yq.18): a Sigstore bundle at the referrers-fallback
+    // tag, DSSE-signed rather than signed over its own bytes. Every case above this line is
+    // mirrored below for that shape, so both are proven to the same standard — a block signed
+    // with cosign's defaults verifies exactly as one signed with the legacy flags does. The
+    // round trip against the real `cosign` binary (not this hand-rolled fixture) lives in
+    // `crates/cargo-eio`'s own suite.
+
+    #[test]
+    fn a_bundle_signed_artifact_verifies_under_the_matching_key() {
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm");
+        fake.sign_bundle("filter", "1.0.0");
+        assert_eq!(
+            with_key(true).pull(&fake.reference("filter", "1.0.0")),
+            Ok(b"\0asm".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_bundle_present_signature_is_checked_whatever_the_policy_says() {
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm");
+        fake.sign_bundle_badly("filter", "1.0.0");
+        assert!(matches!(
+            with_key(false).pull(&fake.reference("filter", "1.0.0")),
+            Err(PullError::Signature { .. })
+        ));
+    }
+
+    #[test]
+    fn a_bundle_signed_over_another_artifact_does_not_authenticate_this_one() {
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm");
+        fake.sign_bundle_for_another_digest("filter", "1.0.0");
+        match with_key(true).pull(&fake.reference("filter", "1.0.0")) {
+            Err(PullError::Signature { detail }) => {
+                assert!(detail.contains("is over"), "{detail}")
+            }
+            other => panic!("a bundle signed over another artifact gave {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bundle_attestation_is_never_mistaken_for_a_signature() {
+        // Same wire shape as a signature — a DSSE-wrapped bundle at the same fallback tag —
+        // distinguished only by the in-toto `predicateType` (DAEMON §4.2). An attestation
+        // alone must read exactly as "unsigned", not "signed" and not "malformed".
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm");
+        fake.attest_bundle("filter", "1.0.0");
+        let reference = fake.reference("filter", "1.0.0");
+        assert_eq!(with_key(true).pull(&reference), Err(PullError::Unsigned));
+        assert_eq!(with_key(false).pull(&reference), Ok(b"\0asm".to_vec()));
+    }
+
+    #[test]
+    fn a_legacy_signature_is_found_before_a_bundle_is_even_looked_for() {
+        // publish never produces both for the same artifact, but a registry could carry both
+        // (one publish with old `cargo eio`, a second with the new one) — the legacy tag wins,
+        // deterministically, rather than the two being reconciled (DAEMON §4.2).
+        let fake = Fake::start();
+        fake.publish("filter", "1.0.0", b"\0asm");
+        fake.sign("filter", "1.0.0");
+        fake.sign_bundle_badly("filter", "1.0.0");
+        assert_eq!(
+            with_key(true).pull(&fake.reference("filter", "1.0.0")),
+            Ok(b"\0asm".to_vec()),
+            "the valid legacy signature is used, and the badly-signed bundle never consulted"
+        );
     }
 }

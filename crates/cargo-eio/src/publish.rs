@@ -6,21 +6,45 @@
 //! `crates/daemon/src/registry.rs` is the one implementation of what a pull accepts (DAEMON
 //! §4.1, §4.2), so this module's job is not "produce an OCI artifact" in general — it is
 //! "produce exactly the bytes that puller will take": the `application/wasm` layer media
-//! type, an image manifest rather than an index at the tag a version names, and, when signed,
-//! the `sha256-<hex>.sig` tag carrying a single `application/vnd.dev.cosign.simplesigning.v1
-//! +json` layer with a `dev.cosignproject.cosign/signature` annotation. Every constant below
-//! is pinned to agree with that file; a second spelling of any of them here would be a second
-//! place the two could drift apart.
+//! type, and an image manifest rather than an index at the tag a version names. Every constant
+//! below is pinned to agree with that file; a second spelling of any of them here would be a
+//! second place the two could drift apart.
 //!
-//! # cosign 3.x needs to be told to produce that shape
+//! # Signing: cosign's default *shape*, kept offline
 //!
-//! Measured against cosign 3.1.3: `cosign sign --key <key> <ref>` on its own produces the
-//! *new* Sigstore bundle format — an image index at the `.sig` tag pointing at a manifest
-//! whose one layer is `application/vnd.dev.sigstore.bundle.v0.3+json` — which
-//! `registry.rs`'s `signature()` cannot even read as "unsigned", because it refuses an index
-//! outright (DAEMON §4.1) before it gets far enough to notice there is no simplesigning layer
-//! on it. [`sign`] passes the three flags that undo that default; see its doc comment for why
-//! all three are needed together.
+//! `registry.rs`'s verifier accepts both of cosign's shapes (DAEMON §4.2): the legacy "simple
+//! signing" envelope, and — as of eieio-8yq.18 — cosign 3.1.3's *default* shape, a Sigstore
+//! bundle (a DSSE envelope over an in-toto statement) attached at the OCI 1.1
+//! referrers-*fallback* tag, `sha256-<hex>` with **no** `.sig` suffix (that suffix is only the
+//! legacy tag's). [`sign`] therefore drops the one flag that used to force the *legacy* shape,
+//! `--new-bundle-format=false` — left at its own default, cosign 3.1.3 already writes the
+//! bundle shape above, so there is nothing left to force.
+//!
+//! Two flags still have to be passed together, and neither is about the shape — both are about
+//! staying offline, and measured (not assumed) against cosign 3.1.3 against this crate's own
+//! fake registry:
+//!
+//! - `--use-signing-config=false`. Cosign's own default, `--use-signing-config=true`, fetches a
+//!   TUF-provided signing config from `tuf-repo-cdn.sigstore.dev` before it gets anywhere near
+//!   signing — confirmed by forcing all non-loopback traffic through a dead proxy and watching
+//!   cosign fail there, on that host, before touching the registry this call was given. A
+//!   publish has no business depending on Sigstore's public TUF repository being reachable,
+//!   let alone phoning home to it by default.
+//! - `--tlog-upload=false`, which is what actually keeps the signature off the public
+//!   transparency log. It cannot be passed *alone*: with `--use-signing-config` left at its own
+//!   default, cosign 3.1.3 refuses outright ("`--tlog-upload=false` is not supported with
+//!   `--signing-config` or `--use-signing-config`") before either flag's own effect matters —
+//!   so `--use-signing-config=false` is a precondition for `--tlog-upload=false` being accepted
+//!   at all, not merely a second, independent offline measure.
+//!
+//! One consequence worth stating plainly: the bundle this produces carries no transparency-log
+//! inclusion proof and no signing-config-derived certificate chain, because both of the things
+//! that would populate them were the two flags above. That is not a shortfall relative to what
+//! `registry.rs` needs — DAEMON §4.2 verifies a bundle exactly as it verifies simple signing,
+//! against a key the node already holds, and never needs to consult a log to do it — but it
+//! does mean a bundle this tool produces carries strictly less than one produced by `cosign`'s
+//! own unmodified defaults would. See [`sign`]'s doc comment for the offline-verifiability
+//! consequence that follows from it.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -239,21 +263,19 @@ fn json_escape(text: &str) -> String {
     escaped
 }
 
-/// Signs the pushed manifest at `digest` with cosign, in the legacy "simple signing" shape
-/// `crates/daemon/src/registry.rs` verifies (DAEMON §4.2) rather than the Sigstore bundle
-/// format cosign 3.x defaults to producing.
+/// Signs the pushed manifest at `digest` with cosign, at cosign 3.1.3's own default *shape* —
+/// the Sigstore bundle format `crates/daemon/src/registry.rs` now verifies alongside legacy
+/// simple signing (DAEMON §4.2, eieio-8yq.18) — kept offline by two flags this module's own
+/// doc comment measures and justifies.
 ///
-/// The three flags below undo that default, and — measured against cosign 3.1.3 — no one of
-/// them is enough alone: `--use-signing-config=false` stops cosign fetching a TUF-provided
-/// signing config (which a bare `--tlog-upload=false` is refused without, since v3 considers
-/// that flag meaningless while a signing config is in play), `--new-bundle-format=false`
-/// selects the artifact shape, and `--tlog-upload=false` is what then keeps the signature off
-/// the public Rekor log. All three together also make this call reach no network beyond the
-/// registry it is signing against — confirmed by cosign's own consent banner for the public
-/// Sigstore service, which appears with any one of the three omitted and does not with all
-/// three present. That matters independent of the format: this runs from a block author's
-/// machine or CI, and a publish should not depend on Sigstore's public infrastructure being
-/// reachable, let alone silently phone home to it.
+/// Verifying what results is consequently *partial by construction*, not by omission: with no
+/// signing-config resolution and no transparency-log upload, the bundle carries no certificate
+/// chain and no log inclusion proof for a verifier to check — there is nothing here that would
+/// need a network call to verify, which is what makes `registry.rs`'s verification of it
+/// offline-complete rather than "offline for now, best-effort for the rest". A bundle carrying
+/// those extra fields (produced by `cosign`'s own unmodified defaults, or by a signing service
+/// elsewhere in a fleet) is a case this tool does not produce and `registry.rs` does not need
+/// to handle to accept what *this* function signs.
 fn sign(
     host: &str,
     repository: &str,
@@ -266,7 +288,6 @@ fn sign(
         "sign",
         "--yes",
         "--use-signing-config=false",
-        "--new-bundle-format=false",
         "--tlog-upload=false",
     ]);
     command.arg("--key").arg(key);
@@ -440,16 +461,22 @@ mod tests {
             "the pushed layer is the exact module this publish built, not a re-derived copy"
         );
 
-        // Unsigned: no artifact at all sits at the tag DAEMON §4.2's `signature()` would look
-        // under, which is what makes an unsigned pull (`require_signed` defaulting to false)
-        // succeed rather than merely "not refuse".
-        let sig_tag = format!(
-            "sha256-{}.sig",
-            digest_of(&manifest_bytes).trim_start_matches("sha256:")
+        // Unsigned: no artifact at all sits at either tag DAEMON §4.2's `signature()` would
+        // look under — the legacy `.sig` tag or cosign's default referrers-fallback tag —
+        // which is what makes an unsigned pull (`require_signed` defaulting to false) succeed
+        // rather than merely "not refuse".
+        let hex = digest_of(&manifest_bytes)
+            .trim_start_matches("sha256:")
+            .to_string();
+        assert!(
+            fake.manifest("tlugger/filter", &format!("sha256-{hex}.sig"))
+                .is_none(),
+            "an unsigned publish leaves nothing at the legacy signature tag"
         );
         assert!(
-            fake.manifest("tlugger/filter", &sig_tag).is_none(),
-            "an unsigned publish leaves nothing at the signature tag"
+            fake.manifest("tlugger/filter", &format!("sha256-{hex}"))
+                .is_none(),
+            "an unsigned publish leaves nothing at the bundle referrers-fallback tag"
         );
     }
 
@@ -463,20 +490,26 @@ mod tests {
         assert!(format!("{error:#}").contains("namespace"), "{error:#}");
     }
 
-    #[test]
-    fn a_signed_publish_produces_a_signature_the_daemons_verifier_accepts() {
-        let _guard = serialized();
-        // No real key is ever committed: a throwaway P-256 keypair is generated fresh, in a
-        // scratch directory, for this test alone (the eieio-7d8.22 constraint).
-        let scratch = std::env::temp_dir().join(format!(
-            "eio-cargo-eio-publish-sign-test-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+    /// DSSE's Pre-Authentication Encoding — restated from `crates/daemon/src/registry.rs`'s own
+    /// private `dsse_pae`, for the same reason the rest of this module's tests restate rather
+    /// than import that crate's checks (see the module-level test doc below).
+    fn dsse_pae(payload_type: &str, payload: &[u8]) -> Vec<u8> {
+        let mut pae = Vec::from(*b"DSSEv1");
+        for part in [payload_type.as_bytes(), payload] {
+            pae.push(b' ');
+            pae.extend_from_slice(part.len().to_string().as_bytes());
+            pae.push(b' ');
+            pae.extend_from_slice(part);
+        }
+        pae
+    }
+
+    /// Generates a throwaway P-256 keypair in `scratch` (the eieio-7d8.22 constraint: no real
+    /// key is ever committed) and returns `(private key path, public key PEM)`.
+    fn generate_key(scratch: &Path) -> (PathBuf, String) {
         let key_prefix = scratch.join("cosign");
         let key = scratch.join("cosign.key");
         let pubkey = scratch.join("cosign.pub");
-
         let status = Command::new("cosign")
             .arg("generate-key-pair")
             .arg("--output-key-prefix")
@@ -492,70 +525,192 @@ mod tests {
                 )
             });
         assert!(status.success(), "cosign generate-key-pair failed");
+        (
+            key,
+            std::fs::read_to_string(&pubkey).expect("cosign wrote a public key"),
+        )
+    }
 
-        // `cosign sign` (unlike the `generate-key-pair` above) is invoked by `run` itself, deep
-        // inside `sign`, and inherits *this* process's environment rather than one this test
-        // controls directly — so the empty passphrase has to be set here for that child to
-        // find, exactly as a real publish relies on a block author's own shell already having
-        // `COSIGN_PASSWORD` set.
+    /// A signed publish's Sigstore bundle, read back out of `fake` for `digest` — the manifest
+    /// at the referrers-fallback tag (`sha256-<hex>`, no `.sig`: DAEMON §4.2), its one
+    /// bundle-typed entry, and that entry's DSSE envelope.
+    fn bundle_at(fake: &Fake, digest: &str) -> serde_json::Value {
+        let fallback_tag = format!("sha256-{}", digest.trim_start_matches("sha256:"));
+        let index_bytes = fake
+            .manifest("tlugger/filter", &fallback_tag)
+            .expect("a bundle artifact at the tag DAEMON §4.2's `bundle_signature` reads");
+        let index: serde_json::Value = serde_json::from_slice(&index_bytes).unwrap();
+        assert_eq!(
+            index["manifests"][0]["artifactType"], "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "cosign's default artifact type for a signature (DAEMON §4.2)"
+        );
+        let inner_digest = index["manifests"][0]["digest"].as_str().expect("a digest");
+        let inner_bytes = fake
+            .manifest("tlugger/filter", inner_digest)
+            .expect("the manifest the index entry names");
+        let inner: serde_json::Value = serde_json::from_slice(&inner_bytes).unwrap();
+        let layer_digest = inner["layers"][0]["digest"].as_str().expect("a digest");
+        let bundle_bytes = fake
+            .blob(layer_digest)
+            .expect("the bundle was pushed as the layer's blob");
+        serde_json::from_slice(&bundle_bytes).unwrap()
+    }
+
+    /// Verifies `bundle`'s DSSE envelope under `verifying_key` and checks its in-toto subject —
+    /// `Signed::Bundle::check` in `crates/daemon/src/registry.rs`, restated. Every test in this
+    /// module that touches the daemon's acceptance criteria restates the check inline rather
+    /// than depending on `eio-daemon` (`cargo-eio` owns itself — CLAUDE.md), which is also what
+    /// makes this a genuine round-trip proof rather than a tautology: two independent
+    /// implementations of §4.2 agreeing is the property that matters, not one calling the
+    /// other.
+    fn bundle_verifies(
+        bundle: &serde_json::Value,
+        verifying_key: &p256::ecdsa::VerifyingKey,
+        expected_digest: &str,
+    ) -> Result<(), String> {
+        use base64::Engine as _;
+        use p256::ecdsa::signature::Verifier as _;
+
+        let payload_type = bundle["dsseEnvelope"]["payloadType"]
+            .as_str()
+            .ok_or("no payloadType")?;
+        let payload = base64::engine::general_purpose::STANDARD
+            .decode(
+                bundle["dsseEnvelope"]["payload"]
+                    .as_str()
+                    .ok_or("no payload")?,
+            )
+            .map_err(|error| format!("payload base64: {error}"))?;
+        let sig_der = base64::engine::general_purpose::STANDARD
+            .decode(
+                bundle["dsseEnvelope"]["signatures"][0]["sig"]
+                    .as_str()
+                    .ok_or("no signature")?,
+            )
+            .map_err(|error| format!("signature base64: {error}"))?;
+        let signature =
+            p256::ecdsa::Signature::from_der(&sig_der).map_err(|error| format!("{error}"))?;
+
+        verifying_key
+            .verify(&dsse_pae(payload_type, &payload), &signature)
+            .map_err(|error| format!("DSSE signature does not verify: {error}"))?;
+
+        let statement: serde_json::Value =
+            serde_json::from_slice(&payload).map_err(|error| format!("payload JSON: {error}"))?;
+        assert_eq!(
+            statement["predicateType"], "https://sigstore.dev/cosign/sign/v1",
+            "`cosign sign`'s predicate, distinguishing a signature from an attestation \
+             (DAEMON §4.2)"
+        );
+        let subject = format!(
+            "sha256:{}",
+            statement["subject"][0]["digest"]["sha256"]
+                .as_str()
+                .ok_or("no subject digest")?
+        );
+        if subject != expected_digest {
+            return Err(format!("signed over {subject}, not {expected_digest}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_signed_publish_produces_a_bundle_the_daemons_verifier_accepts() {
+        let _guard = serialized();
+        let scratch = std::env::temp_dir().join(format!(
+            "eio-cargo-eio-publish-sign-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+        let (key, pubkey_pem) = generate_key(&scratch);
+
+        // `cosign sign` (unlike `generate_key`'s `generate-key-pair`) is invoked by `run`
+        // itself, deep inside `sign`, and inherits *this* process's environment rather than one
+        // this test controls directly — so the empty passphrase has to be set here for that
+        // child to find, exactly as a real publish relies on a block author's own shell already
+        // having `COSIGN_PASSWORD` set.
         let _password = EnvVar::set("COSIGN_PASSWORD", "");
 
         let fake = Fake::start();
+        // No opt-out flags reach `cosign` at all (see `sign`'s doc comment): this is cosign
+        // 3.1.3's own default artifact *shape*, kept offline by the two flags that survive.
         run(&args(&fake, Some(key))).expect("a signed publish");
 
         let manifest_bytes = fake
             .manifest("tlugger/filter", "1.0.0")
             .expect("the manifest was pushed");
         let digest = digest_of(&manifest_bytes);
-        let sig_tag = format!("sha256-{}.sig", digest.trim_start_matches("sha256:"));
-        let sig_manifest_bytes = fake
-            .manifest("tlugger/filter", &sig_tag)
-            .expect("a signature artifact at the tag DAEMON §4.2's `signature()` reads");
-        let sig_manifest: serde_json::Value = serde_json::from_slice(&sig_manifest_bytes).unwrap();
+        let bundle = bundle_at(&fake, &digest);
 
-        // Exactly the shape `registry.rs`'s `signature()` parses: an image manifest (not the
-        // Sigstore-bundle index cosign 3.x defaults to — this file's own module doc explains
-        // why three flags are needed to avoid it), one layer at cosign's simplesigning media
-        // type, carrying the signature as an annotation rather than as the layer's own bytes.
-        assert!(sig_manifest.get("manifests").is_none(), "never an index");
-        let layers = sig_manifest["layers"].as_array().expect("a layers array");
-        assert_eq!(layers.len(), 1);
-        assert_eq!(
-            layers[0]["mediaType"],
-            "application/vnd.dev.cosign.simplesigning.v1+json"
-        );
-        let signature_b64 = layers[0]["annotations"]["dev.cosignproject.cosign/signature"]
-            .as_str()
-            .expect("the annotation `registry.rs`'s `COSIGN_SIGNATURE` reads");
-        let payload_digest = layers[0]["digest"].as_str().expect("a digest string");
-        let payload = fake
-            .blob(payload_digest)
-            .expect("the signed payload was pushed as the layer's blob");
-
-        // `Signed::check` in `crates/daemon/src/registry.rs`, restated: a DER-encoded P-256
-        // signature, verified over the payload's exact bytes, whose own critical.image digest
-        // names the manifest actually pulled — the third check that makes the first two mean
-        // anything.
-        use base64::Engine as _;
-        use p256::ecdsa::signature::Verifier as _;
-        let signature_der = base64::engine::general_purpose::STANDARD
-            .decode(signature_b64)
-            .expect("valid base64");
-        let signature =
-            p256::ecdsa::Signature::from_der(&signature_der).expect("a DER ECDSA signature");
-        let pubkey_pem = std::fs::read_to_string(&pubkey).expect("cosign wrote a public key");
         let verifying_key: p256::ecdsa::VerifyingKey =
             p256::pkcs8::DecodePublicKey::from_public_key_pem(&pubkey_pem)
                 .expect("an SPKI-encoded P-256 public key");
-        verifying_key
-            .verify(&payload, &signature)
-            .expect("the signature verifies under the key `cosign generate-key-pair` wrote");
+        bundle_verifies(&bundle, &verifying_key, &digest)
+            .expect("the bundle cosign's defaults produced verifies under its own key");
 
-        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(
-            payload["critical"]["image"]["docker-manifest-digest"], digest,
-            "the signature is over the manifest this publish actually pushed"
-        );
+        std::fs::remove_dir_all(&scratch).ok();
+    }
+
+    #[test]
+    fn a_bundle_tampered_with_after_an_honest_cosign_sign_does_not_verify() {
+        // Proves DAEMON §4.2's "a present signature is checked regardless of policy" against
+        // the *real* shape cosign emits, not a hand-built fixture: sign honestly, then corrupt
+        // exactly what a hostile registry could rewrite — the signature, and the signed
+        // subject — and show each is refused where the untouched bundle was not.
+        let _guard = serialized();
+        let scratch = std::env::temp_dir().join(format!(
+            "eio-cargo-eio-publish-tamper-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch).expect("a scratch directory");
+        let (key, pubkey_pem) = generate_key(&scratch);
+        let _password = EnvVar::set("COSIGN_PASSWORD", "");
+
+        let fake = Fake::start();
+        run(&args(&fake, Some(key))).expect("a signed publish");
+        let manifest_bytes = fake
+            .manifest("tlugger/filter", "1.0.0")
+            .expect("the manifest was pushed");
+        let digest = digest_of(&manifest_bytes);
+        let bundle = bundle_at(&fake, &digest);
+        let verifying_key: p256::ecdsa::VerifyingKey =
+            p256::pkcs8::DecodePublicKey::from_public_key_pem(&pubkey_pem)
+                .expect("an SPKI-encoded P-256 public key");
+
+        bundle_verifies(&bundle, &verifying_key, &digest).expect("the untampered bundle verifies");
+
+        let mut bad_signature = bundle.clone();
+        let sig = bad_signature["dsseEnvelope"]["signatures"][0]["sig"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut sig_bytes = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD
+                .decode(&sig)
+                .unwrap()
+        };
+        *sig_bytes.last_mut().unwrap() ^= 0xff;
+        bad_signature["dsseEnvelope"]["signatures"][0]["sig"] = serde_json::Value::String({
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&sig_bytes)
+        });
+        bundle_verifies(&bad_signature, &verifying_key, &digest)
+            .expect_err("a flipped signature byte must not verify");
+
+        let mut wrong_digest = bundle.clone();
+        wrong_digest["dsseEnvelope"]["payload"] = {
+            use base64::Engine as _;
+            let statement = format!(
+                r#"{{"_type":"https://in-toto.io/Statement/v1","subject":[{{"digest":{{"sha256":"{}"}},"annotations":{{}}}}],"predicateType":"https://sigstore.dev/cosign/sign/v1","predicate":{{}}}}"#,
+                "0".repeat(64)
+            );
+            serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(statement.as_bytes()),
+            )
+        };
+        bundle_verifies(&wrong_digest, &verifying_key, &digest)
+            .expect_err("a rewritten (and now unsigned) subject digest must not verify");
 
         std::fs::remove_dir_all(&scratch).ok();
     }
