@@ -31,6 +31,7 @@ function delay<T>(value: T, ms = 120): Promise<T> {
 
 const MANIFESTS: BlockManifest[] = [
   {
+    block_ref: 'ghcr.io/tlugger/temp-sensor:1.0.0',
     name: 'temp-sensor',
     version: '1.0.0',
     abi: { major: 1, minor: 0 },
@@ -51,6 +52,7 @@ const MANIFESTS: BlockManifest[] = [
     aot: [],
   },
   {
+    block_ref: 'filter:1.2.0',
     name: 'filter',
     version: '1.2.0',
     abi: { major: 1, minor: 0 },
@@ -71,6 +73,7 @@ const MANIFESTS: BlockManifest[] = [
     aot: [],
   },
   {
+    block_ref: 'rolling-average:0.3.0',
     name: 'rolling-average',
     version: '0.3.0',
     abi: { major: 1, minor: 0 },
@@ -86,6 +89,7 @@ const MANIFESTS: BlockManifest[] = [
     aot: ['esp32s3'],
   },
   {
+    block_ref: 'gpio-echo:1.0.0',
     name: 'gpio-echo',
     version: '0.1.0',
     abi: { major: 1, minor: 0 },
@@ -98,6 +102,7 @@ const MANIFESTS: BlockManifest[] = [
     aot: ['esp32s3'],
   },
   {
+    block_ref: 'publisher:1.0.0',
     name: 'publisher',
     version: '1.0.0',
     abi: { major: 1, minor: 0 },
@@ -111,6 +116,7 @@ const MANIFESTS: BlockManifest[] = [
     aot: [],
   },
   {
+    block_ref: 'subscriber:1.0.0',
     name: 'subscriber',
     version: '1.0.0',
     abi: { major: 1, minor: 0 },
@@ -215,7 +221,7 @@ const SERVICES: Record<string, MockService[]> = {
         overflow: 'backpressure',
         state: 'stopped',
         blocks: {
-          t1: { id: 't1', name: 'Soil sensor', block: 'temp-sensor:1.0.0', props: { interval_ms: '30000' } },
+          t1: { id: 't1', name: 'Soil sensor', block: 'ghcr.io/tlugger/temp-sensor:1.0.0', props: { interval_ms: '30000' } },
           a1: { id: 'a1', name: 'Trend', block: 'rolling-average:0.3.0', props: { field: '"moisture"', window: '20' } },
         },
         connections: [{ fromId: 't1', fromPort: 'out', toId: 'a1', toPort: 'in' }],
@@ -234,7 +240,7 @@ const SERVICES: Record<string, MockService[]> = {
         overflow: 'backpressure',
         state: 'errored',
         blocks: {
-          s1: { id: 's1', name: 'Attic temp', block: 'temp-sensor:1.0.0', props: { interval_ms: '10000' } },
+          s1: { id: 's1', name: 'Attic temp', block: 'ghcr.io/tlugger/temp-sensor:1.0.0', props: { interval_ms: '10000' } },
         },
         connections: [],
         ui: { blocks: { s1: { x: 80, y: 80 } } },

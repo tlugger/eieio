@@ -63,6 +63,11 @@ export interface PropertyDescriptor {
 
 /** ABI §11's manifest schema, the fields the shell needs. */
 export interface BlockManifest {
+  /** The reference this manifest was fetched for, verbatim — DESIGNER §2's
+   *  `manifest_cache.block_ref`, and the key a service file's `block` field is
+   *  matched against. Carried alongside the manifest because a manifest's own
+   *  `name` does not identify which registry or version it came from. */
+  block_ref: string;
   name: string;
   version: string;
   abi: { major: number; minor: number };

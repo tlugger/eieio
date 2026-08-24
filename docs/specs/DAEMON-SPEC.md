@@ -443,7 +443,8 @@ GET    /openapi.json                  this document (no auth)
 GET    /node                          identity, limits, budgets, versions
 GET    /blocks                        cached blocks + manifests
 POST   /blocks/pull                   {reference} -> pull into the cache (§4.1)
-GET    /services                      every service and its state
+GET    /services                      every service and its state: `running`,
+                                      `stopped` or `errored`, and no others (§3)
 GET    /services/{s}                  definition text + state
 PUT    /services/{s}                  write definition (validate first, §9.3)
 DELETE /services/{s}                  remove the definition file; 409 while running (§9.7)
