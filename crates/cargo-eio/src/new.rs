@@ -14,6 +14,7 @@ use crate::template::{self, FILES, Names};
 /// scaffolded a block against an SDK it had never been tested with would be guessing.
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// `cargo eio new`'s arguments (SDK-SPEC §5.1).
 #[derive(Debug, Args)]
 pub struct NewArgs {
     /// The block's name — its registry name, its cargo package name, and the directory.
@@ -34,6 +35,7 @@ pub struct NewArgs {
     pub sdk_path: Option<PathBuf>,
 }
 
+/// Writes the template block repo (SDK-SPEC §5.1) at `args.path`/`args.name`.
 pub fn run(args: &NewArgs) -> anyhow::Result<()> {
     let name = check_name(&args.name)?;
     let names = Names::new(name);

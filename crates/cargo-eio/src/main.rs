@@ -24,16 +24,15 @@
 //! Cargo discovers subcommands by binary name, so `cargo eio` requires a binary called
 //! `cargo-eio` and invokes it with `eio` as its first argument. DAEMON §1 records this as
 //! the one exception to the workspace's naming rule.
+//!
+//! # This binary is a thin `clap` shell
+//!
+//! Every subcommand named above lives in this crate's lib target (`src/lib.rs`), not here —
+//! so that a test outside this crate can reach [`publish::run`] without spawning this binary
+//! (eieio-7d8.33's publish/pull round trip; that file's doc explains why). What stays in this
+//! file is argument parsing and dispatch.
 
-mod build;
-#[cfg(test)]
-mod fake_registry;
-mod new;
-mod oci;
-mod publish;
-mod template;
-mod test;
-
+use cargo_eio::{build, new, publish, test};
 use clap::{Args, Parser, Subcommand};
 
 /// The `cargo eio` entry point.

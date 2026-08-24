@@ -898,6 +898,7 @@ dependencies = [
  "async-stream",
  "axum 0.8.9",
  "base64 0.22.1",
+ "cargo-eio",
  "clap",
  "eio-conformance",
  "eio-expr",

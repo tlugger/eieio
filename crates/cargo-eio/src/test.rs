@@ -12,6 +12,7 @@ use crate::build::{self, BuildArgs};
 /// Where a block's conformance scenarios live (SDK §5.1).
 const SCENARIOS: &str = "conformance";
 
+/// `cargo eio test`'s arguments (SDK-SPEC §5.3).
 #[derive(Debug, Args)]
 pub struct TestArgs {
     /// Path to the block's `Cargo.toml`. Defaults to cargo's own search from here.
@@ -19,6 +20,8 @@ pub struct TestArgs {
     pub manifest_path: Option<PathBuf>,
 }
 
+/// Runs both of SDK §6's layers: the native `TestHost` tests, then the built module under the
+/// reference conformance harness (SDK-SPEC §5.3).
 pub fn run(args: &TestArgs) -> anyhow::Result<()> {
     // Native first: a block that is wrong is wrong more cheaply here, and a conformance
     // report on a block whose logic is broken says the same thing at ten times the length.

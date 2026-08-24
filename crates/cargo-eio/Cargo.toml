@@ -52,5 +52,12 @@ base64.workspace = true
 # pushes and shells out to cosign to sign.
 p256.workspace = true
 
+# Reachable only with this feature on: `fake_registry`, `publish`'s own in-process OCI
+# registry, for `eio-daemon`'s dev-dependency to exercise eieio-7d8.33's publish/pull round
+# trip against — see `src/lib.rs`'s doc for why it is gated this way rather than left behind
+# a plain `#[cfg(test)]` (which a dependent crate's own test build would never set).
+[features]
+testing = []
+
 [lints]
 workspace = true

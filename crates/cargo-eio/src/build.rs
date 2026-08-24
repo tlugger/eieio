@@ -29,6 +29,7 @@ const PROFILE: [&str; 4] = [
 /// The manifest file `build` writes beside the module (ABI §11, §4.4).
 const MANIFEST_JSON: &str = "manifest.json";
 
+/// `cargo eio build`'s arguments (SDK-SPEC §5.2).
 #[derive(Debug, Args)]
 pub struct BuildArgs {
     /// Path to the block's `Cargo.toml`. Defaults to cargo's own search from here.

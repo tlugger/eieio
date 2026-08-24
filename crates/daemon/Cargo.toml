@@ -118,5 +118,18 @@ wat.workspace = true
 # is not a truncation — which was always refused and would test nothing new.
 wasmparser.workspace = true
 
+# eieio-7d8.33's publish/pull round trip: `registry::roundtrip` calls `publish::run` — the
+# real `cargo eio publish` code — and pulls what it pushed back with this crate's own,
+# private `registry::Registry::pull`, so the two halves of DAEMON §4.1/§4.2 are checked
+# against each other rather than against a shared reading of the spec. `path`, not
+# `workspace = true`: nothing else in the workspace depends on `cargo-eio` as a library, so
+# there is no shared table entry to reuse. `features = ["testing"]` reaches its
+# `fake_registry` — the one OCI registry both halves push to and pull from (`cargo-eio`'s own
+# `src/lib.rs` doc explains why that module, and not a promoted `registry::fake::Fake`, is
+# what this test shares). No cycle: `cargo-eio` depends on `eio-manifest` and
+# `eio-conformance`, both already dependencies of this crate, and neither depends back on
+# `eio-daemon`.
+cargo-eio = { path = "../cargo-eio", features = ["testing"] }
+
 [lints]
 workspace = true

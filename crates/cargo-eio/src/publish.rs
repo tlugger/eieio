@@ -76,6 +76,7 @@ const EMPTY_CONFIG_BYTES: &[u8] = b"{}";
 /// independent WASM, so there is nothing for an index to vary over.
 const IMAGE_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 
+/// `cargo eio publish`'s arguments (SDK-SPEC §5, SCOPE §3.6).
 #[derive(Debug, Args)]
 pub struct PublishArgs {
     /// Where to push: `<host>[:<port>]/<namespace...>`.
@@ -111,8 +112,26 @@ pub struct PublishArgs {
     /// Path to the block's `Cargo.toml`. Defaults to cargo's own search from here.
     #[arg(long, value_name = "PATH")]
     pub manifest_path: Option<PathBuf>,
+
+    /// The passphrase for `key`, handed to `cosign` on its own child environment.
+    ///
+    /// **Not a command-line flag** — `#[arg(skip)]`, so no passphrase can be typed onto an
+    /// argv every process on the machine can read. `None` is the only value a real invocation
+    /// ever has, and it means what it has always meant: `cosign` inherits this process's
+    /// environment and finds `COSIGN_PASSWORD` there, exactly as a block author's own shell
+    /// or CI secret provides it (`template/ci.yml.in`).
+    ///
+    /// It exists for a caller that drives `run` in-process and cannot use the environment to
+    /// reach the child — `eio-daemon`'s `registry::roundtrip` (eieio-7d8.33). `std::env::set_var`
+    /// is `unsafe` precisely because its contract covers the whole process, and a test binary
+    /// running threads that call `std::env::temp_dir` cannot honour it; passing the value down
+    /// to the one `Command` that needs it has no such contract to break.
+    #[arg(skip)]
+    pub cosign_password: Option<String>,
 }
 
+/// Builds the block, packages it as an OCI artifact, pushes it to `args.registry`, and signs
+/// it with cosign when `args.key` is given (SDK-SPEC §5, SCOPE §3.6).
 pub fn run(args: &PublishArgs) -> anyhow::Result<()> {
     // Checked before the build below spends any time: `registry`, `username` and `password`
     // are known from the command line alone, so a typo in any of them should fail before a
@@ -171,7 +190,14 @@ pub fn run(args: &PublishArgs) -> anyhow::Result<()> {
     println!("    digest   {digest}");
 
     if let Some(key) = &args.key {
-        sign(host, &repository, &digest, key, credentials.as_ref())?;
+        sign(
+            host,
+            &repository,
+            &digest,
+            key,
+            credentials.as_ref(),
+            args.cosign_password.as_deref(),
+        )?;
         println!("    signed   cosign, key {}", key.display());
     }
 
@@ -282,8 +308,15 @@ fn sign(
     digest: &str,
     key: &Path,
     credentials: Option<&oci::Credentials>,
+    password: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut command = Command::new("cosign");
+    // Only when a caller supplied one. Without it the child inherits this process's
+    // environment and reads `COSIGN_PASSWORD` from there, which is what every real invocation
+    // does and what this line must not disturb (see `PublishArgs::cosign_password`).
+    if let Some(password) = password {
+        command.env("COSIGN_PASSWORD", password);
+    }
     command.args([
         "sign",
         "--yes",
@@ -325,64 +358,9 @@ fn sign(
 mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Mutex;
 
     use super::*;
     use crate::fake_registry::Fake;
-
-    /// Serializes this module's tests against each other.
-    ///
-    /// Every test here calls [`run`], which reads `EIO_REGISTRY_USERNAME`/`_PASSWORD`
-    /// ([`credentials`]), and the signed-publish test below also *writes*
-    /// `COSIGN_PASSWORD` for the `cosign` child process to inherit. `std::env::set_var`'s
-    /// safety contract requires nothing else in the process read or write an environment
-    /// variable while it runs — a requirement about the whole process, not just one name —
-    /// and this lock is what keeps that true under a parallel `cargo test`. `oci::tests`
-    /// touches no environment variable and is unaffected.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Holds [`ENV_LOCK`] for the rest of the calling test.
-    fn serialized() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Sets an environment variable for the rest of the calling test, restoring whatever was
-    /// there before (or unsetting it) on drop — including on a panic, since a test's default
-    /// unwind still runs destructors.
-    struct EnvVar {
-        name: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvVar {
-        /// Sets `name` to `value`. The caller must be holding [`ENV_LOCK`] for as long as this
-        /// lives — that is the whole of what makes the `unsafe` here sound.
-        fn set(name: &'static str, value: &str) -> EnvVar {
-            let previous = std::env::var(name).ok();
-            // SAFETY: `serialized()` is held by every caller of `EnvVar::set` in this module,
-            // so no other thread in this process reads or writes an environment variable while
-            // this runs.
-            unsafe {
-                std::env::set_var(name, value);
-            }
-            EnvVar { name, previous }
-        }
-    }
-
-    impl Drop for EnvVar {
-        fn drop(&mut self) {
-            // SAFETY: see `EnvVar::set` — the same lock is still held by the test that created
-            // this guard, since it is dropped before the guard returned by `serialized()` is.
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.name, value),
-                    None => std::env::remove_var(self.name),
-                }
-            }
-        }
-    }
 
     /// `examples/blocks/filter`'s `Cargo.toml` — ABI §13.2's golden filter block, already
     /// built by other suites, so `publish`'s own tests cost no extra crate compile.
@@ -391,12 +369,18 @@ mod tests {
     }
 
     fn args(fake: &Fake, key: Option<PathBuf>) -> PublishArgs {
+        // The throwaway key `generate_key` mints has an empty passphrase, handed to `cosign`
+        // on its own child environment rather than set on this process's (see
+        // `PublishArgs::cosign_password`). That is what lets these tests hold no lock and use
+        // no `unsafe`: `run` still only *reads* the environment, and reads race with nothing.
+        let signing = key.is_some();
         PublishArgs {
             registry: format!("{}/tlugger", fake.host()),
             key,
             username: None,
             password: None,
             manifest_path: Some(filter_manifest_path()),
+            cosign_password: signing.then(String::new),
         }
     }
 
@@ -416,7 +400,6 @@ mod tests {
 
     #[test]
     fn an_unsigned_publish_pushes_exactly_what_the_daemons_puller_reads() {
-        let _guard = serialized();
         let fake = Fake::start();
         run(&args(&fake, None)).expect("publish");
 
@@ -482,7 +465,6 @@ mod tests {
 
     #[test]
     fn a_bare_host_with_no_namespace_is_refused_before_anything_is_pushed() {
-        let _guard = serialized();
         let fake = Fake::start();
         let mut publish_args = args(&fake, None);
         publish_args.registry = fake.host();
@@ -616,20 +598,12 @@ mod tests {
 
     #[test]
     fn a_signed_publish_produces_a_bundle_the_daemons_verifier_accepts() {
-        let _guard = serialized();
         let scratch = std::env::temp_dir().join(format!(
             "eio-cargo-eio-publish-sign-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&scratch).expect("a scratch directory");
         let (key, pubkey_pem) = generate_key(&scratch);
-
-        // `cosign sign` (unlike `generate_key`'s `generate-key-pair`) is invoked by `run`
-        // itself, deep inside `sign`, and inherits *this* process's environment rather than one
-        // this test controls directly — so the empty passphrase has to be set here for that
-        // child to find, exactly as a real publish relies on a block author's own shell already
-        // having `COSIGN_PASSWORD` set.
-        let _password = EnvVar::set("COSIGN_PASSWORD", "");
 
         let fake = Fake::start();
         // No opt-out flags reach `cosign` at all (see `sign`'s doc comment): this is cosign
@@ -657,15 +631,12 @@ mod tests {
         // the *real* shape cosign emits, not a hand-built fixture: sign honestly, then corrupt
         // exactly what a hostile registry could rewrite — the signature, and the signed
         // subject — and show each is refused where the untouched bundle was not.
-        let _guard = serialized();
         let scratch = std::env::temp_dir().join(format!(
             "eio-cargo-eio-publish-tamper-test-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&scratch).expect("a scratch directory");
         let (key, pubkey_pem) = generate_key(&scratch);
-        let _password = EnvVar::set("COSIGN_PASSWORD", "");
-
         let fake = Fake::start();
         run(&args(&fake, Some(key))).expect("a signed publish");
         let manifest_bytes = fake

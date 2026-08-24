@@ -1153,6 +1153,13 @@ struct InTotoDigest {
 #[cfg(test)]
 pub mod fake;
 
+/// eieio-7d8.33's publish/pull round trip: the real `cargo eio publish` against the real
+/// [`Registry::pull`], checked against each other rather than against a shared reading of
+/// DAEMON §4.1/§4.2. See that module's doc for the design decision and the rejected
+/// alternatives.
+#[cfg(test)]
+mod roundtrip;
+
 #[cfg(test)]
 mod tests {
     use super::*;
