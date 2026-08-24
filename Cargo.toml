@@ -13,6 +13,7 @@ members = [
     "crates/conformance",
     "crates/test-host",
     "crates/daemon",
+    "crates/designer",
     "crates/expr",
     "crates/expr-wasm",
     "crates/host-core",
@@ -264,6 +265,55 @@ similar = { version = "3.1", default-features = false, features = ["text"] }
 # host, stated: the value is on the disk before the guest's call returns, which is
 # what makes a stateful block survive a restart rather than probably survive one.
 redb = "4.1"
+
+# ── the Designer backend's own dependencies (DESIGNER-SPEC §1, eieio-m9s.1) ──────────────────
+#
+# `crates/designer` is a second `std` binary beside the daemon, never reachable from a ★
+# crate, serving DESIGNER §3.1's small REST surface and proxying everything else to a node.
+
+# The registry (DESIGNER §2): systems, nodes, registries, manifest cache. `bundled` links
+# SQLite's own C source rather than requiring one on the host — the Designer ships as a
+# container image and a bare binary (§1), and a self-hosted operator should not need a system
+# SQLite of a compatible version installed first.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Migrations via `user_version` rather than a migrations table (§1's own choice): one number
+# SQLite already tracks, so there is nothing else to keep in sync with the schema.
+rusqlite_migration = "2.6"
+
+# Serves the built SPA out of the binary (§1). `interpolate-folder-path` is what lets
+# `#[folder = "$CARGO_MANIFEST_DIR/../../designer/dist"]` resolve relative to this crate's own
+# manifest rather than the workspace root; `include-exclude` is not enabled, because this
+# crate embeds one whole directory and has no files inside it to exclude.
+rust-embed = { version = "8.12", features = ["interpolate-folder-path"] }
+
+# Content-Type for an embedded asset. `rust-embed` carries the bytes; this is what turns a
+# path's extension into what a browser needs to run the SPA rather than download it.
+mime_guess = "2.0"
+
+# The catch-all proxy (§3.1): `ANY /api/nodes/{id}/daemon/{*path}`. `stream` is
+# `Response::bytes_stream()`, which is what keeps an SSE tap or log stream unbuffered end to
+# end — a buffered proxy would make DESIGNER §6's live taps arrive in one lump at the end,
+# which is the same as not working. `json` is `Response::json()`, for the node probe's
+# `GET /node` (DAEMON §9). `default-features = false` drops the cookie jar (this crate manages
+# its own single session cookie, not a jar) and gzip/brotli/deflate, none of which a node's
+# own JSON/SSE responses are compressed with.
+reqwest = { version = "0.13", default-features = false, features = ["stream", "json"] }
+
+# `ServeDir` matches this crate to the same static-file conventions the rest of the ecosystem
+# uses (correct caching headers, HEAD support) for the one thing here that still touches a
+# real filesystem: a `designer/dist` an operator or the SPA's own build dropped beside the
+# binary rather than one baked in by `rust-embed` at compile time. `fs` is the feature that
+# exists.
+tower-http = { version = "0.7", features = ["fs"] }
+
+# `last_seen` (§2): a probe's timestamp, rendered once as RFC 3339 so every client parses the
+# same thing regardless of which node answered or when. `formatting` only — nothing here
+# parses a date back in.
+time = { version = "0.3", default-features = false, features = [
+    "formatting",
+    "std",
+] }
 
 # ── the guest's own dependencies (compiled into every block) ─────────────────
 #

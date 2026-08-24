@@ -1,0 +1,91 @@
+[package]
+name = "eio-designer"
+description = "The Designer's server: a small registry, a session gate, and a proxy to nodes (DESIGNER-SPEC)"
+# Its own, like the daemon's and the CLI's, and for the same reason: SCOPE §7.2 makes release
+# pipelines per component and tag-triggered, so the Designer has to be able to reach 0.2.0
+# without republishing a crate nothing in it changed.
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A lib target beside the binary, for the same reason `eio-daemon`'s exists: an in-process
+# test needs `router()` and `Shared` without spawning the binary and dialing a socket for
+# every case that doesn't need one. Tests that *do* need a real socket (the session gate,
+# the proxy, and the SSE unbuffering proof) still bind one — see `tests/`.
+[lib]
+name = "eio_designer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eio-designer"
+path = "src/main.rs"
+
+[dependencies]
+# The server (DESIGNER §1). `default-features = false` mirrors the daemon's own trimming:
+# this binary is JSON and SSE over HTTP/1 on loopback by default, so h2 and multipart are a
+# second protocol surface paid for by nothing here.
+axum = { workspace = true, default-features = false, features = [
+    "http1",
+    "json",
+    "tokio",
+    "query",
+] }
+
+# The registry (DESIGNER §2): systems, nodes, registries, manifest cache — and nothing a
+# daemon could tell you itself (SCOPE §3.8). `bundled` links SQLite's own C source rather
+# than requiring one already installed at a compatible version on the host, which matches
+# §1's "ships as a container image and a bare binary".
+rusqlite.workspace = true
+
+# Migrations via SQLite's own `user_version` (§1) rather than a migrations table this crate
+# would have to keep in sync with the schema by hand.
+rusqlite_migration.workspace = true
+
+# Serves the built SPA out of the binary (§1). See `src/assets.rs` for why this is paired
+# with `tower-http`'s `ServeDir` rather than used alone.
+rust-embed.workspace = true
+mime_guess.workspace = true
+tower-http.workspace = true
+
+# The catch-all proxy (§3.1) and the node probe. `stream` is `Response::bytes_stream()`,
+# which is what keeps a tap or a log stream unbuffered end to end (§3.1's own requirement).
+reqwest.workspace = true
+
+# `last_seen`, rendered once as RFC 3339 so every client parses the same thing.
+time.workspace = true
+
+# The management API's own JSON, `std` throughout because this binary is not a ★ crate.
+serde = { workspace = true, default-features = false, features = ["std", "derive"] }
+serde_json = { workspace = true, default-features = false, features = ["std"] }
+
+# The session cookie and this node's own password (module doc: `src/password.rs`), and the
+# node id `provision_password` and `Sessions::mint` both draw from — the same source
+# `eio-daemon`'s own token and `eio-cli`'s id minting use, so a Designer instance's secrets
+# are exactly as random as a node's.
+getrandom.workspace = true
+
+# `--data-dir`, `--listen`, `--assets-dir`. Derive rather than the builder, so the flags and
+# the struct cannot drift.
+clap.workspace = true
+
+tokio = { workspace = true, features = ["rt-multi-thread", "fs"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+# `tests/` drives a real socket (matching `eio-daemon`'s own `api/tests.rs` posture: auth is
+# middleware, streaming is a wire behavior, and neither is exercised by calling a handler
+# function directly). This crate's own `reqwest` client, reused rather than adding a second
+# HTTP client just for tests.
+
+# The SSE-unbuffering proof's fake node hand-writes a `Stream` impl for its paced response
+# body (`api/proxy.rs`) — the same trait `axum::body::Body::from_stream` itself takes, and
+# already a transitive dependency; naming it directly here is what lets that test implement
+# it without reaching into axum's own re-export path.
+futures-core.workspace = true
+
+[lints]
+workspace = true
