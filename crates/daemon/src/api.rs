@@ -52,22 +52,30 @@ use crate::registry::Registry;
 /// the only thing a request can change, so it is the only thing behind a lock.
 pub struct Shared {
     /// This node, as `node.toml` describes it (DAEMON §2.1).
-    pub node: Node,
+    pub(crate) node: Node,
     /// The registry client every pull goes through (DAEMON §4.1).
-    pub registry: Registry,
+    pub(crate) registry: Registry,
     /// The executor every instance is spawned on (DAEMON §5).
-    pub executor: Executor,
+    ///
+    /// `pub(crate)`, not `pub`: this crate's lib target exists only for
+    /// `crates/cli/tests`' benefit (eieio-yck.3), which needs [`openapi::Document::openapi`]
+    /// and nothing about a running node's state. A `pub` field of type `Executor` would make
+    /// `executor`'s otherwise-private methods reachable from outside this crate through field
+    /// access alone (no `pub mod executor;` required) — exactly the leak that would force
+    /// `bridge.rs`, `executor.rs` and `router.rs`'s `#[expect(dead_code)]` attributes to change
+    /// for a reason unrelated to what any of them are actually for.
+    pub(crate) executor: Executor,
     /// The observation bus every instance's events are drained into (DAEMON §11).
     ///
     /// Not behind the services lock: a tap subscribes and a drain publishes without either
     /// touching the graph, which is what keeps opening a tap from contending with a reload.
-    pub bus: Arc<crate::observe::Bus>,
+    pub(crate) bus: Arc<crate::observe::Bus>,
     /// The running graph.
     ///
     /// A `tokio` mutex rather than a `std` one because the operations hold it across `await`
     /// points — stopping a service asks each instance and waits — and a `std` guard held over
     /// an await is how a current-thread runtime deadlocks itself.
-    pub services: Mutex<Services>,
+    pub(crate) services: Mutex<Services>,
 }
 
 /// The shared state, as handlers receive it.

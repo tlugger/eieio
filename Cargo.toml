@@ -304,6 +304,10 @@ trybuild = "1.0"
 # honest when these eventually reach crates.io.
 eio-abi = { path = "crates/abi", version = "0.1.0" }
 eio-conformance = { path = "crates/conformance", version = "0.1.0" }
+# A dev-dependency everywhere it is used — only `eio-cli`'s tests, to call the lib target's
+# `Document::openapi()` in-process (eieio-yck.3). `eio-daemon` itself stays a binary with no
+# dependent of its own (DAEMON §1): the lib target exists solely for that test to import.
+eio-daemon = { path = "crates/daemon", version = "0.1.0" }
 eio-sdk-macros = { path = "crates/block-sdk-macros", version = "0.1.0" }
 eio-expr = { path = "crates/expr", version = "0.1.0" }
 eio-host-core = { path = "crates/host-core", version = "0.1.0" }

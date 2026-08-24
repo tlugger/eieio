@@ -58,5 +58,20 @@ serde_json = { workspace = true, default-features = false, features = ["std"] }
 # no other crate wants a TOML writer that forgets comments.
 toml = { workspace = true, features = ["display", "std"] }
 
+[dev-dependencies]
+# `tests/openapi_surface.rs` (eieio-yck.3) calls `Document::openapi()` in-process to check
+# DAEMON-SPEC §9's *live* surface against `client.rs`'s `ENDPOINTS`, closing the gap
+# `tests/api_surface.rs` (eieio-yck.1) could not: a route added to the daemon's router without
+# touching the CLI. A dev-dependency, not a `[dependencies]` one — this binary never talks to
+# `eio-daemon` in-process at runtime, only a test does — and `eio-daemon` has no dependency
+# back on `eio-cli` in any form, so this creates no cycle.
+eio-daemon.workspace = true
+
+# `Document::openapi()` returns `utoipa::openapi::OpenApi`; reading its `paths` needs the same
+# crate's types (`PathItem`, and the `OpenApi` trait `Document::openapi` comes from). Dev-only,
+# for the same reason `eio-daemon` above is: no command in this binary builds an OpenAPI
+# document, only this test reads one.
+utoipa.workspace = true
+
 [lints]
 workspace = true

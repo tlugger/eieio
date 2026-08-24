@@ -12,10 +12,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# A binary and nothing else. DAEMON-SPEC §1's table gives `eio-daemon` no import
-# path, and there is nothing here another crate should link against: the reusable
-# half of the host is `eio-host-core`, on purpose. Tests live in `#[cfg(test)]`
-# modules beside the code they cover.
+# The binary is what DAEMON-SPEC §1's table means by `eio-daemon`: nothing another crate
+# depends on, because the reusable half of the host is `eio-host-core`, on purpose. The lib
+# target below (`src/lib.rs`, implicit — Cargo finds it by convention, the way `eio-cli`'s
+# is) exists for exactly one dependent: `crates/cli/tests`, which needs `Document::openapi()`
+# in-process to check DAEMON §9's live surface without spawning this binary (eieio-yck.3). Tests
+# on the daemon's own internals still live in `#[cfg(test)]` modules beside the code they cover.
 [[bin]]
 name = "eio-daemon"
 path = "src/main.rs"
@@ -101,10 +103,10 @@ rumqttc = { version = "0.25", default-features = false }
 # = false` drops `use-rustls` and `websocket`, matching `rumqttc` above — the fixture broker
 # needs to accept exactly the plain-TCP connections this bridge makes, nothing more.
 rumqttd = { version = "0.20", default-features = false }
-# ABI §13's "both the daemon and the leaf runtime MUST pass the harness". A dev-dependency
-# and not a lib target on this crate: DAEMON §1's table gives `eio-daemon` no import path,
-# so the harness reaches the daemon's wasmtime binding from inside its own test module
-# (`src/conformance.rs`) rather than the daemon publishing one.
+# ABI §13's "both the daemon and the leaf runtime MUST pass the harness". A dev-dependency,
+# and `src/conformance.rs` stays a private `#[cfg(test)]` module of the lib target above
+# rather than a public one: the harness reaches the daemon's wasmtime binding from inside its
+# own test module, not through a path this crate publishes.
 eio-conformance.workspace = true
 
 # Test blocks are checked in as `.wat` so a reviewer can read what each one exercises,

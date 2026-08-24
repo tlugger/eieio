@@ -864,6 +864,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "eio-daemon",
  "eio-manifest",
  "eio-service",
  "getrandom 0.4.3",
@@ -871,6 +872,7 @@ dependencies = [
  "serde_json",
  "toml 0.9.12+spec-1.1.0",
  "ureq",
+ "utoipa",
 ]
 
 [[package]]

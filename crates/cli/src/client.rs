@@ -11,11 +11,12 @@
 //! # The endpoint list is the surface, spoken once
 //!
 //! Every path this client can address is declared once, as a `const`, and used both by the
-//! method that calls it and by [`ENDPOINTS`] — the list `tests/api_surface.rs` checks against a
-//! committed transcription of DAEMON-SPEC §9's table. A path added to one and not the other is a
-//! compile-time-adjacent inconsistency inside this crate; whether the *transcription* still
-//! matches what `eio-daemon` actually serves is exactly the gap eieio-yck.1 reports rather than
-//! silently papering over (`crates/daemon` has no lib target for this crate to check it against).
+//! method that calls it and by [`ENDPOINTS`] — the list `tests/openapi_surface.rs` checks
+//! against `eio-daemon`'s *live* OpenAPI document, called in-process through that crate's lib
+//! target (eieio-yck.3). A path added to one and not the other is a compile-time-adjacent
+//! inconsistency inside this crate; a route the daemon's router grows without a matching entry
+//! here, or the reverse, is what that test catches — eieio-yck.1 could only check this crate
+//! against a snapshot transcription, which eieio-yck.3 replaced.
 
 use std::io::{BufRead, BufReader, Read, Write as _};
 
@@ -332,9 +333,8 @@ fn tap_stream_path(id: &str) -> String {
 /// Every `(METHOD, path template)` this client addresses — DAEMON §9's whole surface but
 /// `/openapi.json` itself, which is not an operation any command performs.
 ///
-/// `tests/api_surface.rs` checks this against a committed transcription of DAEMON-SPEC §9's
-/// table; see that file, and this module's doc comment, for what that test does and does not
-/// prove.
+/// `tests/openapi_surface.rs` checks this against `eio-daemon`'s live OpenAPI document; see
+/// that file, and this module's doc comment, for what that test proves.
 pub const ENDPOINTS: &[(&str, &str)] = &[
     ("GET", NODE),
     ("GET", BLOCKS),
