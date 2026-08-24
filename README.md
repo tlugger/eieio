@@ -49,7 +49,7 @@ A block instance is its **id** (`b7k2`), never its name — names are labels and
 
 ## Why it exists
 
-A rebuild of [nio](https://web.archive.org/web/20190716020124/https://docs.n.io/) (niolabs, ~2014–2019, defunct). nio got the abstraction right — blocks, signals, services, live signal inspection, per-signal expression properties. Three things killed it, and each is a design constraint here:
+A rebuild of [nio](https://web.archive.org/web/20190716020124/https://docs.n.io/) (niolabs, ~2014–2019, defunct). nio got the abstraction right — blocks, signals, services, per-signal expression properties, and a logger panel that showed you every signal a block saw. Three things killed it, and each is a design constraint here:
 
 |nio's problem|eieio's answer|
 |---|---|

@@ -159,7 +159,8 @@ Cross-device signal flow is native pub/sub: publish/subscribe blocks are ordinar
 ### 3.12 Observability
 
 - Logger blocks, log inspection via Designer.
-- **Live signal tapping** on connections — nio's killer debugging UX — is in scope: per-connection taps published over the same pub/sub, sampled and ring-buffered.
+- **Live signal tapping** on connections is in scope: per-connection taps published over the same pub/sub, sampled and ring-buffered.
+- **Correction to this document's own history.** Earlier drafts called tapping "nio's killer debugging UX". Reconstructed from the archives, it was not nio's at all. nio's answer to "what is flowing here" was a **Logger block wired into the graph** plus a logger panel that printed every signal as one-line JSON, complete rather than sampled. That works, and the panel was good — but observing a connection meant *editing the service to add a block to it*, which changes the thing being observed and costs a restart to put in and another to take out. eieio's tap is therefore not a restoration; it is the fix for the gap that shape leaves. Keep the logger panel's virtues (complete, per-block, levelled, historical-then-streaming) and drop the requirement to modify a running design in order to look at it.
 - **OPEN:** metrics surface.
 
 ### 3.13 Supervision and lifecycle

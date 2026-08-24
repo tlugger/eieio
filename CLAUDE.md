@@ -61,11 +61,12 @@ Vocabulary is settled and used precisely: **System** (group of nodes), **Node** 
 Cargo.toml            workspace root
 crates/
   abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
-  service/  daemon/  cli/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
+  service/  daemon/  cli/  designer/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
   conformance/
 expr-tests/           host-agnostic vectors: expressions, property types, canonical CBOR
 schemas/              published JSON Schemas: manifest, service
-designer/             not created yet — will be a SvelteKit app with its own package.json
+designer/             not created yet — the Vite + Svelte 5 SPA, own package.json;
+                      its server is `crates/designer` (DESIGNER §1)
 examples/
   services/           sample service TOMLs
   blocks/             ABI §13.2's golden blocks — their own cargo workspace

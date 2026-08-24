@@ -11,13 +11,26 @@ The Designer is the optional visual management surface: create Systems, attach n
 
 ## 1. Stack
 
-**PROPOSED:**
+**PROPOSED** — the choice below is settled; the marker comes off when `eieio-m9s.1` builds it.
 
-- **SvelteKit** (SSR + API routes in one deployable, strong canvas-perf reputation; Next.js acceptable substitute — decide at build time, nothing below depends on the choice).
-- **SQLite** for the backend DB — registry-scale data only (§2); zero-ops matches self-hosted posture (SCOPE §6).
-- **Canvas: Svelte Flow / React Flow** (mature node-graph libraries; custom canvas is explicitly rejected scope for v1).
-- **Shared Rust via WASM in the browser:** the `expr` crate compiled to WASM powers in-editor expression linting (parse errors with spans, unbound symbols, signal-dependence badge — EXPR §10 semantics, the _same interpreter code_ the daemon runs). Same trick available for `manifest`/service-file validation. This is the payoff of the no_std crate split (DAEMON-SPEC §1) landing in the UI.
-- Ships as a container image + a bare binary/node target; localhost-first.
+- **Frontend: Vite + Svelte 5, as a single-page app.** Not SvelteKit, and not Next.js.
+- **Backend: `crates/designer` — an `axum` binary in this workspace** (package `eio-designer`), serving the built SPA out of the binary via `rust-embed` behind `tower-http`'s `ServeDir`.
+- **Storage: `rusqlite` with the `bundled` feature**, migrations via `rusqlite_migration`. Registry-scale data only (§2); zero-ops matches the self-hosted posture (SCOPE §6).
+- **Canvas: `@xyflow/svelte`** (Svelte Flow). A custom canvas engine is explicitly rejected scope for v1 (§9).
+- **Shared Rust in the browser:** the `expr` crate compiled to WASM powers in-editor expression linting — parse errors with spans, unbound symbols, signal-dependence badge (EXPR §10 semantics, the *same interpreter code* the daemon runs). This is the payoff of the `no_std` crate split (DAEMON §1) landing in the UI.
+- Ships as a container image and a bare binary; localhost-first.
+
+### 1.1 Why the server is Rust and not the frontend framework
+
+Earlier drafts named SvelteKit, with "Next.js acceptable substitute — decide at build time, nothing below depends on the choice". Both halves of that turned out to be wrong, and the reasons are recorded because they are the kind that get re-litigated:
+
+- **Next.js cannot be substituted**, because §1's in-browser `expr` is not negotiable. `wasm-pack`'s ESM output has failed to load under Next since 2021; every community workaround is a `webpack:` config hook, and Next 16 made Turbopack the default, whose `wasm-bindgen` support is undocumented. A framework that cannot reliably load the interpreter is not a substitute for one that can.
+- **Something below did depend on the choice** — the resource floor, which SCOPE §6's self-hosted posture and §3.7's Pi-class targets both care about. Measured, under load, one core: **axum 8.5 MB resident against 82.5 MB for Node**; Next.js's own issue tracker documents a ~95 MB `output: standalone` baseline. A bare install is a static binary of a few megabytes with no Node, no Bun and no Deno on the machine at all.
+- **The decisive reason is §4, not the megabytes.** §4 requires that the Designer's idea of what a service file may say cannot differ from the CLI's. A Rust backend does not *reproduce* that guarantee, it *links* it: `eio-service`'s preserving `toml_edit` writer, `eio-manifest` and `eio-expr` are function calls, not a second implementation to keep in agreement. The daemon already depends on `axum` 0.8 and already re-streams SSE through `axum::response::sse::Sse`, so §3's proxy is the code this repository has, used again.
+
+**What this costs, stated plainly:** the session gate, the routing and the typed server↔client boundary are hand-written rather than given by a full-stack framework, and Rust and TypeScript types can drift where a single-language stack could not. There is no SSR — irrelevant for a localhost canvas, and the thing to revisit if that ever stops being what this is. **Multi-user is the inversion to watch**: sessions and RBAC are where a full-stack framework earns its keep, and SCOPE §6 excludes them today.
+
+**Svelte Flow is a peer binding, not a port**, which is why the canvas did not decide the framework. `@xyflow/svelte` and `@xyflow/react` publish together over one shared `@xyflow/system` engine — pan/zoom, drag, connection validation and all edge-path maths live there, not in either binding. Every §5 and §6 requirement maps to a documented API: multiple typed `Handle`s per node for the output ports and ABI §6.4's reserved error terminal, `isValidConnection`, fan-out as default behaviour, `onedgeclick` with `interactionWidth` for click-to-tap, `EdgeLabel` for the throughput badge. `toObject()` returns `{nodes, edges, viewport}`, which is nearly the `[ui]` table already. If the Svelte binding ever stalls behind the shared engine, the swap is to the React binding and an SPA in React; the Rust backend is untouched, which is the point of putting the seam at HTTP.
 
 ## 2. Backend data model
 
@@ -42,7 +55,7 @@ Notably absent: services, blocks-in-services, connections, layout — all of tha
 
 ## 4. Service editing model
 
-- **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer — the same WASM trick §1 uses for `expr`, and the same reason. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.
+- **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer. Not by the WASM route §1 uses for `expr`: `eio-service` is a `std` crate and the backend is Rust, so it is an ordinary dependency. `expr` is compiled to WASM because the *browser* needs it on every keystroke, which is a different requirement with a different answer. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.
 - **Layout lives in the service file** under the daemon-ignored `[ui]` table (DAEMON-SPEC §2): node positions, canvas viewport, notes. Rationale: the service file stays the single portable artifact — git-clone a service onto a fresh node and the Designer renders it laid out; agents can read/write layout like anything else. The daemon's ignore-contract keeps this honest.
 - Conflict handling (file changed on disk / by an agent since read): the daemon's, not the Designer's. DAEMON §9.3 makes an overwrite conditional on the `ETag` a `GET` returned, so a stale `PUT` is refused with the current text and a diff before it reaches the disk — the Designer's part is to carry the tag it read and to render the refusal, and it could not silent-overwrite if it tried. Agents and humans editing the same files is the _expected_ condition, not an edge case (SCOPE §4).
 
@@ -55,8 +68,8 @@ Notably absent: services, blocks-in-services, connections, layout — all of tha
 
 ## 6. Live inspection
 
-- **Taps**: click a connection on a running service → `POST /taps` → live sampled signal stream rendered on-canvas (throughput badge on edges; expandable signal inspector; expression-failure events annotated in-stream, per DAEMON-SPEC §6). This is the nio killer feature (SCOPE §3.12) and gets priority over aesthetics.
-- **Logs**: per-service/per-instance streamed views (`/logs/stream`), filterable, correlated to canvas selection.
+- **Taps**: click a connection on a running service → `POST /taps` → live sampled signal stream rendered on-canvas (throughput badge on edges; expandable signal inspector; expression-failure events annotated in-stream, per DAEMON-SPEC §6). This gets priority over aesthetics — and note it is the one major surface with **no nio precedent to imitate** (SCOPE §3.12's correction): nio observed a connection by wiring a Logger block into it. Design it from what an operator needs, not from an archive.
+- **Logs**: per-service/per-instance streamed views (`/logs/stream`), filterable, correlated to canvas selection. nio's logger panel is worth copying closely, and it is reconstructed: a dockable panel over the canvas with a `clear` control and an expand toggle, lines of `[timestamp][LEVEL][service.block] <payload>`, level settable per service *and* per block, historical lines loaded before the stream is joined. It printed **every** signal rather than a sample, which is right for a log and wrong for a tap — the two surfaces differ deliberately.
 - Node dashboard: per-System health, service statuses, restart counts, error summaries.
 
 ## 7. Deployment flows (SCOPE §3.7)
