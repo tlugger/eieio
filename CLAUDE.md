@@ -85,8 +85,14 @@ Bottom-up, most-specified first. Do not start a later item because an earlier on
 2. **`expr`** — parser → static analysis → interpreter → budgets, plus `expr-tests/` conformance vectors (EXPR §11). The most completely specified component in the repo; it should need no design decisions.
 3. **`manifest`** — schema types, parsing, WASM import-section cross-check (ABI §4.3, §11), `manifest.schema.json`.
 4. **`host-core` + `daemon` skeleton** — lifecycle driver, executor, router; load a block and route a signal.
-5. **`block-sdk`** + first golden block, then the reference harness (ABI §13).
-6. Service file format + management API, then the remaining SCOPE §7 sequence.
+5. **`block-sdk`** + first golden block, then the reference harness (ABI §13). ✅
+6. Service file format + management API (DAEMON §2, §9). ✅
+7. Pub/sub transport + cross-node signals (DAEMON §7). ✅
+8. **CLI + agent tooling (MCP)** — `eio` is built; `eio mcp` (SCOPE §4) is the current work.
+9. Designer UI — nothing built; DESIGNER-SPEC needs its §10 expansion first.
+10. Leaf runtime + firmware build pipeline — LEAF-SPEC is undrafted.
+
+Items 1–4 are ✅ too. The authoritative list is SCOPE §7, with the epic-to-item mapping in §7.1; this is the same sequence, annotated.
 
 ## Invariants worth stating twice
 
