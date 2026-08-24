@@ -12,6 +12,7 @@ pub mod blocks;
 pub mod client;
 pub mod config;
 pub mod logs;
+pub mod mcp;
 pub mod node;
 pub mod service;
 pub mod services;

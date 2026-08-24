@@ -20,7 +20,13 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// One configured node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is hand-written, not derived (below): this is the one type in the process that
+/// holds a node's bearer token in memory across its whole lifetime, so it is the one type
+/// where "nothing happens to print it" is not good enough — a `{:?}` reachable from a derive
+/// is a `{:?}` a future change can reach by accident. Structural, not disciplinary, the same
+/// posture `client.rs`'s `envelope_error` already keeps for the wire (eieio-yck.1, eieio-8yq.10).
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeEntry {
     /// The management API's base URL, e.g. `http://10.0.0.5:7777` (DAEMON §9).
     pub addr: String,
@@ -28,6 +34,23 @@ pub struct NodeEntry {
     /// operator has not yet copied a token for can still be named for `list`/`set-default`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for NodeEntry {
+    /// Renders `token` as present-or-absent, never as its bytes.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeEntry")
+            .field("addr", &self.addr)
+            .field(
+                "token",
+                &self
+                    .token
+                    .as_ref()
+                    .map(|_| "<redacted>")
+                    .unwrap_or("<none>"),
+            )
+            .finish()
+    }
 }
 
 /// The file itself.
@@ -157,5 +180,55 @@ impl Config {
         }
         let names: Vec<&str> = self.nodes.keys().map(String::as_str).collect();
         format!(" (configured: {})", names.join(", "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! `NodeEntry::fmt` is the structural half of the auth-leak requirement `mcp.rs`'s module
+    //! doc restates (eieio-yck.1, eieio-8yq.10): a test that greps a command's *output* for a
+    //! token is necessary and not sufficient, because it says nothing about a `{:?}` nobody
+    //! happened to call yet. This asserts the redaction directly, on the type, so a later
+    //! `format!("{entry:?}")` dropped into a `tracing::debug!` or a `dbg!()` cannot reintroduce
+    //! the leak the derive would have allowed.
+
+    use super::*;
+
+    #[test]
+    fn no_debug_rendering_of_a_node_entry_can_print_its_token() {
+        let with_token = NodeEntry {
+            addr: String::from("http://10.0.0.5:7777"),
+            token: Some(String::from("s3cr3t-token-do-not-print-me")),
+        };
+        let rendered = format!("{with_token:?}");
+        assert!(
+            !rendered.contains("s3cr3t-token-do-not-print-me"),
+            "NodeEntry's Debug leaked the token: {rendered}"
+        );
+        assert!(rendered.contains("redacted"), "{rendered}");
+        assert!(
+            rendered.contains("http://10.0.0.5:7777"),
+            "the address is not secret and Debug should still be useful: {rendered}"
+        );
+
+        let without_token = NodeEntry {
+            addr: String::from("http://10.0.0.5:7777"),
+            token: None,
+        };
+        assert!(format!("{without_token:?}").contains("none"));
+
+        // The same guarantee holds through `Config`, which a caller is more likely to have a
+        // handle to than a bare `NodeEntry`.
+        let mut config = Config::default();
+        config.add(
+            String::from("kitchen"),
+            String::from("http://10.0.0.5:7777"),
+            Some(String::from("s3cr3t-token-do-not-print-me")),
+        );
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("s3cr3t-token-do-not-print-me"),
+            "Config's derived Debug reached the token through NodeEntry: {rendered}"
+        );
     }
 }

@@ -4,7 +4,9 @@
 //! tree here — [`node`], [`blocks`], [`services`], [`state`], [`taps`], [`logs`] — drives one,
 //! over the management API (DAEMON §9), which is what makes this binary SCOPE §4's "CLI
 //! parity": one surface, reachable by a person or an agent, connectable to every node in a
-//! System by name (`--node`, or the configured default — see [`config`]).
+//! System by name (`--node`, or the configured default — see [`config`]). [`mcp`] is the same
+//! reach offered as MCP tools instead of subcommands, one per node named explicitly rather than
+//! through `--node` or a default (see its own module doc for why).
 //!
 //! # Not `cargo eio`, and not the daemon
 //!
@@ -21,7 +23,7 @@
 //! and every other command in it talks to whichever node `--node` names.
 
 use clap::{Parser, Subcommand};
-use eio_cli::{blocks, logs, node, service, services, state, taps};
+use eio_cli::{blocks, logs, mcp, node, service, services, state, taps};
 
 /// The `eio` entry point.
 #[derive(Debug, Parser)]
@@ -62,6 +64,8 @@ enum Command {
     /// The node's log, live and filtered (DAEMON §9.6, §11).
     #[command(subcommand)]
     Logs(logs::Logs),
+    /// The agent surface: MCP over stdio, reaching every node in `nodes.toml` (SCOPE §4).
+    Mcp,
 }
 
 #[derive(Debug, clap::Args)]
@@ -84,6 +88,7 @@ fn main() -> std::process::ExitCode {
         Command::Taps(command) => taps::run(command, node),
         Command::Tap(args) => taps::watch(&args.service, &args.connection, node),
         Command::Logs(command) => logs::run(command, node),
+        Command::Mcp => mcp::run(),
     };
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,

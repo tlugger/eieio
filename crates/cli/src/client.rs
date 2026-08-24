@@ -274,7 +274,11 @@ struct ApiError {
 /// Never includes anything from the *request* — headers, in particular, which is where this
 /// client's `Authorization: Bearer <token>` lives (DAEMON §9.1). Only the response body, which
 /// a node never has reason to echo a caller's own token back inside.
-fn envelope_error(status: u16, body: &[u8]) -> anyhow::Error {
+///
+/// `pub(crate)`, not private: `mcp.rs`'s bounded tap/log reads open their own short-lived
+/// stream (a caller-chosen deadline `Client::stream_tap`/`stream_logs` do not take), and reuse
+/// this rather than a second rendering of DAEMON §9.2's envelope.
+pub(crate) fn envelope_error(status: u16, body: &[u8]) -> anyhow::Error {
     match serde_json::from_slice::<ApiError>(body) {
         Ok(error) => {
             let mut message = format!("{} ({status}): {}", error.error, error.message);
@@ -587,7 +591,11 @@ impl Client {
 /// terminated block. `id:`, `retry:` and `:comment` lines — axum's keep-alive is the last of
 /// those — are read and discarded, exactly as the SSE spec says a client that does not use them
 /// should.
-fn read_sse(
+///
+/// `pub(crate)`: `mcp.rs`'s `read_tap`/`read_logs` parse the same wire format over a
+/// connection they open themselves (so they can bound it by a deadline `Client` does not take),
+/// and a second SSE parser would be a second place to get blank-line framing wrong.
+pub(crate) fn read_sse(
     mut reader: impl BufRead,
     mut on_event: impl FnMut(&str, &str) -> Result<()>,
 ) -> Result<()> {

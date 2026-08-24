@@ -58,6 +58,20 @@ serde_json = { workspace = true, default-features = false, features = ["std"] }
 # no other crate wants a TOML writer that forgets comments.
 toml = { workspace = true, features = ["display", "std"] }
 
+# `eio mcp` (SCOPE §4): the agent surface, over stdio. See `src/mcp.rs`'s module doc for why
+# tools are derived at compile time from this crate's own request structs rather than from a
+# live `/openapi.json` fetch (`rmcp-openapi`'s approach) — the short version is that a fetch
+# would make the tool *list* depend on a node being reachable, which the multi-node point of
+# this feature (SCOPE §4) rules out.
+rmcp.workspace = true
+
+# The async runtime `rmcp`'s stdio transport needs (`tokio::io::stdin`/`stdout`, `io-std`) and
+# that `mcp.rs` uses for `spawn_blocking` around every blocking `ureq` call `Client` makes —
+# added on top of the workspace baseline (`rt`, `macros`, ... already there for `eio-daemon`)
+# rather than making this binary async throughout: every other command here stays exactly as
+# blocking as it was (this crate's own module doc, "one process making one call and exiting").
+tokio = { workspace = true, features = ["io-std"] }
+
 [dev-dependencies]
 # `tests/openapi_surface.rs` (eieio-yck.3) calls `Document::openapi()` in-process to check
 # DAEMON-SPEC §9's *live* surface against `client.rs`'s `ENDPOINTS`, closing the gap
@@ -72,6 +86,28 @@ eio-daemon.workspace = true
 # for the same reason `eio-daemon` above is: no command in this binary builds an OpenAPI
 # document, only this test reads one.
 utoipa.workspace = true
+
+# `tests/mcp_golden_path.rs` drives a real node through `eio mcp`'s tools (the plan's
+# "transcript criterion"). `eio_daemon::api::tests::Harness` is `#[cfg(test)]`-gated inside
+# `eio-daemon` itself, so it does not exist in the `rlib` a dev-dependent links against — this
+# is `eio_daemon::run_node`'s counterpart instead (see that test's module doc), and it needs a
+# cached block to boot a service against. The golden blocks are how every other harness in this
+# workspace gets one (ABI §13.2); nothing here adds a second way to build them.
+eio-conformance.workspace = true
+
+# `tests/mcp_golden_path.rs` and `tests/mcp_token_leak.rs` drive the real `eio mcp` *binary* as
+# a child process over its real stdio transport (`transport-child-process`, `client`) — the
+# same shape a real MCP-speaking agent would use, and the only way to prove the server this
+# crate ships actually speaks the protocol rather than just calling its own Rust methods.
+# Dev-only: this binary's production `[dependencies]` entry above has no client half.
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+
+# `tokio::process::Command` for the same two tests (`process`), on a multi-thread runtime
+# (`rt-multi-thread`) so the in-process daemon `mcp_golden_path.rs` boots via `eio_daemon::run_node`
+# and the child `eio mcp` process's stdio pump can make progress concurrently rather than
+# fighting for one executor thread. Dev-only, on top of the production `[dependencies]` entry's
+# `rt`, current-thread runtime above.
+tokio = { workspace = true, features = ["process", "rt-multi-thread"] }
 
 [lints]
 workspace = true

@@ -317,6 +317,12 @@ eio-service = { path = "crates/service", version = "0.1.0" }
 eio-signal = { path = "crates/signal", version = "0.1.0" }
 eio-test-host = { path = "crates/test-host", version = "0.1.0" }
 
+# `eio mcp` (SCOPE §4): MCP over stdio, as a mode of the CLI rather than an endpoint of the
+# node (DAEMON §9: "a node serves REST and nothing else"). The official Rust SDK. `schemars`
+# is on for compile-time JSON Schema derivation from each tool's parameter struct; `transport-io`
+# for the stdio transport (`server` and `macros` are this crate's own defaults).
+rmcp = { version = "3.1.4", features = ["schemars", "transport-io"] }
+
 # Lint levels are shared here; the -D warnings escalation belongs to the `just
 # lint` recipe, so a local `cargo build` stays usable while CI stays strict.
 # Crates opt in with `[lints] workspace = true`.
