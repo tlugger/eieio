@@ -142,7 +142,7 @@ Cross-device signal flow is native pub/sub: publish/subscribe blocks are ordinar
 
 - **Transport is MQTT**, via `rumqttc` behind DAEMON §7's bridge trait. Chosen for the embedded north star: MQTT is the one protocol a leaf tier plausibly speaks, and brokers are everywhere. The bridge is a **normative boundary, not a convenience** — no MQTT concept may appear above it. QoS belongs to the bridge and not to the router, topics do not appear in `host-core` or the ABI, and no service semantics may assume a retained message. Guarantees are stated in this project's own vocabulary (§3.4) and *mapped* onto QoS at the bridge; if a second transport could not satisfy them without changing anything above the trait, the boundary is in the wrong place.
 - **The broker is an elected node, and only a daemon-class one is eligible.** A leaf tier cannot host a broker, so it is never a candidate. Electing from within the System rather than depending on an external broker keeps a System self-contained — the smallest useful deployment needs nothing installed beside it. The Designer MAY offer a UI to **pin** a specific node as broker; that is an override for an operator who wants one, not the mechanism, and it does not make the Designer infrastructure: §4's peer-client rule still holds and the Designer never carries data-plane traffic. The election *mechanism* — candidate set, lease, handover, and the case where no daemon-class node is reachable — is a DAEMON §7 expansion item, not settled here.
-- **Node discovery is static configuration.** A node's own config names the broker candidates, and the Designer's database holds node addresses, which §3.8 already permits it to. mDNS is an OPTIONAL convenience a daemon-class node MAY offer and nothing in the protocol may depend on it: it is LAN-only, routinely firewalled, and would put "which System am I in" within reach of anything on the subnet while §3.13's transport security is still open.
+- **Node discovery is static configuration.** A node's own config names the broker candidates, and the Designer's database holds node addresses, which §3.8 already permits it to. mDNS is an OPTIONAL convenience a daemon-class node MAY offer and nothing in the protocol may depend on it: it is LAN-only, routinely firewalled, and would put "which System am I in" within reach of anything on the subnet while §3.11's transport security is still open.
 
 ### 3.10 Management API: REST + OpenAPI
 
@@ -246,7 +246,7 @@ The project is `eieio`; the identifier prefix is `eio` — short enough for hot-
 4. `host-core` + `daemon` skeleton — lifecycle driver, executor, router; load and run a block, route signals locally.
 5. `block-sdk` + first golden block, then the conformance harness (ABI §13).
 6. Service file format + management API (DAEMON-SPEC §2, §9).
-7. Pub/sub transport decision + cross-node signals (§3.9 OPEN).
+7. Pub/sub transport + cross-node signals (§3.9, settled: MQTT behind DAEMON §7's bridge).
 8. CLI + agent tooling (MCP).
 9. Designer UI.
 10. Leaf runtime + firmware build pipeline.
@@ -265,7 +265,7 @@ The implementation phase is tracked in the beads issue tracker (`bd`, see CLAUDE
 |`eieio-7d8`|`block-sdk`, `cargo-eio`, TestHost, conformance harness, golden + hostile blocks|5|
 |`eieio-8yq`|Service files, `node.toml`, block manager, management API, state store, taps/logs|6|
 |`eieio-p0k`|CI/CD (see gates below)|cross-cutting|
-|`eieio-2vm`|Pub/sub decision (§3.4/§3.9 OPEN) + bridge + system blocks|7|
+|`eieio-2vm`|Pub/sub transport (§3.4, §3.9) + bridge + system blocks|7|
 |`eieio-yck`|CLI + daemon MCP surface|8|
 |`eieio-m9s`|Designer UI|9|
 |`eieio-x7g`|LEAF-SPEC draft, then leaf runtime + firmware pipeline|10|

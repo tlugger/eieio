@@ -143,7 +143,7 @@ Bottom-up, most-specified first:
 - [ ] Designer UI
 - [ ] Leaf runtime and firmware build pipeline
 
-Still **OPEN** in [`docs/SCOPE.md`](docs/SCOPE.md), and tracked there rather than here: normative floors for `max_payload`/`max_batch`, transport security and node↔node auth on the bus, the metrics surface, and block failure policy.
+Still **OPEN** in [`docs/SCOPE.md`](docs/SCOPE.md), and tracked there rather than here: normative floors for `max_payload`/`max_batch`; transport security on the LAN, per-node identity and revocation on the bus, and token rotation (the bus pre-shared key is a floor, not an answer); what `cargo eio publish` does with a SemVer `+build` suffix an OCI tag cannot hold; the metrics surface; and block failure policy.
 
 ## Prior art
 
