@@ -1044,6 +1044,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "eio-expr-wasm"
+version = "0.1.0"
+dependencies = [
+ "eio-expr",
+ "eio-signal",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "eio-host-core"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,36 @@
+[package]
+name = "eio-expr-wasm"
+description = "wasm-bindgen surface over eio-expr for the Designer's in-browser expression linter (DESIGNER-SPEC §5, eieio-m9s.3)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `cdylib` is what `wasm-pack build` reads for the WASM binary; `rlib` is kept so
+# ordinary `cargo test`/`cargo build` on the host still work without wasm-bindgen's
+# JS glue getting involved.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The one implementation of the language (EXPR-SPEC). This crate adds nothing to
+# it — no re-parsing, no re-wording of errors — it only translates types across
+# the wasm-bindgen boundary.
+eio-expr.workspace = true
+eio-signal.workspace = true
+
+# `default-features = false` + `alloc`: the workspace pin (Cargo.toml) is chosen
+# for the ★ crates, and reusing it here means this crate's `Value`↔JSON tagged
+# notation (matching `expr-tests/README.md`'s) is decoded by the same serde this
+# repo already depends on, not a second copy.
+serde = { workspace = true, features = ["alloc", "derive"] }
+serde_json = { workspace = true, features = ["alloc"] }
+
+# The wasm-bindgen boundary itself. Pinned to the exact version wasm-pack 0.12.1's
+# bundled `wasm-bindgen-cli` expects; a mismatch is a hard build error, not a
+# warning (wasm-bindgen requires the proc-macro and CLI to match exactly).
+wasm-bindgen = "0.2.127"
+
+[lints]
+workspace = true
