@@ -1,0 +1,159 @@
+/*
+ * Design tokens for the eieio Designer shell.
+ * Visual identity per DESIGNER-SPEC §5: cool slate chrome, a calm light
+ * canvas, cyan connections — adapted from nio, not copied wholesale.
+ *
+ * Theme resolution order (explicit toggle wins over OS preference):
+ *   1. bare :root                       -> light palette (the default values)
+ *   2. prefers-color-scheme: dark       -> dark palette, only when no explicit choice
+ *   3. [data-theme="dark"] / ="light"   -> explicit choice always wins
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Chrome (rail, tree, toolbar, modals) */
+  --chrome-bg: #eef0f4;
+  --chrome-bg-raised: #ffffff;
+  --chrome-border: #d5d9e0;
+  --chrome-text: #1f2430;
+  --chrome-text-muted: #5b6272;
+
+  /* Canvas */
+  --canvas-bg: #f7f8fa;
+  --canvas-dots: #d7dbe3;
+  --canvas-edge: #0891b2; /* cyan connections */
+  --canvas-edge-error: #d1495b;
+
+  /* Interactive */
+  --accent: #0e7490;
+  --accent-contrast: #ffffff;
+  --focus-ring: #2563eb;
+
+  /* Run-state (meaningful colour, unlike the block-card colour) */
+  --state-running: #15803d;
+  --state-stopped: #5b6272;
+  --state-errored: #b91c1c;
+
+  /* Block card chrome (the coloured square itself is per-name, see colour.ts) */
+  --card-bg: #ffffff;
+  --card-border: #d5d9e0;
+  --card-name: #12141a;
+  --card-type: #6b7280;
+  --card-badge-bg: #b91c1c;
+  --card-badge-fg: #ffffff;
+
+  --shadow-modal: rgba(15, 23, 42, 0.28) 0 20px 40px -12px;
+
+  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'SF Mono', Consolas, monospace;
+
+  font: 14px/1.45 var(--sans);
+  color: var(--chrome-text);
+  background: var(--canvas-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --chrome-bg: #1a1c22;
+    --chrome-bg-raised: #22252c;
+    --chrome-border: #363a45;
+    --chrome-text: #e6e8ef;
+    --chrome-text-muted: #9aa1b1;
+
+    --canvas-bg: #14161b;
+    --canvas-dots: #2a2d36;
+    --canvas-edge: #22d3ee;
+    --canvas-edge-error: #f87171;
+
+    --accent: #22d3ee;
+    --accent-contrast: #0b1220;
+    --focus-ring: #60a5fa;
+
+    --state-running: #4ade80;
+    --state-stopped: #9aa1b1;
+    --state-errored: #f87171;
+
+    --card-bg: #22252c;
+    --card-border: #363a45;
+    --card-name: #f3f4f6;
+    --card-type: #9aa1b1;
+    --card-badge-bg: #f87171;
+    --card-badge-fg: #1a1c22;
+
+    --shadow-modal: rgba(0, 0, 0, 0.6) 0 20px 40px -12px;
+  }
+}
+
+:root[data-theme='dark'] {
+  --chrome-bg: #1a1c22;
+  --chrome-bg-raised: #22252c;
+  --chrome-border: #363a45;
+  --chrome-text: #e6e8ef;
+  --chrome-text-muted: #9aa1b1;
+
+  --canvas-bg: #14161b;
+  --canvas-dots: #2a2d36;
+  --canvas-edge: #22d3ee;
+  --canvas-edge-error: #f87171;
+
+  --accent: #22d3ee;
+  --accent-contrast: #0b1220;
+  --focus-ring: #60a5fa;
+
+  --state-running: #4ade80;
+  --state-stopped: #9aa1b1;
+  --state-errored: #f87171;
+
+  --card-bg: #22252c;
+  --card-border: #363a45;
+  --card-name: #f3f4f6;
+  --card-type: #9aa1b1;
+  --card-badge-bg: #f87171;
+  --card-badge-fg: #1a1c22;
+
+  --shadow-modal: rgba(0, 0, 0, 0.6) 0 20px 40px -12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--canvas-bg);
+  color: var(--chrome-text);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+#app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
