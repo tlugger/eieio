@@ -86,8 +86,10 @@ pub trait Host {
     /// `true` by default, because §10 requires it of a host: "every callback runs under a
     /// host-enforced budget: fuel (wasmtime), epoch interruption, or watchdog (WAMR/wasm3)".
     ///
-    /// A *binding* may still lack one — wasm3 has no fuel counter, and a watchdog is the leaf
-    /// runtime's to add rather than the interpreter's to provide. A host that answers `false`
+    /// A *binding* may still lack one — neither leaf interpreter offers one here (wasm3 has no
+    /// fuel counter at all; WAMR's `wasm_runtime_set_instruction_count_limit` is compiled out
+    /// of the linked library), and a watchdog is the leaf runtime's to add rather than the
+    /// interpreter's to provide. A host that answers `false`
     /// has scenarios expecting a budget death skipped by name instead of hanging, which is the
     /// only other thing an unbudgeted host could do with a block that never returns.
     fn enforces_budgets(&self) -> bool {
@@ -121,9 +123,10 @@ pub trait Host {
     /// feature it objected to, and wasmtime reports eight of the nine.
     ///
     /// A host answering `false` still has the refusal itself asserted — only the name is left
-    /// unchecked. wasm3 is that host: every one of its rejections is `unknown opcode`,
-    /// `restricted opcode`, `out of order Wasm section` or `malformed Wasm binary`, and a host
-    /// cannot invent a name its engine does not give it.
+    /// unchecked. Both leaf interpreters are such hosts: wasm3 answers `unknown opcode`,
+    /// `restricted opcode`, `out of order Wasm section` or `malformed Wasm binary`, and WAMR
+    /// answers opcode- and section-level parse errors of its own (`unsupported opcode fd`,
+    /// `invalid limits flags`, …). A host cannot invent a name its engine does not give it.
     fn names_refusals(&self) -> bool {
         true
     }

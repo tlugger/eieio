@@ -74,7 +74,7 @@ A rebuild of [nio](https://web.archive.org/web/20190716020124/https://docs.n.io/
 
 **Two node classes, one design flow.** Daemon-class nodes hot-load blocks and expose a management API. Leaf-class nodes get services AOT-compiled into firmware. Deploying to a leaf takes extra steps, not a different way of designing.
 
-**Agents are a first-class client.** Services are text, manifests are JSON Schema, the API ships OpenAPI, expressions are trivially generated and validated. Anything the Designer can do, an agent can reach through the same API.
+**Agents are a first-class client.** Services are text, manifests are JSON Schema, the API ships OpenAPI, expressions are trivially generated and validated. Anything the Designer can do, an agent can reach through the same API — `eio mcp` serves it as MCP over stdio, and because it is a mode of the CLI rather than an endpoint of the daemon, one agent session reaches every node in the System instead of one node per connection.
 
 ## Components
 
@@ -93,11 +93,12 @@ crates/
   service/      the service-file schema, parser and validator
   daemon/       the node: tokio, wasmtime, executor, router, OCI client, management API,
                   MQTT pub/sub bridge
-  cli/          the `eio` binary — management-API parity, multi-node
+  cli/          the `eio` binary — management-API parity, multi-node, and `eio mcp`,
+                  the MCP surface an agent drives a whole System through
   cargo-eio/    `cargo eio new | build | test` for block authors
   test-host/    runs a block natively, no wasm — SDK §6.1's fast inner loop
   conformance/  the reference wasmtime harness plus its scenario suite, run against
-                  wasmtime and wasm3
+                  three engines: wasmtime, wasm3 and WAMR
 expr-tests/     host-agnostic vectors: the expression language, ABI property types,
                 canonical CBOR
 examples/
@@ -136,10 +137,10 @@ Bottom-up, most-specified first:
 - [x] `signal`, `expr`, `manifest` — the `no_std` foundation, with conformance vectors
 - [x] `host-core` + `daemon` — lifecycle, executor, router; `eio:state`, `eio:timer`, taps
 - [x] `block-sdk`, `block-sdk-macros`, `cargo-eio`, `test-host` — blocks are written in Rust
-- [x] `conformance` — reference harness, golden blocks, scenario suite on two engines
+- [x] `conformance` — reference harness, golden blocks, scenario suite on three engines
 - [x] Service files, node config, block cache and management API
 - [x] Pub/sub transport and cross-node signals — MQTT behind a swappable bridge
-- [ ] CLI and agent (MCP) tooling *(in progress)*
+- [x] CLI and agent tooling — `eio` reaches every node, and `eio mcp` is the same surface for an agent
 - [ ] Designer UI
 - [ ] Leaf runtime and firmware build pipeline
 

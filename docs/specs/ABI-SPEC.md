@@ -108,6 +108,8 @@ Every one is enabled by default by rustc for `wasm32-unknown-unknown`. **Two are
 
 Measured on wasm3 (`crates/conformance/tests/wasm3.rs`), instruction by instruction, with each case returning a value only correct execution produces. Of the six proposals, four run whole. The other two do not, and their remainder is **carved out of the accepted set**: a module using anything in the right-hand column below is non-conformant and MUST be refused, with a rejection naming both the instruction and its proposal.
 
+**The subset is the floor across leaf engines, not a description of one.** WAMR — the other engine SCOPE §3.2 names for the leaf tier, measured the same way in `crates/conformance/tests/wamr.rs` — runs the *whole* of bulk memory and reference types, every instruction in the right-hand column included. That widens nothing. The carve-out stays where it is because a block is portable or it is not: a module using `table.copy` runs on WAMR and fails on wasm3, and the accepted set is what runs on **every** engine the platform claims. An entry leaves the right-hand column when *no* named leaf engine refuses it, not when one of them stops.
+
 |Proposal|Accepted|Carved out — wasm3 refuses|
 |---|---|---|
 |bulk memory|`memory.copy`, `memory.fill`|`memory.init`, `data.drop`, `table.init`, `table.copy`, `elem.drop`|
@@ -121,7 +123,7 @@ Measured on wasm3 (`crates/conformance/tests/wasm3.rs`), instruction by instruct
 
 The engine owns the seventh proposal *when it refuses one*. Measured, wasm3 does not always. Three proposals outside the six are not refused by it at all — it loads, compiles and **runs** them, while wasmtime refuses each by name:
 
-|Proposal|What the leaf engine runs|
+|Proposal|What wasm3 runs (WAMR refuses all three)|
 |---|---|
 |tail call|`return_call` compiles and executes, returning what a correct implementation returns|
 |memory64|`(memory i64 1)` is accepted and instantiated|
@@ -129,7 +131,7 @@ The engine owns the seventh proposal *when it refuses one*. Measured, wasm3 does
 
 For the two memory flags it is almost certainly reading the encoding and dropping it rather than implementing the proposal — an `i64` index quietly truncated, a shared memory that is not shared. That is a silent misinterpretation, and worse than an honest refusal: the block works on the daemon and is wrong on the leaf. A hand-written `.wat` or a future non-Rust SDK (SDK §7) is all it takes to produce one.
 
-A gap in an engine's refusals is not a gap in the platform, so **the loader refuses these three** — for them and for nothing else. That bound is what keeps this from becoming the second, slower-moving definition of the accepted set: an entry earns its place by being *measured*, and leaves the day the engine refuses it and `crates/conformance/tests/wasm3.rs` fails. Every other proposal outside the six is refused by both engines, which is where this section leaves it: a loader that answered for SIMD as well would be claiming to validate MVP, which it does not.
+A gap in an engine's refusals is not a gap in the platform, so **the loader refuses these three** — for them and for nothing else. That bound is what keeps this from becoming the second, slower-moving definition of the accepted set: an entry earns its place by being *measured*, and leaves the day the engine refuses it and `crates/conformance/tests/wasm3.rs` fails. Every other proposal outside the six is refused by every measured engine, which is where this section leaves it: a loader that answered for SIMD as well would be claiming to validate MVP, which it does not. WAMR refuses all nine, these three included — so this carve-out is wasm3's alone, and it stays for exactly as long as wasm3 is a named leaf engine.
 
 Threads is also refused for a reason no engine fix would remove: §1.2 gives an instance one caller at a time, so a second thread reaching into guest memory has no place in this ABI.
 
@@ -150,7 +152,7 @@ The consequence is intended and is not a loss: a module reaching for a seventh p
 
 Every half is pinned by tests, not by these tables. `crates/daemon/src/engine.rs` asserts a conformant host accepts each of the six, that it refuses the three measured gaps by name, and that the loader refuses both what this engine would have run: the carve-out and those three. `crates/conformance/tests/wasm3.rs` runs every accepted instruction on wasm3 checking the value it produces, asserts wasm3 refuses every carved-out one — and asserts it still *runs* all three measured gaps, so that a real refusal from it fails the suite and says so.
 
-**Producers need no feature flags**, and this is a correction. Earlier drafts of this section required `-C target-feature=-bulk-memory` and called it "the only flag needed". Measured on rustc 1.97.1, that flag changes nothing: the offending `memory.copy` lives in `alloc::string::String::clone` inside the precompiled `rust-std`, which no `RUSTFLAGS` rebuilds — nor does `-Z build-std`. Strict MVP was therefore not merely unnecessary, it was unreachable, and the rule made every Rust block unloadable while protecting a constraint wasm3 does not have. An ordinary `cargo build --release --target wasm32-unknown-unknown` produces a conformant module; `crates/conformance/tests/wasm3.rs` builds one with no flags at all and drives it through §5.1 on both engines.
+**Producers need no feature flags**, and this is a correction. Earlier drafts of this section required `-C target-feature=-bulk-memory` and called it "the only flag needed". Measured on rustc 1.97.1, that flag changes nothing: the offending `memory.copy` lives in `alloc::string::String::clone` inside the precompiled `rust-std`, which no `RUSTFLAGS` rebuilds — nor does `-Z build-std`. Strict MVP was therefore not merely unnecessary, it was unreachable, and the rule made every Rust block unloadable while protecting a constraint wasm3 does not have. An ordinary `cargo build --release --target wasm32-unknown-unknown` produces a conformant module; `crates/conformance/tests/wasm3.rs` and `crates/conformance/tests/wamr.rs` each build one with no flags at all and drive it through §5.1.
 
 Widening this set further is a measurement, not a judgement call: a proposal — or an instruction within one — belongs here when the toolchain emits it *and* the leaf tier runs it, and the suite is where that is established. A carved-out instruction moves into the accepted set the day wasm3 executes it correctly and the negative test above starts failing; that failure is the notification.
 
