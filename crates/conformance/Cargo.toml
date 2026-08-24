@@ -49,6 +49,32 @@ wat.workspace = true
 # *reference* host, and wasm3 is the independent engine the reference is checked against.
 wasm3x = "0.1.0"
 
+# The fourth host (ABI §13, eieio-x7g.3): WAMR's fast interpreter, the AOT engine SCOPE §3.2
+# and SDK §5 name for ESP32-class leaf targets — AOT itself is eieio-7d8.21, parked on a
+# `wamrc` this machine cannot build, but the interpreter needs none of that. A *dev*-dependency
+# for the identical reason `wasm3x` is one: it builds a C runtime through cmake, and the
+# daemon dev-depends on this crate, so a library dependency would put that build in the
+# daemon's test path for nothing. The `Host` impl lives in `tests/wamr.rs`.
+#
+# `wamrx` (the safe wrapper `wamrx-sys` backs) is deliberately *not* a dependency here, and
+# that absence is worth explaining rather than leaving silent. Its `Linker::define_func`
+# closure is `Fn(&[Val], &mut [Val])` with no access to the calling instance at all — WAMR's
+# raw native calling convention hands the C trampoline an `exec_env`, but `wamrx` never
+# forwards it to the host closure — and every ABI §7 function that touches guest memory
+# (`log`, `emit`, `prop`, `state_*`, …) needs exactly that access. `wamrx::Module` and
+# `wamrx::Instance` compound it: their raw handles are `pub(crate)`, so there is no partial mix
+# of `wamrx` for module load/instantiation and raw FFI for native registration either. So
+# `tests/wamr.rs` registers its natives, loads, instantiates, and reads/writes guest memory
+# directly against `wamrx-sys`, the same layer `wamrx`'s own `Linker`/`Instance` are built on
+# one level up — including runtime init, since even that turned out not to be reusable:
+# `wamrx::Engine` tears the runtime down (and wipes its native registry with it) when its last
+# clone drops, which is fatal to a registration this file only ever wants to perform once
+# (`tests/wamr.rs`'s `ensure_runtime` doc has the measurement). None of this is a complaint
+# about `wamrx` — a safe wrapper without instance-scoped host state and with owned, hidden
+# handles is a perfectly good design for a guest that only calls exports — it just is not a
+# shape this ABI's host functions fit.
+wamrx-sys = "0.3.0"
+
 # The harness must consume any conforming `.wasm`, so there is deliberately no `eio-sdk`
 # here — that would be the coupling ABI §13's language-agnosticism rules out (SDK §7).
 # `tests/reference.rs` asserts its absence.
