@@ -175,8 +175,17 @@ LLM agents are a first-class client for designing, building, deploying, and intr
 
 - **Text artifacts before UI.** Service definitions are declarative files (3.8). Block manifests are machine-readable schemas (3.6). An agent can author a complete service without a canvas.
 - **Discoverable block specs.** JSON Schema manifests let an agent enumerate available blocks, their properties, ports, and capability requirements — the same data that renders Designer config panels.
-- **OpenAPI as tool surface.** The management API spec (3.10) is directly consumable as agent tooling; an MCP server per daemon is the natural packaging.
+- **OpenAPI as tool surface.** The management API spec (3.10) is directly consumable as agent tooling.
 - **CLI parity.** A CLI with full API parity, connectable to all nodes in a System.
+- **MCP is a mode of the CLI, not an endpoint of the node.** `eio mcp` speaks MCP over stdio and reaches every node in `~/.config/eieio/nodes.toml`. Three packagings were available and this one was chosen deliberately:
+
+  |Packaging|Why not|
+  |---|---|
+  |An MCP server inside each daemon|One server per node, so an agent holding a System juggles N connections and has no way to ask a question that spans them. It also widens what a node serves from one protocol to two — and the leaf tier (3.7) could never serve the second, so the agent surface would stop existing exactly where the platform is most interesting.|
+  |A sidecar deriving tools from `/openapi.json`|A third component to install, configure and version, whose entire content is a document plus a node address. The CLI already holds both.|
+  |A mode of the CLI|Chosen. The multi-node context, the token handling and the API client already exist there (5.1), and an agent gets the same reach an operator has, through the same credentials file, with nothing added to any node.|
+
+  What this buys is the target capability below at System scope rather than node scope: the agent addresses nodes by the names the operator gave them, and a tool that needs two nodes is an ordinary tool call. What it costs is that the agent must run the CLI locally — acceptable, because an agent that cannot run a local binary also cannot author the service files (3.8) it is being asked to deploy.
 - **Agent-legible expressions.** The micro-Lisp (3.5) is trivially generated and validated by an LLM.
 
 Target capability: a whole service can be built, configured, deployed, started, and introspected from a single agent prompt — in the Designer or via CLI.

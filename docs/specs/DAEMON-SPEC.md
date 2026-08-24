@@ -436,6 +436,8 @@ Policy is OPEN (SCOPE §3.13); the daemon ships the _mechanism_: per-instance re
 
 REST/JSON, with an OpenAPI document generated from the handlers and served at `/openapi.json`. **The document is the product, not a by-product.** SCOPE §4 makes an agent a peer client of the Designer, and §3.10 makes this spec its tool surface directly — so an operation's description is user-facing documentation, and an endpoint that appears in the document is a promise that it works. That is why generation is from the code rather than beside it, and why §9.5 requires the two to be checked against each other.
 
+**A node serves REST and nothing else.** The agent-facing MCP surface is a mode of the CLI (`eio mcp`, SCOPE §4) reading this document, not an endpoint here — so every operation an agent can reach is an operation in the table below, and there is no second surface for §9.5's check to miss.
+
 ```
 GET    /openapi.json                  this document (no auth)
 GET    /node                          identity, limits, budgets, versions
