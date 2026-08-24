@@ -38,9 +38,28 @@
 //! drops rather than blocks, only a loopback address nothing is listening on.
 //!
 //! **Out of scope, by the issue that added this:** hosting a broker when nothing answers
-//! (§7.1's "this node would host one" branch) and SCOPE §3.11's node-to-node auth. Both are
-//! separate decisions this transport does not make — see [`MqttBridge::connect`]'s docs for the
-//! first and the module's forced no-TLS build (`crates/daemon/Cargo.toml`) for the second.
+//! (§7.1's "this node would host one" branch). A separate decision this transport does not
+//! make — see [`MqttBridge::connect`]'s docs.
+//!
+//! # The bus key (SCOPE §3.11, DAEMON §7.1, eieio-2vm.5)
+//!
+//! [`MqttBridge::connect`] takes an optional `crate::pubsub::Key` and, when one is given,
+//! presents it as this connection's MQTT credential — required by a broker candidate that has
+//! one configured, ignored by one that does not. This raises the trust floor from "whichever
+//! node answers on a configured address is trusted to be that node" to "anyone with the key",
+//! and no further: no per-node identity, no revocation, and TLS stays out of this build
+//! (`crates/daemon/Cargo.toml`'s forced no-`rustls` `rumqttc` features) because the MCU leaf
+//! tier has to be able to do this too.
+//!
+//! [`dial`] tells apart the two ways a candidate can fail to become this bridge's broker: nobody
+//! answered at all (DAEMON §7.1's ordinary "nothing reachable"), or somebody answered and closed
+//! the connection during the handshake rather than completing it — the shape a wrong or missing
+//! key takes on the wire, since the fixture broker these tests dial
+//! ([`tests::spawn_embedded_broker`] with auth configured) never sends a failure `ConnAck`, only
+//! silence followed by a closed socket. [`MqttBridge::rejected`] counts the second kind, kept
+//! apart from [`MqttBridge::dropped`]'s count of publishes lost after connecting, so a bridge
+//! that never connects still lets an operator tell "nobody is listening" from "I am being
+//! rejected" — see [`tests::mqtt_bridge_distinguishes_a_wrong_key_from_an_unreachable_broker`].
 //!
 //! # System blocks are manifests, not modules
 //!
@@ -477,6 +496,22 @@ impl Bridge for InProcessBridge {
 /// mapping with one entry needs no knob.
 const QOS: rumqttc::QoS = rumqttc::QoS::AtMostOnce;
 
+/// The MQTT username every connection presents when `pubsub.toml` carries a `key`.
+///
+/// A fixed, non-secret constant rather than anything derived from this node — the pre-shared
+/// key is scoped to a bus, not a node (SCOPE §3.11 states plainly that this scheme carries no
+/// per-node identity), and MQTT's own CONNECT packet has no way to send a password without a
+/// username alongside it. Every connection to a keyed bus presents this same value; only the
+/// password half (the key itself) is checked.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read only by `dial`; see `MqttBridge::connect`'s own `expect`"
+    )
+)]
+const MQTT_USERNAME: &str = "eieio";
+
 /// How many outstanding requests (a publish or a subscribe not yet handed to the socket)
 /// `rumqttc`'s internal channel holds before [`MqttBridge::publish`] and
 /// [`MqttBridge::subscribe`] refuse rather than wait — the same non-blocking posture
@@ -615,6 +650,12 @@ pub struct MqttBridge {
     /// Every publish this bridge could not hand to the client, whether because nothing was
     /// connected or because the client's own request channel was full (DAEMON §6.2).
     dropped: Arc<AtomicU64>,
+    /// Every candidate that answered and then refused the connection during the handshake
+    /// (module docs, SCOPE §3.11, eieio-2vm.5) — kept apart from `dropped`, which counts a
+    /// publish lost *after* connecting, so the two can never be confused: a bridge that has
+    /// never connected has `dropped() == 0` regardless of why, and `rejected()` is the count
+    /// that tells an operator "somebody answered and said no" rather than "nobody answered".
+    rejected: Arc<AtomicU64>,
 }
 
 impl MqttBridge {
@@ -637,6 +678,11 @@ impl MqttBridge {
     /// the walk on [`RETRY_INTERVAL`] while every [`Bridge::publish`] on this handle drops,
     /// logged and counted like any other discard (DAEMON §6.2). A future that does implement
     /// hosting adds a branch here; it does not change this method's signature or its callers.
+    ///
+    /// `key`, when given, is presented as this connection's MQTT credential (module docs, SCOPE
+    /// §3.11, eieio-2vm.5) — `None` is the pre-existing behaviour and remains supported exactly
+    /// as before: a bus with no key presents none, and a candidate with none configured accepts
+    /// that.
     #[cfg_attr(
         not(test),
         expect(
@@ -651,18 +697,16 @@ impl MqttBridge {
         client_id: String,
         candidates: Vec<Candidate>,
         pinned: Option<String>,
+        key: Option<crate::pubsub::Key>,
     ) -> MqttBridge {
-        let client: Arc<Mutex<Option<rumqttc::AsyncClient>>> = Arc::new(Mutex::new(None));
-        let connected = Arc::new(AtomicBool::new(false));
-        let subscribers: Arc<MqttSubscribers> = Arc::new(Mutex::new(HashMap::new()));
-        let dropped = Arc::new(AtomicU64::new(0));
-
         let bridge = MqttBridge {
-            client: Arc::clone(&client),
-            connected: Arc::clone(&connected),
-            subscribers: Arc::clone(&subscribers),
-            dropped: Arc::clone(&dropped),
+            client: Arc::new(Mutex::new(None)),
+            connected: Arc::new(AtomicBool::new(false)),
+            subscribers: Arc::new(Mutex::new(HashMap::new())),
+            dropped: Arc::new(AtomicU64::new(0)),
+            rejected: Arc::new(AtomicU64::new(0)),
         };
+        let task = bridge.clone();
 
         std::thread::Builder::new()
             .name(String::from("eio-mqtt-bridge"))
@@ -671,15 +715,7 @@ impl MqttBridge {
                     .enable_all()
                     .build()
                     .expect("building the bridge task's own tokio runtime");
-                runtime.block_on(run(
-                    client_id,
-                    candidates,
-                    pinned,
-                    client,
-                    connected,
-                    subscribers,
-                    dropped,
-                ));
+                runtime.block_on(run(client_id, candidates, pinned, key, task));
             })
             .expect("spawning the bridge's connection thread");
 
@@ -698,6 +734,22 @@ impl MqttBridge {
     )]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::SeqCst)
+    }
+
+    /// Every candidate that has answered and then refused this bridge's connection during the
+    /// handshake since it was created — the "I am being rejected" half of SCOPE §3.11's
+    /// acceptance criterion, kept apart from [`Self::dropped`]'s "nobody is listening" half (see
+    /// [`DialError`]'s docs for how the two are told apart).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no metrics endpoint reads this yet; today's only caller is a test \
+                      asserting the rejection path"
+        )
+    )]
+    pub fn rejected(&self) -> u64 {
+        self.rejected.load(Ordering::SeqCst)
     }
 }
 
@@ -812,10 +864,44 @@ fn dispatch(topic: &str, payload: &[u8], subscribers: &MqttSubscribers, dropped:
     }
 }
 
+/// What went wrong dialing one candidate — the shape [`dial`] classifies every failure into, so
+/// [`run`] can tell DAEMON §7.1's ordinary "nothing reachable" apart from a wrong or missing bus
+/// key (module docs, SCOPE §3.11, eieio-2vm.5) rather than logging and counting both alike.
+///
+/// The classification is a network-level heuristic, not a protocol guarantee stated anywhere:
+/// [`tests::spawn_embedded_broker`]'s auth check never sends a failure `ConnAck` at all, per
+/// `rumqttd` 0.20's own implementation — it closes the socket having read the `Connect` packet
+/// and rejected it. A TCP handshake that completes and is then closed before a `ConnAck`
+/// arrives is the strongest signal available that *somebody*, not nobody, is on the other end,
+/// and it is also the shape a broker crashing mid-handshake would take — this type does not
+/// claim to know which. What it does claim, and what
+/// [`tests::mqtt_bridge_distinguishes_a_wrong_key_from_an_unreachable_broker`] proves, is that
+/// this shape is never produced by a candidate nothing is listening on.
+#[derive(Debug)]
+enum DialError {
+    /// No usable connection at the transport level: refused, timed out, or the far end was
+    /// never reached at all. DAEMON §7.1's ordinary "nothing reachable".
+    Unreachable(anyhow::Error),
+    /// A broker was there, and the connection ended during the handshake rather than
+    /// completing it — the shape a wrong or missing key takes on the wire.
+    Rejected(anyhow::Error),
+}
+
+impl std::fmt::Display for DialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DialError::Unreachable(error) | DialError::Rejected(error) => write!(f, "{error}"),
+        }
+    }
+}
+
 /// Attempts one full MQTT connection to `candidate` — DAEMON §7.1's "connects as an ordinary
 /// client" — bounded by [`DIAL_TIMEOUT`]. `Ok` means `candidate` answered and is now the broker
-/// this call sees; `Err` covers everything else a candidate walk treats alike: refused,
-/// unreachable, or slower than the timeout.
+/// this call sees; `Err` classifies everything else, per [`DialError`]'s own docs.
+///
+/// `key`, when given, is presented as this connection's MQTT credential under
+/// [`MQTT_USERNAME`] — never logged, never placed in an error message: every error this
+/// function builds names the failure shape, not the credential that produced it.
 #[cfg_attr(
     not(test),
     expect(
@@ -827,9 +913,13 @@ fn dispatch(topic: &str, payload: &[u8], subscribers: &MqttSubscribers, dropped:
 async fn dial(
     client_id: &str,
     candidate: &Candidate,
-) -> anyhow::Result<(rumqttc::AsyncClient, rumqttc::EventLoop)> {
+    key: Option<&crate::pubsub::Key>,
+) -> Result<(rumqttc::AsyncClient, rumqttc::EventLoop), DialError> {
     let mut options = rumqttc::MqttOptions::new(client_id, candidate.host.clone(), candidate.port);
     options.set_keep_alive(Duration::from_secs(30));
+    if let Some(key) = key {
+        options.set_credentials(MQTT_USERNAME, key.expose());
+    }
     let (client, mut eventloop) = rumqttc::AsyncClient::new(options, REQUEST_CAPACITY);
     eventloop
         .network_options
@@ -841,9 +931,38 @@ async fn dial(
         {
             Ok((client, eventloop))
         }
-        Ok(Ok(other)) => anyhow::bail!("expected a ConnAck, got {other:?}"),
-        Ok(Err(error)) => Err(error.into()),
-        Err(_) => anyhow::bail!("no answer within {DIAL_TIMEOUT:?}"),
+        // A `ConnAck` that arrives but says no is unambiguous: a broker answered and refused.
+        // `rumqttc`'s own connect handshake in fact turns this into `ConnectionRefused` below
+        // before this arm is ever reached (it never surfaces a failing `ConnAck` as an
+        // `Incoming` event) — this arm stays as the direct, if currently unreachable, reading
+        // of what a failing `ConnAck` means, in case a future `rumqttc` changes that.
+        Ok(Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(ack)))) => {
+            Err(DialError::Rejected(anyhow::anyhow!(
+                "the broker refused the connection: {:?}",
+                ack.code
+            )))
+        }
+        Ok(Ok(other)) => Err(DialError::Unreachable(anyhow::anyhow!(
+            "expected a ConnAck, got {other:?}"
+        ))),
+        // The compliant-broker case: a `ConnAck` with a failing code, surfaced by `rumqttc`'s
+        // own connect handshake as this variant rather than as an `Incoming` event (see above).
+        Ok(Err(rumqttc::ConnectionError::ConnectionRefused(code))) => Err(DialError::Rejected(
+            anyhow::anyhow!("the broker refused the connection: {code:?}"),
+        )),
+        // The fixture broker's case (this function's own docs): no `ConnAck` at all, just a
+        // socket closed mid-handshake. Narrowed to this one `StateError` variant rather than
+        // every `MqttState` error, because `dial`'s event loop has done nothing yet but this
+        // one handshake — nothing else here could produce the state machine's other errors.
+        Ok(Err(rumqttc::ConnectionError::MqttState(rumqttc::StateError::ConnectionAborted))) => {
+            Err(DialError::Rejected(anyhow::anyhow!(
+                "the broker closed the connection during the handshake"
+            )))
+        }
+        Ok(Err(error)) => Err(DialError::Unreachable(error.into())),
+        Err(_) => Err(DialError::Unreachable(anyhow::anyhow!(
+            "no answer within {DIAL_TIMEOUT:?}"
+        ))),
     }
 }
 
@@ -894,11 +1013,20 @@ async fn run(
     client_id: String,
     candidates: Vec<Candidate>,
     pinned: Option<String>,
-    client: Arc<Mutex<Option<rumqttc::AsyncClient>>>,
-    connected: Arc<AtomicBool>,
-    subscribers: Arc<MqttSubscribers>,
-    dropped: Arc<AtomicU64>,
+    key: Option<crate::pubsub::Key>,
+    // The five fields `MqttBridge::connect` already built its handle from, taken as the handle
+    // itself rather than five separate `Arc`s — a `MqttBridge` is exactly this task's shared
+    // state, and bundling it here is what keeps this signature under clippy's argument count
+    // rather than adding an `#[allow]` every future field would have to remember to extend.
+    bridge: MqttBridge,
 ) {
+    let MqttBridge {
+        client,
+        connected,
+        subscribers,
+        dropped,
+        rejected,
+    } = bridge;
     let candidates: Vec<Candidate> = match &pinned {
         Some(id) => candidates.into_iter().filter(|c| &c.id == id).collect(),
         None => candidates,
@@ -915,10 +1043,25 @@ async fn run(
     loop {
         let mut answered = false;
         for candidate in &candidates {
-            let (new_client, eventloop) = match dial(&client_id, candidate).await {
+            let (new_client, eventloop) = match dial(&client_id, candidate, key.as_ref()).await {
                 Ok(pair) => pair,
-                Err(error) => {
+                Err(DialError::Unreachable(error)) => {
                     tracing::debug!(candidate = %candidate.id, %error, "candidate did not answer");
+                    continue;
+                }
+                Err(DialError::Rejected(error)) => {
+                    // Never a `dropped` publish (module docs' distinction) — nothing was ever
+                    // handed to a connection, because there never was one. Counted and logged
+                    // apart from the ordinary "nothing reachable" case so an operator watching
+                    // this bridge can tell them apart (SCOPE §3.11, eieio-2vm.5's acceptance
+                    // criterion).
+                    rejected.fetch_add(1, Ordering::SeqCst);
+                    tracing::warn!(
+                        candidate = %candidate.id,
+                        %error,
+                        "candidate refused the connection during the handshake: check this \
+                         bus's key in pubsub.toml"
+                    );
                     continue;
                 }
             };
@@ -1377,8 +1520,18 @@ mod tests {
     /// process — the mechanism the module docs describe: a broker as a library dependency
     /// rather than a process a person or CI has to start. Returns the loopback port it is
     /// listening on.
-    fn spawn_embedded_broker() -> u16 {
+    ///
+    /// `auth`, when given, is `rumqttd`'s own static `(username, password)` credential check —
+    /// the fixture's way of requiring the key this issue adds, since `rumqttd` has no key
+    /// concept of its own, only an MQTT username/password pair. `None` is every pre-existing
+    /// caller: an open broker, exactly as before this parameter existed.
+    fn spawn_embedded_broker(auth: Option<(&str, &str)>) -> u16 {
         let port = free_loopback_port();
+        let auth = auth.map(|(username, password)| {
+            let mut pairs = HashMap::new();
+            pairs.insert(String::from(username), String::from(password));
+            pairs
+        });
         let mut v4 = HashMap::new();
         v4.insert(
             String::from("1"),
@@ -1391,7 +1544,7 @@ mod tests {
                     connection_timeout_ms: 5_000,
                     max_payload_size: 20_480,
                     max_inflight_count: 100,
-                    auth: None,
+                    auth,
                     external_auth: None,
                     dynamic_filters: false,
                 },
@@ -1446,15 +1599,16 @@ mod tests {
 
     #[tokio::test]
     async fn mqtt_bridge_delivers_a_publish_across_a_real_broker() {
-        let port = spawn_embedded_broker();
+        let port = spawn_embedded_broker(None);
         let candidates = vec![Candidate {
             id: String::from("only"),
             host: String::from("127.0.0.1"),
             port,
         }];
 
-        let publisher = MqttBridge::connect(String::from("publisher"), candidates.clone(), None);
-        let subscriber = MqttBridge::connect(String::from("subscriber"), candidates, None);
+        let publisher =
+            MqttBridge::connect(String::from("publisher"), candidates.clone(), None, None);
+        let subscriber = MqttBridge::connect(String::from("subscriber"), candidates, None, None);
         wait_connected(&publisher, "the publisher").await;
         wait_connected(&subscriber, "the subscriber").await;
 
@@ -1481,14 +1635,15 @@ mod tests {
         // The real-transport half of what `a_subscription_never_sees_what_was_published_
         // before_it_existed` already proves for the in-process transport: DAEMON §7's "retained
         // messages are never set" over an actual MQTT broker, not just this crate's stand-in.
-        let port = spawn_embedded_broker();
+        let port = spawn_embedded_broker(None);
         let candidates = vec![Candidate {
             id: String::from("only"),
             host: String::from("127.0.0.1"),
             port,
         }];
 
-        let publisher = MqttBridge::connect(String::from("publisher"), candidates.clone(), None);
+        let publisher =
+            MqttBridge::connect(String::from("publisher"), candidates.clone(), None, None);
         wait_connected(&publisher, "the publisher").await;
         assert_eq!(
             publisher.publish("eieio/greenhouse/temperature", batch(1)),
@@ -1497,7 +1652,7 @@ mod tests {
         // Give the publish time to actually reach the broker before anyone subscribes late.
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        let late = MqttBridge::connect(String::from("late"), candidates, None);
+        let late = MqttBridge::connect(String::from("late"), candidates, None, None);
         wait_connected(&late, "the late subscriber").await;
         let mut sub = late.subscribe("eieio/greenhouse/temperature");
 
@@ -1520,7 +1675,7 @@ mod tests {
             host: String::from("127.0.0.1"),
             port,
         }];
-        let bridge = MqttBridge::connect(String::from("node"), candidates, None);
+        let bridge = MqttBridge::connect(String::from("node"), candidates, None, None);
 
         // Long enough for at least one full walk-and-fail, short of the retry actually firing
         // twice — either way `is_connected` must read false, never block.
@@ -1533,6 +1688,122 @@ mod tests {
             "a publish with no broker connection must drop rather than block or error out"
         );
         assert_eq!(bridge.dropped(), 1, "the drop was logged and counted");
+        assert_eq!(
+            bridge.rejected(),
+            0,
+            "nothing answered at all, so nothing could have refused the connection either"
+        );
+    }
+
+    // ── the bus key (SCOPE §3.11, DAEMON §7.1, eieio-2vm.5) ──────────────────────────────────
+
+    #[tokio::test]
+    async fn mqtt_bridge_connects_when_its_key_matches_what_the_broker_requires() {
+        let port = spawn_embedded_broker(Some((MQTT_USERNAME, "the-bus-key")));
+        let candidates = vec![Candidate {
+            id: String::from("only"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+
+        let bridge = MqttBridge::connect(
+            String::from("node"),
+            candidates,
+            None,
+            Some(crate::pubsub::Key::new("the-bus-key")),
+        );
+        wait_connected(&bridge, "the bridge").await;
+        assert_eq!(
+            bridge.rejected(),
+            0,
+            "the right key must never be counted as a rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn mqtt_bridge_still_connects_with_no_key_against_an_unkeyed_broker() {
+        // The acceptance criterion in full: "`key` absent = no key presented, which is the
+        // current behaviour and must keep working". `None` here is the same argument every
+        // pre-existing test in this module already passes; this test just names the behaviour
+        // its own criterion rather than leaving it implicit in the others.
+        let port = spawn_embedded_broker(None);
+        let candidates = vec![Candidate {
+            id: String::from("only"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+
+        let bridge = MqttBridge::connect(String::from("node"), candidates, None, None);
+        wait_connected(&bridge, "the bridge").await;
+    }
+
+    /// The acceptance criterion this issue is most likely to fudge, made real: a wrong key must
+    /// be distinguishable from an unreachable broker, not just refused the same way. Compares
+    /// directly against [`mqtt_bridge_drops_and_counts_when_nothing_answers`]'s counts for the
+    /// unreachable case — that test never observes a `rejected` count, this one never observes
+    /// its connection actually succeed, and neither ever confuses `dropped` (a publish lost
+    /// after connecting) with `rejected` (a connection that was never accepted at all).
+    #[tokio::test]
+    async fn mqtt_bridge_distinguishes_a_wrong_key_from_an_unreachable_broker() {
+        let port = spawn_embedded_broker(Some((MQTT_USERNAME, "the-real-key")));
+        let candidates = vec![Candidate {
+            id: String::from("only"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+
+        let bridge = MqttBridge::connect(
+            String::from("node"),
+            candidates,
+            None,
+            Some(crate::pubsub::Key::new("a-wrong-key")),
+        );
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while bridge.rejected() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the wrong key was never observed as a rejection"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            !bridge.is_connected(),
+            "a wrong key must never leave the bridge connected"
+        );
+        assert_eq!(
+            bridge.dropped(),
+            0,
+            "nothing was ever connected, so nothing could have been dropped from a \
+             connection either — this failure is `rejected`, not `dropped`"
+        );
+    }
+
+    /// The other half of the same criterion: a *missing* key against a broker that requires one
+    /// must be refused too, and refused the same distinguishable way as a wrong one — DAEMON
+    /// §7.1's candidate "requires it" (this issue's own acceptance criterion), not merely
+    /// "prefers it".
+    #[tokio::test]
+    async fn mqtt_bridge_distinguishes_a_missing_key_from_an_unreachable_broker() {
+        let port = spawn_embedded_broker(Some((MQTT_USERNAME, "the-real-key")));
+        let candidates = vec![Candidate {
+            id: String::from("only"),
+            host: String::from("127.0.0.1"),
+            port,
+        }];
+
+        let bridge = MqttBridge::connect(String::from("node"), candidates, None, None);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while bridge.rejected() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "presenting no key was never observed as a rejection"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!bridge.is_connected());
     }
 
     #[tokio::test]
@@ -1541,7 +1812,7 @@ mod tests {
         // address nothing is listening on. Ranked first, the reachable one would normally win
         // DAEMON §7.1's walk — pinning the unreachable one must still leave this bridge
         // disconnected, because "while it is present, candidates do not self-promote".
-        let reachable_port = spawn_embedded_broker();
+        let reachable_port = spawn_embedded_broker(None);
         let unreachable_port = free_loopback_port();
         let candidates = vec![
             Candidate {
@@ -1560,6 +1831,7 @@ mod tests {
             String::from("node"),
             candidates,
             Some(String::from("pinned-target")),
+            None,
         );
         tokio::time::sleep(DIAL_TIMEOUT + Duration::from_millis(200)).await;
         assert!(

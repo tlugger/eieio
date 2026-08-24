@@ -29,16 +29,79 @@
 //! exclusive-dial behavior all live there now (eieio-2vm.4). Wiring that bridge into a running
 //! node from this module's `Pubsub` — the one line `main.rs` changes — is a separate change
 //! from this one and stays `InProcessBridge::disconnected` until it lands.
+//!
+//! # `key`, and why it is not a plain `String` like `candidates` and `pinned`
+//!
+//! SCOPE §3.11 / DAEMON §7.1 (eieio-2vm.5): the bus's pre-shared key, presented as this node's
+//! MQTT credential and required by a broker candidate that has one configured. Unlike
+//! `candidates` and `pinned`, this field is not carried structurally and left alone — a secret
+//! sitting in a `#[derive(Debug)]` struct is one incidental `{pubsub:?}` away from a log line —
+//! so [`Key`] carries a hand-written [`std::fmt::Debug`] that always renders `REDACTED`, the
+//! same posture `crate::registry::Credential` states for eieio-8yq.10. It lives here rather
+//! than in `crate::bridge` for the same reason `Credential` lives in `crate::registry` and not
+//! in whatever module spends it: this is the module that reads the secret out of a file, so
+//! this is the module responsible for it never being stored somewhere `Debug` can reach it
+//! unredacted.
+//!
+//! What this key does **not** provide, and nothing here should ever be read as implying: no
+//! per-node identity, no revocation, and a leaked key means re-keying every node on the bus. It
+//! raises the floor from "anyone on the LAN" to "anyone with the key" — SCOPE §3.11 keeps an
+//! `OPEN` for per-node identity rather than treating this as having closed it.
 
 use std::path::Path;
 
 use anyhow::Context;
 use serde::Deserialize;
 
+/// A bus's pre-shared key (module docs: SCOPE §3.11, DAEMON §7.1). Wraps a `String` for exactly
+/// one reason: to force every accidental `Debug` — this type's own, and every `#[derive(Debug)]`
+/// on something that comes to hold one — through [`Key`]'s redacted rendering instead of the
+/// plain string's.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+pub struct Key(String);
+
+impl Key {
+    /// Wraps `key` as a bus key. Not validated beyond being a string — DAEMON §7.1 states no
+    /// shape for it, unlike `bus`'s ABI §11.1 name pattern, because it is credential material a
+    /// broker's own auth check judges, not something this crate's parser does.
+    ///
+    /// Not called by [`read`] itself: `toml::from_str`'s derived `Deserialize` builds a `Key`
+    /// directly from the parsed string, the same as any other newtype. This constructor exists
+    /// for whatever wires a `Pubsub` together from something other than a file — today, only
+    /// this module's own tests.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "no non-test caller builds a `Key` by hand yet; `read`'s own path goes \
+                      through `Deserialize` instead, per this method's own docs"
+        )
+    )]
+    pub fn new(key: impl Into<String>) -> Key {
+        Key(key.into())
+    }
+
+    /// The raw secret, for the one kind of caller allowed to see it: whatever presents this key
+    /// as the actual MQTT credential (`crate::bridge::MqttBridge`'s dial step). Named plainly
+    /// rather than something that reads like a warning — this type's guard is its `Debug` impl,
+    /// not this method; a caller that already holds a `Key` already holds the secret.
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for Key {
+    /// Redacts the secret unconditionally, so a `{:?}` anywhere — a log line, a panic message,
+    /// a future `derive(Debug)` on something that holds one — cannot print it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Key(REDACTED)")
+    }
+}
+
 /// A node's pub/sub configuration, as `pubsub.toml` states it (DAEMON §7.1).
 ///
 /// Structural, not semantic, beyond `bus`: see the module docs for why `candidates` and
-/// `pinned` are read and not yet acted on.
+/// `pinned` are read and not yet acted on, and why `key` is not.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pubsub {
@@ -55,6 +118,12 @@ pub struct Pubsub {
     /// carried, for the same reason `candidates` is.
     #[serde(default)]
     pub pinned: Option<String>,
+    /// The bus's pre-shared key (SCOPE §3.11, DAEMON §7.1), if this bus has been keyed. `None`
+    /// is the current, still-supported behaviour: a bus with no key presents none and a broker
+    /// candidate with none configured accepts that, exactly as it did before this field
+    /// existed.
+    #[serde(default)]
+    pub key: Option<Key>,
 }
 
 /// Reads `path` as `pubsub.toml`, or answers `None` if there is nothing there.
@@ -157,5 +226,56 @@ mod tests {
         let root = scratch("pubsub-no-bus");
         let path = write(&root, "candidates = []\n");
         assert!(read(&path).is_err());
+    }
+
+    // ── `key` (SCOPE §3.11, DAEMON §7.1, eieio-2vm.5) ────────────────────────────────────────
+
+    #[test]
+    fn a_key_is_carried() {
+        let root = scratch("pubsub-key");
+        let path = write(&root, "bus = \"kitchen\"\nkey = \"s3cr3t\"\n");
+        let pubsub = read(&path).unwrap().expect("the file is there");
+        assert_eq!(pubsub.key.as_ref().map(Key::expose), Some("s3cr3t"));
+    }
+
+    #[test]
+    fn a_missing_key_is_none_and_the_bus_still_runs() {
+        // The acceptance criterion in full: "`key` absent = no key presented ... a bus that
+        // has not been keyed still runs" — a missing `key` is not the same class of thing as a
+        // missing `bus`, and must not become an error just because the field now exists.
+        let root = scratch("pubsub-no-key");
+        let path = write(&root, "bus = \"kitchen\"\n");
+        let pubsub = read(&path).unwrap().expect("the file is there");
+        assert_eq!(pubsub.key, None);
+    }
+
+    #[test]
+    fn the_key_never_appears_in_debug_output() {
+        let root = scratch("pubsub-key-debug");
+        let path = write(&root, "bus = \"kitchen\"\nkey = \"do-not-print-me\"\n");
+        let pubsub = read(&path).unwrap().expect("the file is there");
+        let rendered = format!("{pubsub:?}");
+        assert!(
+            !rendered.contains("do-not-print-me"),
+            "the secret leaked into `Pubsub`'s own Debug: {rendered}"
+        );
+        assert!(rendered.contains("REDACTED"), "{rendered}");
+    }
+
+    #[test]
+    fn a_key_on_its_own_is_also_redacted() {
+        // The same assertion as `the_key_never_appears_in_debug_output`, but on `Key` directly
+        // rather than through a container — the guard is the type's own `Debug`, not something
+        // `Pubsub` adds on top.
+        let key = Key::new("another-secret");
+        let rendered = format!("{key:?}");
+        assert_eq!(rendered, "Key(REDACTED)");
+        assert!(!rendered.contains("another-secret"));
+    }
+
+    #[test]
+    fn keys_compare_by_the_secret_they_hold() {
+        assert_eq!(Key::new("a"), Key::new("a"));
+        assert_ne!(Key::new("a"), Key::new("b"));
     }
 }
