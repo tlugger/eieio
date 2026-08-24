@@ -53,6 +53,37 @@ Notably absent: services, blocks-in-services, connections, layout — all of tha
 - Registry browsing: query block registries, cache manifests (the palette's data source).
 - **Designer auth itself is v1-minimal** (PROPOSED): single-operator assumption (SCOPE §6 — no multi-tenancy); a single login/token gate on the app. Nothing fancier until someone needs it.
 
+### 3.1 The Designer's own HTTP surface (normative)
+
+Two kinds of endpoint, and the split is the whole design. Everything the Designer *itself* knows is a small REST surface; everything a **node** knows is reached by proxy and is never re-modelled here.
+
+```
+POST   /api/session                       { password } -> session cookie
+DELETE /api/session
+
+GET    /api/systems                       [{ id, name }]
+POST   /api/systems                       { name }
+DELETE /api/systems/{id}
+
+GET    /api/nodes                         [{ id, system_id, name, class, address,
+                                             last_seen, capabilities, limits }]
+POST   /api/nodes                         { system_id, name, address, token }
+DELETE /api/nodes/{id}
+POST   /api/nodes/{id}/probe              refresh last_seen + capabilities via GET /node
+
+GET    /api/registries                    [{ id, url }]
+POST   /api/registries                    { url, auth? }
+GET    /api/blocks                        the manifest cache (the palette's data source)
+
+ANY    /api/nodes/{id}/daemon/{*path}     proxied to that node, verbatim
+```
+
+**A node's token never appears in a response.** It is write-only: supplied on `POST /api/nodes`, stored, and thereafter only ever attached to an outbound proxied request. The `nodes` representation above has no `token` field at all, which is stronger than omitting it per-handler — there is no serialization in which it can appear.
+
+**The proxy is one catch-all, not a re-modelling of DAEMON §9.** `/api/nodes/{id}/daemon/{*path}` forwards method, path, query and body to that node's address, attaches its bearer token, and streams the response back — `text/event-stream` included, unbuffered, so §6's taps and logs are the same hop. A per-endpoint proxy would be DAEMON §9's table written a third time (after the daemon and the CLI), free to drift from both; a catch-all cannot drift, because it knows nothing about what it is forwarding. This is also what keeps §8's parity rule true by construction: the browser reaches exactly the operations a node serves, no more and no fewer.
+
+**The browser is the operator, so the proxy does not restrict which daemon operations it may reach.** The proxy exists to keep the token server-side and to solve mixed reachability (§3), not to be an authorization layer — v1 has one operator (SCOPE §6), and a second one is where this needs revisiting.
+
 ## 4. Service editing model
 
 - **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer. Not by the WASM route §1 uses for `expr`: `eio-service` is a `std` crate and the backend is Rust, so it is an ordinary dependency. `expr` is compiled to WASM because the *browser* needs it on every keystroke, which is a different requirement with a different answer. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.
