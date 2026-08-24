@@ -106,5 +106,17 @@ jobs:
         with:
           cosign-release: v3.1.3
 
+      - name: Install Node
+        # The Designer's SPA half. `just ci` adds its suite only where npm exists and says so
+        # when it does not — which keeps the gate runnable on a machine with no JS toolchain,
+        # and would quietly mean CI tested none of it. So CI is given one, rather than left in
+        # the degraded branch: a skip that looks green is what this repo keeps removing.
+        # Pinned by digest like every other action. actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: designer/package-lock.json
+
       - name: just ci
         run: just ci

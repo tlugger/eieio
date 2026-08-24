@@ -256,6 +256,15 @@ ci: build
     if command -v cargo-nextest >/dev/null 2>&1; then
         stages+=(test-doc)
     fi
+    # The SPA's own suite, only where a JS toolchain exists. The Rust half of the Designer
+    # builds and tests without one — `crates/designer` embeds `designer/dist`, and an empty
+    # `dist` is a valid build that serves no UI — so a machine with no npm is degraded, not
+    # broken, and says so rather than failing a gate it cannot run.
+    if command -v npm >/dev/null 2>&1; then
+        stages+=(test-designer)
+    else
+        echo "ci: npm not found — skipping test-designer (the Designer SPA's suite)" >&2
+    fi
     pids=()
     for stage in "${stages[@]}"; do
         just "$stage" > "$logdir/$stage.log" 2>&1 &
@@ -286,6 +295,34 @@ ci: build
     just test-golden
     echo "ci: all gates passed"
 
+# ── designer ─────────────────────────────────────────────────────────────────
+#
+# Two halves, and only one of them is cargo's. `crates/designer` embeds
+# `designer/dist` at compile time, and that directory is gitignored — so a fresh
+# clone compiles the server against an EMPTY `dist` and serves a 404 for `/`
+# until the SPA is built. That is deliberate: it keeps `just ci` runnable with no
+# JS toolchain installed, and the binary also checks a runtime `--assets-dir`
+# first, so a rebuild is not needed to pick up freshly built assets.
+
+# Install the SPA's dependencies. `npm ci` when there is a lockfile to honour.
+designer-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd designer
+    if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+# Build the SPA into `designer/dist`, which is what the server embeds and serves.
+designer-build: designer-deps
+    cd designer && npm run build
+
+# The SPA's own suite: the derived-value rules, and the manifest-reference match.
+test-designer: designer-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd designer
+    npm run check
+    npm run test -- --run
+
 # ── run recipes ──────────────────────────────────────────────────────────────
 
 # Everything after the recipe name is passed through, so `just run-daemon dev
@@ -301,10 +338,9 @@ eio *args:
     cargo run --quiet --package eio-cli -- {{ args }}
 
 # Run the Designer (not built yet).
-run-designer:
-    #!/usr/bin/env bash
-    echo "run-designer: the Designer does not exist yet — it lands with eieio-m9s.1." >&2
-    exit 1
+# Run the Designer: build the SPA, then serve it from the Rust binary.
+run-designer *args: designer-build
+    cargo run --package eio-designer -- --assets-dir designer/dist {{ args }}
 
 # ── release ──────────────────────────────────────────────────────────────────
 #

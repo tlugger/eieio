@@ -67,7 +67,8 @@ DELETE /api/systems/{id}
 
 GET    /api/nodes                         [{ id, system_id, name, class, address,
                                              last_seen, capabilities, limits }]
-POST   /api/nodes                         { system_id, name, address, token }
+POST   /api/nodes                         { system_id, name, address, token,
+                                            class? }   default "daemon"
 DELETE /api/nodes/{id}
 POST   /api/nodes/{id}/probe              refresh last_seen + capabilities via GET /node
 
@@ -83,6 +84,10 @@ ANY    /api/nodes/{id}/daemon/{*path}     proxied to that node, verbatim
 **A node's token never appears in a response.** It is write-only: supplied on `POST /api/nodes`, stored, and thereafter only ever attached to an outbound proxied request. The `nodes` representation above has no `token` field at all, which is stronger than omitting it per-handler — there is no serialization in which it can appear.
 
 **The proxy is one catch-all, not a re-modelling of DAEMON §9.** `/api/nodes/{id}/daemon/{*path}` forwards method, path, query and body to that node's address, attaches its bearer token, and streams the response back — `text/event-stream` included, unbuffered, so §6's taps and logs are the same hop. A per-endpoint proxy would be DAEMON §9's table written a third time (after the daemon and the CLI), free to drift from both; a catch-all cannot drift, because it knows nothing about what it is forwarding. This is also what keeps §8's parity rule true by construction: the browser reaches exactly the operations a node serves, no more and no fewer.
+
+**A node's `class` is stated, not discovered, and it is the only field that could not be.** Everything else about a node comes back from a probe; a **leaf** answers no probe, because it serves no management API at all — its services are compiled into firmware (SCOPE §3.7, §7). So the class has to be told to the registry, and having been told, two things follow: `POST /api/nodes/{id}/probe` and the proxy both **refuse a leaf by name** rather than dialling it. A leaf's address reached over HTTP produces a connection error indistinguishable from a node that is down, which would report a fault against a node working exactly as designed — and would make `last_seen` mean two different things depending on class.
+
+**A registry populates itself; `/api/blocks` only reads.** Nothing in the table above fills `manifest_cache`, and that is a gap rather than a decision — §3 requires registry browsing and names the cache as the palette's data source. The endpoint that fetches manifests from a registry into the cache is specified with the work that implements it (`eieio-m9s.7`); until then `/api/blocks` answers an empty cache honestly, and the palette shows what a node reports through the proxy rather than what a registry could offer.
 
 **A block is identified by its whole reference, never by its name.** `manifest_cache` is keyed by `block_ref` (§2), and a service file's `block` field is matched against that key verbatim — no parsing, no stripping of registry or tag. A manifest's own `name` does not identify it: two registries may publish `temp-sensor`, two versions of `filter` may declare different ports and properties (ABI §11.1), and a reference naming a registry with a port does not even split on its first colon. Every one of those failures presents identically — a block rendered with another block's ports, properties and capability requirements — so the rule is exact match, and the cache is asked for what was actually pulled.
 

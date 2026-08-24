@@ -41,24 +41,35 @@ pub struct NodeOut {
 }
 
 /// `POST /api/nodes`'s body.
-///
-/// DESIGNER §3.1 lists this shape without a `class`, though §2's schema and [`NodeOut`] both
-/// carry one. This crate defaults every node registered here to `"daemon"` — the proxy path
-/// this same section defines is literally `/api/nodes/{id}/daemon/{*path}`, so a `"leaf"`
-/// node has nothing at the far end of it to forward to until LEAF-SPEC exists (DESIGNER §7
-/// gives leaf-class nodes an entirely different, firmware-build deploy flow instead). This is
-/// a finding for the spec, not a silent decision: see this crate's own top-level report.
 #[derive(Deserialize)]
 pub struct NewNode {
     /// The System this node belongs to. Must already exist.
     pub system_id: i64,
     /// A label for people.
     pub name: String,
+    /// `"daemon"` or `"leaf"` (DESIGNER §2, §3.1). Defaults to `"daemon"`.
+    ///
+    /// **Stated, not discovered**, and it is the one node field that could not be: every other
+    /// fact here comes back from a probe, and a leaf node answers no probe because it serves no
+    /// management API at all — it runs services compiled into firmware (SCOPE §3.7, DESIGNER
+    /// §7). So a leaf's class has to be told to the registry, and telling it is what stops the
+    /// proxy dialling an address that answers nothing.
+    #[serde(default = "default_class")]
+    pub class: String,
     /// Where the node's management API is (e.g. `http://10.0.0.5:7373`).
     pub address: String,
     /// The node's own bearer token (DAEMON §9.1). Write-only: stored, never answered back.
     pub token: String,
 }
+
+/// `"daemon"` — the class that has an API to register an address for at all.
+fn default_class() -> String {
+    String::from(CLASS_DAEMON)
+}
+
+/// The only two node classes (DESIGNER §2, SCOPE §3.7).
+pub(crate) const CLASS_DAEMON: &str = "daemon";
+pub(crate) const CLASS_LEAF: &str = "leaf";
 
 impl std::fmt::Debug for NewNode {
     /// Renders `token` as present-or-absent, matching `eio-cli::config::NodeEntry`'s own
@@ -81,6 +92,10 @@ pub struct NodeCredential {
     pub address: String,
     /// The node's own bearer token (DAEMON §9.1).
     pub token: String,
+    /// `"daemon"` or `"leaf"`. Carried here so a caller can refuse a leaf *before* dialling
+    /// one: a leaf serves no API, so reaching for it produces a connection error that reads
+    /// as "the node is down" when the truth is that it was never going to answer.
+    pub class: String,
 }
 
 impl std::fmt::Debug for NodeCredential {
@@ -124,7 +139,7 @@ pub async fn list(State(shared): State<crate::State>) -> Result<Json<Vec<NodeOut
     Ok(Json(rows))
 }
 
-/// `POST /api/nodes`. See [`NewNode`]'s doc for why `class` is always `"daemon"` here.
+/// `POST /api/nodes`.
 pub async fn create(
     State(shared): State<crate::State>,
     Json(body): Json<NewNode>,
@@ -137,21 +152,35 @@ pub async fn create(
             "a node needs a non-empty name, address and token",
         ));
     }
-    let (system_id, name, address, token) = (
+    let class = body.class.trim();
+    if class != CLASS_DAEMON && class != CLASS_LEAF {
+        return Err(ApiError::bad_request(format!(
+            "`{class}` is not a node class; expected `{CLASS_DAEMON}` or `{CLASS_LEAF}` \
+             (DESIGNER §2)"
+        )));
+    }
+    let (system_id, name, class, address, token) = (
         body.system_id,
         String::from(name),
+        String::from(class),
         String::from(address),
         String::from(token),
     );
-    let insert = (system_id, name.clone(), address.clone(), token);
+    let insert = (
+        system_id,
+        name.clone(),
+        class.clone(),
+        address.clone(),
+        token,
+    );
     let id = shared
         .db
         .with(move |conn| {
-            let (system_id, name, address, token) = insert;
+            let (system_id, name, class, address, token) = insert;
             conn.execute(
                 "INSERT INTO nodes (system_id, name, class, address, auth_token) \
-                 VALUES (?1, ?2, 'daemon', ?3, ?4)",
-                (system_id, name, address, token),
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                (system_id, name, class, address, token),
             )?;
             Ok(conn.last_insert_rowid())
         })
@@ -202,6 +231,15 @@ pub async fn probe(
     Path(id): Path<i64>,
 ) -> Result<Json<NodeOut>, ApiError> {
     let credential = load_credential(&shared, id).await?;
+    // Same reason the proxy refuses one (DESIGNER §7): a leaf answers no `GET /node`, so a
+    // probe against it would record "unreachable" for a node that is working exactly as
+    // designed — and `last_seen` would then mean two different things per class.
+    if credential.class == CLASS_LEAF {
+        return Err(ApiError::bad_request(format!(
+            "node {id} is leaf-class and answers no probe; it serves no management API \
+             (DESIGNER §7)"
+        )));
+    }
 
     let url = format!("{}/node", credential.address.trim_end_matches('/'));
     let response = shared
@@ -288,12 +326,13 @@ pub(crate) async fn load_credential(
         .db
         .with(move |conn| {
             conn.query_row(
-                "SELECT address, auth_token FROM nodes WHERE id = ?1",
+                "SELECT address, auth_token, class FROM nodes WHERE id = ?1",
                 [id],
                 |row| {
                     Ok(NodeCredential {
                         address: row.get(0)?,
                         token: row.get(1)?,
+                        class: row.get(2)?,
                     })
                 },
             )
@@ -334,6 +373,7 @@ mod tests {
             State(Arc::clone(&shared)),
             Json(NewNode {
                 system_id,
+                class: String::from(CLASS_DAEMON),
                 name: String::from("kitchen"),
                 address: String::from("http://10.0.0.5:7373"),
                 token: String::from("super-secret-token-value"),
@@ -370,6 +410,7 @@ mod tests {
         let result = create(
             State(shared),
             Json(NewNode {
+                class: String::from(CLASS_DAEMON),
                 system_id: 9999,
                 name: String::from("kitchen"),
                 address: String::from("http://10.0.0.5:7373"),
@@ -383,6 +424,7 @@ mod tests {
     #[test]
     fn node_credential_debug_never_prints_its_token() {
         let credential = NodeCredential {
+            class: String::from(CLASS_DAEMON),
             address: String::from("http://10.0.0.5:7373"),
             token: String::from("super-secret-token-value"),
         };
@@ -394,6 +436,7 @@ mod tests {
     #[test]
     fn new_node_debug_never_prints_its_token() {
         let body = NewNode {
+            class: String::from(CLASS_DAEMON),
             system_id: 1,
             name: String::from("kitchen"),
             address: String::from("http://10.0.0.5:7373"),

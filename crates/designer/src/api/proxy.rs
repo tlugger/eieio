@@ -60,6 +60,16 @@ pub async fn forward(
     request: Request,
 ) -> Result<Response, ApiError> {
     let credential = load_credential(&shared, id).await?;
+    // A leaf node serves no management API — its services are compiled into firmware
+    // (SCOPE §3.7, DESIGNER §7) — so there is nothing at the far end of this path to forward
+    // to. Refusing here, by name, is the difference between an answer and a connection error
+    // that reads as "the node is down" when it was never going to answer.
+    if credential.class == crate::api::nodes::CLASS_LEAF {
+        return Err(ApiError::bad_request(format!(
+            "node {id} is leaf-class and serves no management API; a leaf's services \
+             are deployed by firmware build, not over HTTP (DESIGNER §7)"
+        )));
+    }
 
     let mut url = format!(
         "{}/{}",
@@ -268,6 +278,71 @@ mod tests {
             String::from_utf8_lossy(&first_chunk).contains("first"),
             "{:?}",
             first_chunk
+        );
+    }
+
+    #[tokio::test]
+    async fn a_leaf_node_is_refused_by_name_rather_than_dialled() {
+        // DESIGNER §7: a leaf runs services compiled into firmware and serves no management
+        // API. The address below is deliberately one nothing listens on — if the proxy ever
+        // dialled it, the failure would be a connection error reading "the node is down",
+        // which is the wrong answer to a node that was never going to answer.
+        let (shared, designer_base) = spawn_designer().await;
+        let system_id = shared
+            .db
+            .with(|conn| {
+                conn.execute("INSERT INTO systems (name) VALUES ('s')", [])?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await
+            .expect("a system");
+        let node_id = shared
+            .db
+            .with(move |conn| {
+                conn.execute(
+                    "INSERT INTO nodes (system_id, name, class, address, auth_token) VALUES \
+                     (?1, 'attic-esp32', 'leaf', 'http://127.0.0.1:1', 't')",
+                    (system_id,),
+                )?;
+                Ok(conn.last_insert_rowid())
+            })
+            .await
+            .expect("a leaf node");
+
+        let client = reqwest::Client::new();
+        let login = client
+            .post(format!("{designer_base}/api/session"))
+            .json(&serde_json::json!({ "password": "test-password" }))
+            .send()
+            .await
+            .expect("logging in succeeds");
+        let cookie = login
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("a session cookie")
+            .to_str()
+            .expect("a valid header value")
+            .split(';')
+            .next()
+            .expect("at least the name=value pair")
+            .to_owned();
+
+        let response = client
+            .get(format!("{designer_base}/api/nodes/{node_id}/daemon/node"))
+            .header(reqwest::header::COOKIE, cookie)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .expect("the proxy answers rather than hanging on a dead address");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "a leaf is a bad request, not an unreachable node"
+        );
+        let body = response.text().await.expect("a body");
+        assert!(
+            body.contains("leaf-class"),
+            "the refusal has to say why, not just refuse: {body}"
         );
     }
 }
