@@ -143,7 +143,7 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Run the native binary, and check the cross one is cross
+      - name: Run the native binary
         run: |
           set -euo pipefail
           ( cd dist && sha256sum --check --strict ./*.sha256 )
@@ -153,6 +153,100 @@ jobs:
           ./eio-daemon --help > /dev/null
           echo "the native binary runs on a machine that only downloaded it"
 
+      # `--version` and `--help` prove the binary runs; they say nothing about the surface
+      # DAEMON-SPEC §9 exists for. `run` is a node (§3): it needs a data directory (§2) and
+      # binds the management API (§2.1's `[api] listen`, default loopback:7373). This step
+      # gives it a scratch data directory — `--data-dir` is `run`'s own override, so nothing
+      # here depends on `/etc/eieio/` or on being root — and asks the one endpoint §9.1 makes
+      # unauthenticated for a document naming real operations, not merely a listening port.
+      - name: Boot the daemon and check its management API
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d)"
+
+          # RUST_LOG=warn: first boot mints the API token into `auth/token` and logs it once,
+          # at info level (DAEMON §9.1; `crates/daemon/src/node.rs`'s `provision_token`).
+          # `/openapi.json` needs no token at all — that is the whole point of §9.1's
+          # exception — so nothing here has a reason to read it, and it is kept out of the
+          # job log entirely rather than trusted to redaction after the fact.
+          RUST_LOG=warn ./eio-daemon --data-dir "$data_dir" run > daemon.log 2>&1 &
+          daemon_pid=$!
+
+          cleanup() {
+              kill "$daemon_pid" 2>/dev/null || true
+              wait "$daemon_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # No fixed sleep: a fixed wait is either flaky (too short) or slow (too long) on
+          # every run that isn't exactly average. Poll the endpoint instead, bailing out
+          # immediately if the process has already died, and name exactly what never came up
+          # if the timeout is what ends the loop.
+          url="http://127.0.0.1:7373/openapi.json"
+          up=""
+          for _ in $(seq 1 50); do
+              if ! kill -0 "$daemon_pid" 2>/dev/null; then
+                  echo "eio-daemon exited before ever serving ${url}" >&2
+                  cat daemon.log >&2
+                  exit 1
+              fi
+              if curl --fail --silent --output openapi.json "$url"; then
+                  up=1
+                  break
+              fi
+              sleep 0.2
+          done
+          if [ -z "$up" ]; then
+              echo "timed out after 10s waiting for ${url} to answer" >&2
+              cat daemon.log >&2
+              exit 1
+          fi
+
+          # Content, not just a 200: a couple of DAEMON §9's real operation paths, so a
+          # document that merely parses as OpenAPI without describing this daemon still
+          # fails. `jq` rather than `python3 - <<heredoc`, because a heredoc's body shares
+          # this step's indentation and Python treats that as a real (and invalid) indent.
+          missing=""
+          for path in /node /services /blocks; do
+              if ! jq --exit-status --arg p "$path" '.paths | has($p)' openapi.json > /dev/null; then
+                  missing="$missing $path"
+              fi
+          done
+          if [ -n "$missing" ]; then
+              echo "openapi.json is missing expected path(s):${missing}" >&2
+              cat daemon.log >&2
+              exit 1
+          fi
+          count="$(jq '.paths | length' openapi.json)"
+          echo "openapi.json names ${count} paths, including /node, /services, /blocks"
+
+          if ! kill -0 "$daemon_pid" 2>/dev/null; then
+              echo "eio-daemon died while /openapi.json was being checked" >&2
+              cat daemon.log >&2
+              exit 1
+          fi
+
+          # SIGTERM is one of the two signals `crates/daemon/src/lib.rs`'s `shutdown()`
+          # waits on, and `run_node` returns `Ok(())` once it is handled — so a clean
+          # shutdown is exit 0, and anything else is this daemon dying rather than stopping.
+          kill "$daemon_pid"
+          status=0
+          wait "$daemon_pid" || status=$?
+          if [ "$status" -ne 0 ]; then
+              echo "eio-daemon exited ${status} on SIGTERM instead of shutting down cleanly" >&2
+              cat daemon.log >&2
+              exit 1
+          fi
+          trap - EXIT
+          echo "the daemon boots, serves a real /openapi.json, and shuts down cleanly"
+
+      - name: Check the cross artifact is cross
+        # Native target only: an aarch64 binary cannot execute on an x86_64 runner without an
+        # emulator, and standing one up to run it would be testing the emulator. The cross
+        # artifact's architecture is asserted instead, which is the failure that actually
+        # happens — a "cross" build that silently produced the host's architecture.
+        run: |
+          set -euo pipefail
           rm -f eio-daemon
           tar --extract --gzip --file dist/eio-daemon-aarch64-unknown-linux-gnu.tar.gz
           file ./eio-daemon | tee /dev/stderr | grep --quiet "ARM aarch64"
