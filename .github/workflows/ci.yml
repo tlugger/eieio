@@ -94,5 +94,17 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      - name: Install cosign
+        # `cargo eio publish`'s signed round trip is verified against the real binary, not a
+        # fixture — the whole point of eieio-8yq.18 was that cosign's actual output differs
+        # from what we assumed. So the gate needs it, and the test panics rather than skipping
+        # when it is absent (a skip here would be a test that proves nothing while looking
+        # green, which is what this repo keeps removing). Pinned by digest like every other
+        # action, and by version below so a cosign release cannot change what CI verifies.
+        # sigstore/cosign-installer v4.1.2
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: v3.1.3
+
       - name: just ci
         run: just ci
