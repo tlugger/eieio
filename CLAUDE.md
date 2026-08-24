@@ -6,7 +6,9 @@ Guidance for agents working in this repository.
 
 eieio is a distributed stream-processing platform: WASM **blocks** wired into **services** running on **nodes** that form a **System**, targeting everything from servers down to MCUs. `README.md` is the human orientation; this file is how to build here.
 
-**Current state: early implementation.** Items 1–4 of [Implementation order](#implementation-order) are built — `signal`, `expr`, `manifest`, and a `host-core` + `daemon` skeleton that loads a real WASM block and routes a signal between two instances. Item 5 is under way: `block-sdk` is the guest runtime (allocator, panic handler, `Ctx`, error types) and `block-sdk-macros` is the `#[block]` macro that generates the ABI exports, the port enums, `Prop<T>` and the `eio:manifest` section. `test-host` runs a block natively for the fast inner loop, `conformance` is the reference harness plus its scenario suite over wasmtime and wasm3, and `cargo-eio` is `cargo eio new/build/test`. `examples/blocks/` holds ABI §13.2's five golden blocks, written with the SDK, and `crates/conformance/scenarios/blocks/` the hand-written fixtures that test the harness itself. Item 6 is under way: `service` is the service-file schema, parser and validator (SERVICE-SPEC).
+**Current state: items 1–6 of [Implementation order](#implementation-order) are built, plus pub/sub.** `signal`, `expr` and `manifest` are the `no_std` foundation with their conformance vectors. `host-core` + `daemon` is a working node: lifecycle driver, executor, router, `eio:state` behind a real store, `eio:timer`, taps and log streaming over SSE, an OCI block manager that verifies digests and both cosign signature shapes, and the DAEMON §9 management API with OpenAPI at `/openapi.json` and a per-node bearer token. `service` is the service-file schema, parser and validator (SERVICE-SPEC). `block-sdk` is the guest runtime and `block-sdk-macros` the `#[block]` macro that generates the ABI exports, port enums, `Prop<T>` and the `eio:manifest` section; `cargo-eio` is `cargo eio new/build/test/publish`; `test-host` runs a block natively for the fast inner loop; `conformance` is the reference harness plus its scenario suite over wasmtime and wasm3; `cli` is the `eio` binary with management-API parity across every node in `~/.config/eieio/nodes.toml`. Cross-node signals move over MQTT behind a swappable `Bridge`, with `publisher`/`subscriber` as host-native system blocks. `examples/blocks/` holds ABI §13.2's five golden blocks, written with the SDK, and `crates/conformance/scenarios/blocks/` the hand-written fixtures that test the harness itself.
+
+**Not built yet:** the Designer (item 7 — `designer/` does not exist; DESIGNER-SPEC is 79 lines and every stack claim in it is still PROPOSED), the agent MCP surface (item 8, in progress as `eio mcp` per SCOPE §4), and the leaf runtime and firmware pipeline. `cargo eio aot` is blocked on a `wamrc` toolchain — see eieio-7d8.21's notes before attempting it.
 
 ## The prime directive: specs are normative
 
@@ -59,9 +61,11 @@ Vocabulary is settled and used precisely: **System** (group of nodes), **Node** 
 Cargo.toml            workspace root
 crates/
   abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
-  service/  daemon/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
+  service/  daemon/  cli/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
   conformance/
-designer/             SvelteKit app, own package.json
+expr-tests/           host-agnostic vectors: expressions, property types, canonical CBOR
+schemas/              published JSON Schemas: manifest, service
+designer/             not created yet — will be a SvelteKit app with its own package.json
 examples/
   services/           sample service TOMLs
   blocks/             ABI §13.2's golden blocks — their own cargo workspace
