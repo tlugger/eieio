@@ -222,6 +222,91 @@ fn removing_a_ui_annotation_that_is_not_there_is_not_an_error() {
 }
 
 #[test]
+fn renaming_a_block_touches_only_its_name_line() {
+    // SERVICE §9's new bullet: the whole point of `set_name` existing is that renaming a
+    // block leaves its id, connections, properties and `[ui]` alone — the failure mode a
+    // remove-and-re-add would otherwise cause silently.
+    let (after, removed, added) = edited(|doc| {
+        doc.set_name("b7k2", "Kitchen Thermometer")
+            .expect("b7k2 has a name already");
+    });
+    assert_eq!(removed, ["name  = \"Thermometer\"   # by the window"]);
+    assert_eq!(
+        added,
+        ["name  = \"Kitchen Thermometer\"   # by the window"],
+        "the two-space alignment and the trailing comment both survive"
+    );
+    assert!(after.contains("[blocks.b7k2]"), "the id is untouched");
+    assert!(
+        after.contains("\"b7k2.out -> f3m9.in\""),
+        "connections naming it are untouched"
+    );
+    assert!(
+        after.contains("interval_ms = \"5000\""),
+        "its properties are untouched"
+    );
+    assert!(
+        after.contains("[ui.blocks.b7k2]\nx = 148\ny = 234"),
+        "its [ui] entry is untouched"
+    );
+}
+
+#[test]
+fn setting_a_name_on_a_block_that_has_none_adds_the_key() {
+    // f3m9 has a `block` line and no `name` (SERVICE §9: "setting a name on a block that has
+    // none adds the key").
+    let (after, removed, added) = edited(|doc| {
+        doc.set_name("f3m9", "Filter").expect("f3m9 exists");
+    });
+    assert!(removed.is_empty(), "{removed:?}");
+    assert_eq!(added, ["name = \"Filter\""]);
+    // The new key lands above `[blocks.f3m9.props]` — a scalar key of a table always must,
+    // in TOML, or the parser would read it as belonging to the sub-table instead.
+    assert!(after.find("name = \"Filter\"").unwrap() < after.find("[blocks.f3m9.props]").unwrap());
+}
+
+#[test]
+fn clearing_a_name_removes_the_key_rather_than_emptying_it() {
+    let (after, removed, added) = edited(|doc| {
+        doc.remove_name("b7k2").expect("b7k2 has a name");
+    });
+    assert_eq!(removed, ["name  = \"Thermometer\"   # by the window"]);
+    assert!(added.is_empty(), "{added:?}");
+    let parsed = eio_service::parse(&after).expect("still valid");
+    assert_eq!(
+        parsed.service.blocks["b7k2"].name, None,
+        "absent, not an empty string"
+    );
+}
+
+#[test]
+fn clearing_a_name_that_is_already_absent_is_not_an_error() {
+    let (_, removed, added) = edited(|doc| {
+        doc.remove_name("f3m9")
+            .expect("f3m9 has no name; clearing one it doesn't have is a no-op");
+    });
+    assert!(removed.is_empty() && added.is_empty());
+}
+
+#[test]
+fn set_name_and_remove_name_refuse_an_unknown_id() {
+    let mut doc = Document::parse(HAND_WRITTEN).expect("valid");
+    assert_eq!(
+        doc.set_name("nope", "x"),
+        Err(EditError::NoSuchInstance {
+            id: String::from("nope")
+        })
+    );
+    assert_eq!(
+        doc.remove_name("nope"),
+        Err(EditError::NoSuchInstance {
+            id: String::from("nope")
+        })
+    );
+    assert_eq!(doc.render(), HAND_WRITTEN, "and nothing was written");
+}
+
+#[test]
 fn autostart_is_set_in_place() {
     let (_, removed, added) = edited(|doc| doc.set_autostart(false));
     assert_eq!(removed, ["autostart  = true"]);

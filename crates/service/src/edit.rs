@@ -480,6 +480,54 @@ impl Document {
         Ok(removed)
     }
 
+    /// Sets a block instance's label, adding the key if the instance has none (SERVICE §9).
+    ///
+    /// §2 makes the id the identity and calls `name` a label with no meaning to a host; §4 gives
+    /// it no pattern of its own (unlike `id`, which is a bare key a connection has to parse), so
+    /// — like [`add_block`](Self::add_block)'s own `name` parameter — anything goes here. What
+    /// this method promises is narrower and is the reason it exists at all: setting a name
+    /// touches this one line and nothing else. The id, `props`, every connection and `[ui]`
+    /// survive untouched, which is what makes this different from the remove-and-re-add a person
+    /// would otherwise reach for — that changes the id, and DAEMON §10 keys `eio:state` by it.
+    ///
+    /// An existing value is overwritten in place rather than through
+    /// [`TableLike::insert`](toml_edit::TableLike::insert): `insert` reformats the key on an
+    /// occupied entry, which would silently undo someone's hand alignment
+    /// (`name  = "Thermometer"`), and a bare reassignment would drop the old value's own
+    /// decor — a trailing end-of-line comment lives there. Carrying the old decor onto the new
+    /// value keeps both. A block with no `name` yet takes the new key through `insert`, which is
+    /// exactly right for a key that was not there to reformat.
+    pub fn set_name(&mut self, id: &str, name: &str) -> Result<(), EditError> {
+        let instance = self.instance_mut(id)?;
+        match instance.get_mut("name") {
+            Some(existing) => {
+                let decor = existing
+                    .as_value()
+                    .map(|value| value.decor().clone())
+                    .unwrap_or_default();
+                let mut new_value = toml_edit::Value::from(name);
+                *new_value.decor_mut() = decor;
+                *existing = Item::Value(new_value);
+            }
+            None => {
+                instance.insert("name", value(name));
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a block instance's label, leaving it with none.
+    ///
+    /// Removes the *key* rather than writing `name = ""`: §6 makes `name` OPTIONAL, and absent
+    /// and empty are not the same thing to a reader (SERVICE §9). Clearing a label that was
+    /// already absent is not an error, matching [`remove_ui`](Self::remove_ui)'s reasoning: a
+    /// caller asking for no name on a block that already has none has got what it asked for.
+    pub fn remove_name(&mut self, id: &str) -> Result<(), EditError> {
+        let instance = self.instance_mut(id)?;
+        instance.remove("name");
+        Ok(())
+    }
+
     /// Sets a property to an expression (SERVICE §4, ABI §11).
     ///
     /// The value is an expression *string* — every property is an expression and a literal is a

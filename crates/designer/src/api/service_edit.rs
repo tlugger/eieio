@@ -108,6 +108,20 @@ pub enum Operation {
         /// The property to unset.
         property: String,
     },
+    /// [`Document::set_name`]. Adds the key if the instance has none (SERVICE §9); touches
+    /// nothing but that line — the id, connections, properties and `[ui]` all survive.
+    SetName {
+        /// The instance.
+        id: String,
+        /// The new label.
+        name: String,
+    },
+    /// [`Document::remove_name`]. Removes the key rather than writing an empty string
+    /// (SERVICE §9): absent and empty are not the same thing to a reader.
+    RemoveName {
+        /// The instance.
+        id: String,
+    },
     /// [`Document::connect`].
     Connect {
         /// `<id>.<port>`.
@@ -288,6 +302,12 @@ fn apply(
             .map_err(|error| edit_error(index, error)),
         Operation::RemoveProp { id, property } => document
             .remove_prop(id, property)
+            .map_err(|error| edit_error(index, error)),
+        Operation::SetName { id, name } => document
+            .set_name(id, name)
+            .map_err(|error| edit_error(index, error)),
+        Operation::RemoveName { id } => document
+            .remove_name(id)
             .map_err(|error| edit_error(index, error)),
         Operation::Connect { from, to } => document
             .connect(from, to)
@@ -508,6 +528,127 @@ b7k2 = { x = 10, y = 20 }
         assert!(out.toml.contains("# the kitchen\n"));
         assert!(out.toml.contains("name    = \"Thermometer\""));
         assert!(out.toml.contains("[ui]\nb7k2 = { x = 10, y = 20 }"));
+    }
+
+    #[tokio::test]
+    async fn a_rename_through_the_endpoint_touches_only_its_name_line() {
+        // SERVICE §9's new bullet, exercised through the endpoint rather than `Document`
+        // directly: a rename's diff is the name line and nothing else — the id, connections,
+        // properties and `[ui]` all survive.
+        let out = run(
+            FIXTURE,
+            ops(serde_json::json!([
+                { "op": "set_name", "id": "b7k2", "name": "Kitchen Thermometer" },
+            ])),
+        )
+        .await
+        .expect("a valid edit succeeds")
+        .0;
+
+        let before: Vec<&str> = FIXTURE.lines().collect();
+        let after: Vec<&str> = out.toml.lines().collect();
+        let mut changed = Vec::new();
+        for (index, line) in after.iter().copied().enumerate() {
+            if before.get(index).copied() != Some(line) {
+                changed.push((index, before.get(index).copied(), line));
+            }
+        }
+        assert_eq!(before.len(), after.len(), "no line was added or removed");
+        assert_eq!(
+            changed,
+            vec![(
+                6,
+                Some("name    = \"Thermometer\""),
+                "name    = \"Kitchen Thermometer\""
+            )],
+            "exactly one line changed, and it is the renamed block's name"
+        );
+        assert!(out.toml.contains("[blocks.b7k2]"), "the id is untouched");
+        assert!(
+            out.toml.contains("b7k2.out -> f3m9.in"),
+            "connections naming it are untouched"
+        );
+        assert!(
+            out.toml.contains("[blocks.f3m9.props]\nthreshold = \"18\""),
+            "properties are untouched"
+        );
+        assert!(
+            out.toml.contains("b7k2 = { x = 10, y = 20 }"),
+            "[ui] is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_a_name_removes_the_key_not_just_its_text() {
+        let out = run(
+            FIXTURE,
+            ops(serde_json::json!([
+                { "op": "remove_name", "id": "b7k2" },
+            ])),
+        )
+        .await
+        .expect("a valid edit succeeds")
+        .0;
+
+        assert!(
+            !out.toml.contains("Thermometer"),
+            "the label is gone, not emptied: {}",
+            out.toml
+        );
+        assert_eq!(
+            out.toml.matches("name").count(),
+            1,
+            "only the service's own `name` key remains, not an emptied `blocks.b7k2.name`: {}",
+            out.toml
+        );
+        let parsed = eio_service::parse(&out.toml).expect("still valid");
+        assert_eq!(parsed.service.blocks["b7k2"].name, None);
+    }
+
+    #[tokio::test]
+    async fn a_batch_with_a_rename_is_still_all_or_nothing() {
+        // SERVICE §9 and DESIGNER §3.2: a batch that fails partway must not have applied any
+        // of it, a rename included.
+        let result = run(
+            FIXTURE,
+            ops(serde_json::json!([
+                { "op": "set_name", "id": "b7k2", "name": "Kitchen Thermometer" },
+                { "op": "connect", "from": "nope.out", "to": "f3m9.in" },
+            ])),
+        )
+        .await;
+
+        match result {
+            Err(Failure::Invalid(errors)) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].operation, Some(1));
+            }
+            other => panic!("expected a 422 naming operation 1, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_batch_with_a_failing_rename_applies_nothing_after_it() {
+        // The sharper half of "all-or-nothing": if `set_name`'s own error were ever swallowed
+        // instead of stopping the batch, the `connect` below would go on to apply and this
+        // request would come back as a success it should not be.
+        let result = run(
+            FIXTURE,
+            ops(serde_json::json!([
+                { "op": "set_name", "id": "nope", "name": "x" },
+                { "op": "connect", "from": "f3m9.out", "to": "b7k2.in" },
+            ])),
+        )
+        .await;
+
+        match result {
+            Err(Failure::Invalid(errors)) => {
+                assert_eq!(errors.len(), 1);
+                assert_eq!(errors[0].operation, Some(0));
+                assert_eq!(errors[0].instance.as_deref(), Some("nope"));
+            }
+            other => panic!("expected a 422 naming operation 0, got {other:?}"),
+        }
     }
 
     #[tokio::test]
