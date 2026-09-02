@@ -62,8 +62,8 @@ async fn embedded_or_index(request: Request) -> Response {
     (
         StatusCode::NOT_FOUND,
         "no Designer UI is embedded in this binary and none was found on disk at \
-         --assets-dir; designer/dist is still empty in this build (eieio-m9s.1's SPA half \
-         lands separately)",
+         --assets-dir; `designer/dist` was empty when this binary was built — run \
+         `just designer-build` (or `just run-designer`, which does it) and rebuild",
     )
         .into_response()
 }
@@ -84,16 +84,46 @@ fn respond(path: &str) -> Option<Response> {
 mod tests {
     use super::*;
 
-    /// `designer/dist` holds only `.gitkeep` while the SPA is being built in parallel
-    /// (eieio-m9s.1's split), so the embedded copy is empty and this must fall through to
-    /// the "nothing to serve yet" answer rather than panicking or hanging.
+    /// Whichever way the embed went, `/` answers rather than panicking.
+    ///
+    /// **This asserts both branches deliberately.** It used to assert only the empty one,
+    /// because `designer/dist` held nothing but `.gitkeep` while the SPA was built in
+    /// parallel (eieio-m9s.1's split) — and it then failed the moment `just designer-build`
+    /// existed and someone ran it, which is a test encoding a temporary fact about a
+    /// developer's working tree rather than a property of the code.
+    ///
+    /// Both outcomes are correct and which one holds is a build input, so the test says so:
+    /// an empty embed MUST fall through to a `404` that explains itself, and a populated one
+    /// MUST serve the SPA's entry point.
+    ///
+    /// The oracle is `Embedded::get`, deliberately, and **not** `Embedded::iter`: in a debug
+    /// build `rust-embed` compiles in the file *list* but reads the *bytes* from disk on each
+    /// `get`, so the two disagree the moment `designer/dist` changes without a rebuild —
+    /// `iter` reports what was there at compile time and `get` reports what is there now.
+    /// Asking the same way the handler asks is the only way this test cannot go stale for the
+    /// reason its predecessor did. (Measured: emptying `dist` without rebuilding makes `iter`
+    /// non-empty and `get` `None`.)
     #[tokio::test]
-    async fn an_empty_embed_answers_not_found_rather_than_panicking() {
+    async fn the_index_is_served_when_embedded_and_explained_when_not() {
+        let embedded = Embedded::get("index.html").is_some();
         let request = Request::builder()
             .uri("/")
             .body(axum::body::Body::empty())
             .expect("a minimal request");
         let response = embedded_or_index(request).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        if embedded {
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "designer/dist was embedded, so / must serve the SPA"
+            );
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "designer/dist was empty, so / must explain that rather than panic"
+            );
+        }
     }
 }
