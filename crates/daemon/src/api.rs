@@ -27,6 +27,7 @@ pub mod error;
 pub mod openapi;
 
 mod auth;
+mod available;
 mod blocks;
 mod logs;
 mod node;
@@ -100,6 +101,12 @@ pub fn routes() -> Vec<Route> {
         (&["GET"], "/node", get(node::get_node)),
         (&["GET"], "/blocks", get(blocks::list)),
         (&["POST"], "/blocks/pull", post(blocks::pull)),
+        (&["GET"], "/blocks/available", get(available::list)),
+        (
+            &["GET"],
+            "/blocks/available/{*reference}",
+            get(available::inspect),
+        ),
         (&["GET"], "/services", get(services::list)),
         (
             &["GET", "PUT", "DELETE"],

@@ -74,6 +74,11 @@ struct State {
     /// (eieio-8yq.10). `require_token` still gates it: unset, any bearer is accepted, as
     /// before this existed.
     expected_bearer: Option<String>,
+    /// `name` → the tags actually published for it, for `GET /v2/<repository>/tags/list`
+    /// (DAEMON §9.8, `Registry::tags`) — kept apart from `manifests`' keys because those also
+    /// carry the digest alias every [`Fake::publish_with_layer_type`] writes, and a digest is
+    /// not a tag.
+    tags: BTreeMap<String, Vec<String>>,
 }
 
 /// A registry serving on loopback (DAEMON §4.1's plain-HTTP case).
@@ -250,6 +255,10 @@ impl Fake {
         state
             .manifests
             .insert(format!("{name}:{manifest_digest}"), manifest);
+        let tags = state.tags.entry(String::from(name)).or_default();
+        if !tags.iter().any(|tag| tag == version) {
+            tags.push(String::from(version));
+        }
     }
 
     /// Publishes an image index at `name:version`, which a block may not be.
@@ -544,6 +553,12 @@ fn registry_api(
     let Some(rest) = path.strip_prefix("/v2/") else {
         return ("404 Not Found", "application/json", b"{}".to_vec());
     };
+    if let Some(repository) = rest.strip_suffix("/tags/list") {
+        let name = last(repository);
+        let tags = state.tags.get(name).cloned().unwrap_or_default();
+        let body = serde_json::json!({ "name": name, "tags": tags }).to_string();
+        return ("200 OK", "application/json", body.into_bytes());
+    }
     if let Some((repository, tag)) = rest.split_once("/manifests/") {
         let key = format!("{}:{tag}", last(repository));
         return match state.manifests.get(&key) {

@@ -27,6 +27,8 @@ use utoipa::OpenApi;
         super::node::get_node,
         super::blocks::list,
         super::blocks::pull,
+        super::available::list,
+        super::available::inspect,
         super::services::list,
         super::services::get_service,
         super::services::put_service,

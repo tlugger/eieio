@@ -156,6 +156,19 @@ pub enum PullError {
         /// Where it looked.
         path: String,
     },
+    /// The reference (or repository) names a host this node has no entry for in
+    /// `auth/registries.toml` (DAEMON §9.8).
+    ///
+    /// Distinct from [`Unregistered`](PullError::Unregistered), which is "there is no host
+    /// here at all": this is "there is a host, and this node has not been told it may browse
+    /// it". Only [`Registry::browse`] and [`Registry::tags`] produce it — an ordinary
+    /// [`Registry::pull`] still reaches an unconfigured host anonymously for a public
+    /// repository (§4.1), because a pull is a reference a service file already named, not a
+    /// host an authenticated caller of a browse endpoint gets to pick on the spot.
+    NotConfigured {
+        /// The host with no entry.
+        host: String,
+    },
 }
 
 impl std::fmt::Display for PullError {
@@ -198,6 +211,11 @@ impl std::fmt::Display for PullError {
                 f,
                 "this node requires signed blocks and has no public key at {path} to verify \
                  one against"
+            ),
+            PullError::NotConfigured { host } => write!(
+                f,
+                "{host} is not a configured registry; browsing is limited to hosts this node \
+                 has an entry for in `auth/registries.toml` (DAEMON §9.8)"
             ),
         }
     }
@@ -297,16 +315,8 @@ struct Location {
 
 impl Location {
     /// `https://<host>`, or `http://` for a loopback registry (DAEMON §4.1).
-    ///
-    /// The exception is narrow on purpose: it is the case where there is no network to be
-    /// downgraded on. Everything else is HTTPS and there is no knob to say otherwise.
     fn base(&self) -> String {
-        let host = self.host.split(':').next().unwrap_or(&self.host);
-        let scheme = match host {
-            "localhost" | "127.0.0.1" | "[::1]" | "::1" => "http",
-            _ => "https",
-        };
-        format!("{scheme}://{}", self.host)
+        base_url(&self.host)
     }
 
     /// `<base>/v2/<repository>/<kind>/<what>`.
@@ -315,15 +325,47 @@ impl Location {
     }
 }
 
-/// Splits a reference into where a pull goes, or says it names no registry.
+/// `https://<host>`, or `http://` for a loopback registry (DAEMON §4.1).
+///
+/// The exception is narrow on purpose: it is the case where there is no network to be
+/// downgraded on. Everything else is HTTPS and there is no knob to say otherwise. A free
+/// function rather than only [`Location::base`], because [`Registry::tags`] needs the same
+/// scheme rule for a repository that has no pin to build a [`Location`] out of.
+fn base_url(host: &str) -> String {
+    let bare = host.split(':').next().unwrap_or(host);
+    let scheme = match bare {
+        "localhost" | "127.0.0.1" | "[::1]" | "::1" => "http",
+        _ => "https",
+    };
+    format!("{scheme}://{host}")
+}
+
+/// Splits `path` — a reference or a bare repository, with any tag/digest already removed —
+/// into its host and the repository on it, or says it names no registry.
 ///
 /// The first `/`-separated component is the registry when it contains a `.` or a `:`, or is
-/// exactly `localhost` — OCI's rule, which is what makes `tlugger/filter:1.2.0` a namespace on
-/// no particular host rather than a host called `tlugger`. A digest pin (`name@sha256:...`) is
-/// split first, since `blocks::split_tag`'s rule of "the last `:`" would otherwise read the
-/// digest's own colon as a tag separator (DAEMON §4, eieio-8yq.11) — this is the pull side of
-/// the split [`blocks::parse`](crate::blocks) makes for the cache side, and it MUST agree with
-/// it, or a pull would fetch one artifact and a resolve would cache it under another.
+/// exactly `localhost` — OCI's rule, which is what makes `tlugger/filter` a namespace on no
+/// particular host rather than a host called `tlugger`. Shared by [`locate`], which peels a
+/// tag or digest off first, and [`Registry::tags`], which has none to peel: a repository to
+/// list tags for names no version of anything.
+fn split_repository(path: &str) -> Result<(String, String), PullError> {
+    let (host, repository) = path.split_once('/').ok_or(PullError::Unregistered)?;
+    if !(host.contains('.') || host.contains(':') || host == "localhost") {
+        return Err(PullError::Unregistered);
+    }
+    if repository.is_empty() {
+        return Err(PullError::Unregistered);
+    }
+    Ok((String::from(host), String::from(repository)))
+}
+
+/// Splits a reference into where a pull goes, or says it names no registry.
+///
+/// A digest pin (`name@sha256:...`) is split first, since `blocks::split_tag`'s rule of "the
+/// last `:`" would otherwise read the digest's own colon as a tag separator (DAEMON §4,
+/// eieio-8yq.11) — this is the pull side of the split [`blocks::parse`](crate::blocks) makes
+/// for the cache side, and it MUST agree with it, or a pull would fetch one artifact and a
+/// resolve would cache it under another.
 fn locate(reference: &str) -> Result<Location, PullError> {
     let (path, pin) = match crate::blocks::split_digest(reference) {
         Some((path, digest)) => (path, Pin::Digest(digest.to_ascii_lowercase())),
@@ -332,16 +374,10 @@ fn locate(reference: &str) -> Result<Location, PullError> {
             (path, Pin::Tag(String::from(tag)))
         }
     };
-    let (host, repository) = path.split_once('/').ok_or(PullError::Unregistered)?;
-    if !(host.contains('.') || host.contains(':') || host == "localhost") {
-        return Err(PullError::Unregistered);
-    }
-    if repository.is_empty() {
-        return Err(PullError::Unregistered);
-    }
+    let (host, repository) = split_repository(path)?;
     Ok(Location {
-        host: String::from(host),
-        repository: String::from(repository),
+        host,
+        repository,
         pin,
     })
 }
@@ -387,6 +423,18 @@ impl Registry {
         self.credentials.get(host)
     }
 
+    /// Whether `host` has an entry in `auth/registries.toml` (DAEMON §2.1, §13, §9.8).
+    ///
+    /// The gate [`Registry::browse`] and [`Registry::tags`] apply before making any request.
+    /// It answers the same question [`Registry::credential`] does — a `BTreeMap` lookup on the
+    /// exact host string, no suffix/prefix matching — because "configured" and "has a
+    /// credential" are the same fact for a browse: an entry with neither a token nor a
+    /// username/password is refused at load (`node::load_registries`), so presence in this map
+    /// already means the operator wrote a line for this host.
+    pub fn is_configured(&self, host: &str) -> bool {
+        self.credentials.contains_key(host)
+    }
+
     /// Pulls `reference` and answers the block's bytes, verified (DAEMON §4.1, §4.2).
     ///
     /// Verified means both of §4.1's senses, plus a third when `reference` is digest-pinned: the
@@ -424,6 +472,70 @@ impl Registry {
 
         self.verify(&at, &digest, &mut token)?;
         Ok(wasm)
+    }
+
+    /// Fetches `reference`'s verified bytes without adding anything to the block cache
+    /// (DAEMON §9.8) — backs `GET /blocks/available/{reference}`.
+    ///
+    /// **Deliberately just a gate in front of [`Registry::pull`], not a second fetch path.**
+    /// `pull` already never touches the cache itself — a caller (`crate::api::blocks::pull`)
+    /// writes what it returns, and this caller does not — so the only thing browsing needs
+    /// beyond what `pull` already does is refusing to run at all against a host this node was
+    /// not told to trust with an authenticated caller's own choice of reference. That is also
+    /// why what comes back is verified exactly as installing it would verify it: a bad
+    /// signature or a digest mismatch answers here exactly as it would from `POST
+    /// /blocks/pull`, so the manifest a browse shows is never one this node would then refuse
+    /// to install (§9.8's own argument for why the node browses and not a client).
+    ///
+    /// **Only a configured registry.** Unlike `pull`, which reaches an unconfigured host
+    /// anonymously when a reference resolves to a public repository (§4.1), this refuses
+    /// before making a single request. A pull's reference came from a service file an operator
+    /// already wrote; a browse's reference is handed to this node by whichever authenticated
+    /// caller made the request, and an unconstrained browse would let that caller aim this
+    /// node's outbound fetches at any host that speaks OCI. This node's own
+    /// `auth/registries.toml` is the allow-list that stops that.
+    pub fn browse(&self, reference: &str) -> Result<Vec<u8>, PullError> {
+        let at = locate(reference)?;
+        if !self.is_configured(&at.host) {
+            return Err(PullError::NotConfigured { host: at.host });
+        }
+        self.pull(reference)
+    }
+
+    /// Lists the tags a `repository` (no tag or digest of its own) has, via `GET
+    /// /v2/<repository>/tags/list` — backs `GET /blocks/available` (DAEMON §9.8).
+    ///
+    /// **Not `GET /v2/_catalog`.** A registry-wide listing was considered and rejected: the
+    /// catalog operation is frequently refused to anonymous and even credentialed callers on
+    /// public registries (it is an optional extension in the OCI Distribution Specification,
+    /// and GitHub Container Registry, among others, refuses it outright), while tag listing is
+    /// a repository-scoped operation the specification requires for any repository that
+    /// exists. This node can honestly promise the second where it could not promise the
+    /// first — which is the whole of why `GET /blocks/available` takes a `repository`, a
+    /// registry cannot be enumerated from nothing, and answers a list of tags rather than a
+    /// registry-wide catalog.
+    ///
+    /// Gated exactly as [`Registry::browse`] is, and for the same reason: `repository` is an
+    /// authenticated caller's own choice of where to point this node's outbound fetches.
+    ///
+    /// Sorted, for the reason `GET /blocks`'s own listing is: two calls against an unchanged
+    /// repository should answer identically rather than in whatever order the registry sent
+    /// them.
+    pub fn tags(&self, repository: &str) -> Result<Vec<String>, PullError> {
+        let (host, repo) = split_repository(repository)?;
+        if !self.is_configured(&host) {
+            return Err(PullError::NotConfigured { host });
+        }
+        let url = format!("{}/v2/{repo}/tags/list", base_url(&host));
+        let mut token = None;
+        let raw = self.fetch(&url, &host, "application/json", MANIFEST_LIMIT, &mut token)?;
+        let mut parsed: TagsList =
+            serde_json::from_slice(&raw).map_err(|error| PullError::Malformed {
+                url: url.clone(),
+                detail: format!("not a tags list: {error}"),
+            })?;
+        parsed.tags.sort();
+        Ok(parsed.tags)
     }
 
     /// Applies the signature policy to the manifest at `digest` (DAEMON §4.2).
@@ -867,6 +979,14 @@ fn basic_auth(username: &str, password: &str) -> String {
 /// `sha256:<hex>` over `bytes`, in the form an OCI digest is written in.
 fn hex_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", crate::blocks::sha256_hex(bytes))
+}
+
+/// `GET /v2/<repository>/tags/list`'s answer (the OCI Distribution Specification's own shape).
+/// `name` is not read: [`Registry::tags`] already knows the repository it asked about, and a
+/// registry that disagreed about its own name would not be a reason to distrust its tags.
+#[derive(Debug, Deserialize)]
+struct TagsList {
+    tags: Vec<String>,
 }
 
 /// A token endpoint's answer. Registries disagree about which field it is in.

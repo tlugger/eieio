@@ -38,6 +38,13 @@ pub struct Harness {
 impl Harness {
     /// Provisions a data directory, boots it, and serves the API.
     pub async fn start(test: &str) -> Harness {
+        Harness::start_with(test, |_root| {}).await
+    }
+
+    /// Like [`Harness::start`], but runs `prepare` against the fresh data directory before the
+    /// node opens it — for a test that needs a file `Node::open` reads at boot (DAEMON §9.8's
+    /// `auth/registries.toml`, in particular) to already be there when it reads it.
+    pub async fn start_with(test: &str, prepare: impl FnOnce(&std::path::Path)) -> Harness {
         let root = scratch(test);
         let entry = root.join("blocks").join("transform").join("1.0.0");
         std::fs::create_dir_all(&entry).expect("the cache entry");
@@ -65,6 +72,7 @@ impl Harness {
             "id = \"test\"\n[api]\nlisten = \"127.0.0.1:0\"\n",
         )
         .expect("a node.toml");
+        prepare(&root);
 
         let node = Node::open(&root).expect("the node comes up");
         let token = node.token.clone();
