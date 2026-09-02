@@ -311,12 +311,30 @@ designer-deps:
     cd designer
     if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
+# Compile `expr` to WASM for the browser (DESIGNER §1, §5).
+#
+# `crates/expr-wasm/pkg/` is generated and gitignored (wasm-pack writes its own
+# `.gitignore` containing `*`), so a fresh clone has no `pkg/` at all and the SPA's
+# `import … from '…/expr-wasm/pkg/eio_expr_wasm.js'` cannot resolve. That is not a
+# missing-file inconvenience: keystroke linting IS the real interpreter (§5), so
+# without this the SPA does not type-check, let alone run. Every recipe that touches
+# the SPA depends on it for that reason.
+designer-wasm:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v wasm-pack >/dev/null 2>&1; then
+        echo "designer-wasm: wasm-pack is not installed (cargo install wasm-pack)" >&2
+        exit 1
+    fi
+    cd crates/expr-wasm && wasm-pack build --target web --release
+
 # Build the SPA into `designer/dist`, which is what the server embeds and serves.
-designer-build: designer-deps
+designer-build: designer-wasm designer-deps
     cd designer && npm run build
 
-# The SPA's own suite: the derived-value rules, and the manifest-reference match.
-test-designer: designer-deps
+# The SPA's own suite: the derived-value rules, the manifest-reference match, the
+# operation builders, and the linter against the real interpreter.
+test-designer: designer-wasm designer-deps
     #!/usr/bin/env bash
     set -euo pipefail
     cd designer

@@ -145,6 +145,22 @@ struct PullBlockParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct AvailableBlocksParams {
+    /// Which node to address, by its name in `nodes.toml` (see the `list_nodes` tool).
+    node: String,
+    /// The repository to list tags for: `[registry/][namespace/]name`, with no tag of its own.
+    repository: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct InspectBlockParams {
+    /// Which node to address, by its name in `nodes.toml` (see the `list_nodes` tool).
+    node: String,
+    /// The block reference to inspect, e.g. `ghcr.io/eieio/transform:1.0.0`.
+    reference: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct PutServiceParams {
     /// Which node to address, by its name in `nodes.toml` (see the `list_nodes` tool).
     node: String,
@@ -286,6 +302,33 @@ impl McpServer {
         Parameters(p): Parameters<PullBlockParams>,
     ) -> Result<Json<Value>, ErrorData> {
         run_blocking(move || client::connect(Some(&p.node))?.pull_block(&p.reference)).await
+    }
+
+    /// `GET /blocks/available`: the tags a configured repository has, uninstalled (DAEMON §9.8).
+    ///
+    /// The node does the browsing, not this tool: it holds the registry credentials and enforces
+    /// the signature policy, so what it offers is what it would actually install. A repository
+    /// naming a host the node has no entry for is refused. Tags, not a whole registry — the OCI
+    /// catalog endpoint is optional and most registries do not offer it anonymously.
+    #[tool(name = "available_blocks")]
+    async fn available_blocks(
+        &self,
+        Parameters(p): Parameters<AvailableBlocksParams>,
+    ) -> Result<Json<Value>, ErrorData> {
+        run_blocking(move || client::connect(Some(&p.node))?.available_blocks(&p.repository)).await
+    }
+
+    /// `GET /blocks/available/{reference}`: one reference's manifest, without installing it
+    /// (DAEMON §9.8).
+    ///
+    /// Fetched and verified exactly as `pull_block` would verify it, then discarded — the
+    /// node's cache is unchanged, and `list_blocks` answers the same before and after.
+    #[tool(name = "inspect_block")]
+    async fn inspect_block(
+        &self,
+        Parameters(p): Parameters<InspectBlockParams>,
+    ) -> Result<Json<Value>, ErrorData> {
+        run_blocking(move || client::connect(Some(&p.node))?.inspect_block(&p.reference)).await
     }
 
     /// Every service on this node and its state.

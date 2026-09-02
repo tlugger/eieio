@@ -49,17 +49,35 @@
 # platform this file targets an explicit, single fact rather than "whatever the host is
 # today", and is what makes the emulated build reproducible on both kinds of host.
 
-# ---- stage 1: the SPA (designer/dist, embedded by crates/designer at compile time) --------
+# ---- stage 1: `expr`, compiled to WASM for the browser ------------------------------------
+# The SPA imports `crates/expr-wasm/pkg/eio_expr_wasm.js` for its keystroke linting
+# (DESIGNER §1, §5 — the real interpreter, not a reimplementation). `pkg/` is generated and
+# gitignored, so it is NOT in the build context and the SPA stage below cannot type-check
+# without this. Three build orderings now matter in this file and each fails differently:
+# no WASM and the SPA build fails loudly; no `designer/dist` and the Rust build succeeds and
+# ships a 404 (below); wrong order between them and neither happens.
+FROM --platform=linux/amd64 rust:1.97.1-slim-bookworm AS wasm-builder
+RUN apt-get update && apt-get install --yes --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/ crates/
+RUN cd crates/expr-wasm && wasm-pack build --target web --release
+
+# ---- stage 2: the SPA (designer/dist, embedded by crates/designer at compile time) --------
 FROM --platform=linux/amd64 node:22-bookworm-slim AS spa-builder
-WORKDIR /designer
+WORKDIR /workspace
 # Dependencies before source: Docker's layer cache reuses this `npm ci` layer across builds
 # that only touch designer/src.
-COPY designer/package.json designer/package-lock.json ./
-RUN npm ci
-COPY designer/ ./
-RUN npm run build
+COPY designer/package.json designer/package-lock.json designer/
+RUN cd designer && npm ci
+# At the path the SPA's own import resolves to, relative to `designer/`.
+COPY --from=wasm-builder /workspace/crates/expr-wasm/pkg crates/expr-wasm/pkg
+COPY designer/ designer/
+RUN cd designer && npm run build
 
-# ---- stage 2: the Rust binary, statically linked against musl -----------------------------
+# ---- stage 3: the Rust binary, statically linked against musl -----------------------------
 FROM --platform=linux/amd64 rust:1.97.1-slim-bookworm AS rust-builder
 # `musl-tools` provides `musl-gcc`, the only C compiler `rusqlite`'s bundled SQLite needs for
 # this target (see the header comment above — there is nothing else in this binary's
@@ -74,12 +92,12 @@ WORKDIR /workspace
 # with `-p`. `.dockerignore` keeps this to source only — no `target/`, no `node_modules/`.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-# The SPA half, built in stage 1, landing at the exact path
+# The SPA half, built in stage 2, landing at the exact path
 # `crates/designer/src/assets.rs` embeds: `$CARGO_MANIFEST_DIR/../../designer/dist`, i.e.
 # this workspace's `designer/dist`. This COPY is the line that proves the build order:
 # comment it out and the image still builds — only a runtime `curl` of `/` (the release
 # workflow's smoke job) says it shipped nothing.
-COPY --from=spa-builder /designer/dist designer/dist
+COPY --from=spa-builder /workspace/designer/dist designer/dist
 ENV CC_x86_64_unknown_linux_musl=musl-gcc
 # Explicit rather than relied-upon: this target links statically by default, but saying so
 # is cheaper than a future default change silently producing a dynamically linked "static"
@@ -91,7 +109,7 @@ RUN cargo build --release --package eio-designer --target x86_64-unknown-linux-m
 # instead, where it affects only this image.
 RUN strip target/x86_64-unknown-linux-musl/release/eio-designer
 
-# ---- stage 3: the image itself -------------------------------------------------------------
+# ---- stage 4: the image itself -------------------------------------------------------------
 # `scratch`: the binary above is fully static, so there is no libc to provide and nothing
 # else this process touches at runtime — no TLS, no timezone database, no shell. The
 # smallest image that is not lying about what is in it.

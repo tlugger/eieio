@@ -30,6 +30,8 @@ const TOOL_ENDPOINTS: &[(&str, &str, &str)] = &[
     ("node_info", "GET", "/node"),
     ("list_blocks", "GET", "/blocks"),
     ("pull_block", "POST", "/blocks/pull"),
+    ("available_blocks", "GET", "/blocks/available"),
+    ("inspect_block", "GET", "/blocks/available/{*reference}"),
     ("list_services", "GET", "/services"),
     ("get_service", "GET", "/services/{service}"),
     ("put_service", "PUT", "/services/{service}"),

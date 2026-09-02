@@ -301,6 +301,7 @@ pub(crate) fn envelope_error(status: u16, body: &[u8]) -> anyhow::Error {
 const NODE: &str = "/node";
 const BLOCKS: &str = "/blocks";
 const BLOCKS_PULL: &str = "/blocks/pull";
+const BLOCKS_AVAILABLE: &str = "/blocks/available";
 const SERVICES: &str = "/services";
 const STATE_ORPHANS: &str = "/state/orphans";
 const TAPS: &str = "/taps";
@@ -343,6 +344,11 @@ pub const ENDPOINTS: &[(&str, &str)] = &[
     ("GET", NODE),
     ("GET", BLOCKS),
     ("POST", BLOCKS_PULL),
+    ("GET", BLOCKS_AVAILABLE),
+    // The daemon routes this with axum's wildcard syntax because a block reference contains
+    // slashes (DAEMON §9.8). The document names it as it is routed, so the parity check
+    // compares that spelling — not a prettier one this file would prefer.
+    ("GET", "/blocks/available/{*reference}"),
     ("GET", SERVICES),
     ("GET", "/services/{service}"),
     ("PUT", "/services/{service}"),
@@ -423,6 +429,20 @@ impl Client {
         let request = Request::new(Method::Post, BLOCKS_PULL)
             .json_body(&serde_json::json!({ "reference": reference }))?;
         self.call_json(request)
+    }
+
+    /// `GET /blocks/available` — what a configured registry offers, uninstalled (DAEMON §9.8).
+    pub fn available_blocks(&self, repository: &str) -> Result<Value> {
+        let request = Request::new(Method::Get, BLOCKS_AVAILABLE).query("repository", repository);
+        self.call_json(request)
+    }
+
+    /// `GET /blocks/available/{reference}` — one reference's manifest, without installing it.
+    pub fn inspect_block(&self, reference: &str) -> Result<Value> {
+        self.call_json(Request::new(
+            Method::Get,
+            format!("{BLOCKS_AVAILABLE}/{reference}"),
+        ))
     }
 
     /// `GET /services`.
