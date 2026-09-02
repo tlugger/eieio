@@ -17,7 +17,8 @@ crates/
                    the guest SDK
   host-core/     ★ ABI implementation: lifecycle driver, memory conventions,
                    status/size protocol, capability validation, router core,
-                   property resolution (ABI §11.1's required/default rule)
+                   property resolution (ABI §11.1's required/default rule),
+                   and `eio:core`'s host functions (ABI §7.0) — see §1.1
   expr/          ★ Expression language: parser, static analysis, interpreter,
                    budgets (EXPR-SPEC). no_std. Also compiled to WASM for
                    Designer in-browser linting (DESIGNER-SPEC §5)
@@ -97,6 +98,19 @@ The prefix is not cosmetic. `eio-sdk` publishes to crates.io (SCOPE §7.1), and 
 The daemon depends on the same `serde_json` with `std` enabled (§12's JSON batch input). That does not reach `manifest`: `just check-nostd` builds each ★ crate for a bare-metal target as its own package, so cargo unifies features across that build and not across the workspace. The gate is what makes the claim true rather than an assumption about resolver behaviour.
 
 ---
+
+### 1.1 `eio:core`'s host functions live in `host-core`, once
+
+ABI §7.0's six functions — `log`, `emit`, `error`, the two clocks and `rand` — are **one implementation, in `host-core`**, used by the daemon, the leaf runtime and the reference conformance harness alike. This is §1's rule applied to the namespace §7.0 promises unconditionally, and it is stated separately because it was got wrong: all three hosts wrote their own, in files of roughly 320 lines each, and none of the three mentioned an engine type — every one was written against `host-core`'s own engine-agnostic `HostCall`, so there was never a per-engine reason for a second copy.
+
+**Why this is a rule and not a preference.** ABI §13 makes divergence between hosts a conformance bug by definition, and three copies of one namespace is the mechanism by which that divergence happens: a fix to a size-convention edge case in one file and not the others is a silent per-host difference. `rand`'s bounds check is the sharpest case — it computes the end of the range in `u64` so `buf + len` cannot wrap, then proves the range before writing — and that is a memory-safety argument at a sandbox boundary. It is checked once or it is checked inconsistently.
+
+**What the host supplies, and why those two things and no others.** Two of the six cannot be answered by a `no_std` crate with no platform beneath it, so they are the host's to provide and the rest is shared:
+
+- **The clock.** `time_unix_ms` and `time_mono_ms` take their answers from the host, carried as data. A conformance scenario fixes both, so a suite is not measuring against the wall clock (§13.1).
+- **Entropy.** `rand` needs a source, and the three hosts genuinely differ: a daemon takes the operating system's, a leaf takes a hardware source, and the reference harness takes a **deterministic** one on purpose — ABI §13.1 needs a suite to get the same bytes twice.
+
+Everything else — argument decoding, the §8 status and size convention, the memory-bounds proofs, the emission ledger — is the same code on every host, beside `StateStore` (§10) and `Timers`, which are the same pattern for the same reason.
 
 ## 2. On-disk layout (source of truth, SCOPE §3.8)
 
