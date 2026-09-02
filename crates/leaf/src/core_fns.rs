@@ -26,6 +26,12 @@ pub use eio_host_core::{Detail, Emission, LogLine};
 /// A real leaf reads a hardware clock; this bring-up reads the host build's, the same
 /// stand-in `crates/daemon`'s own [`ClockSource`] is, because neither this milestone nor the
 /// daemon crate is where LEAF §3's hardware binding lands.
+///
+/// `Clone, Copy`: `Instant` is `Copy`, and [`timer::Scheduler`](crate::timer::Scheduler) needs
+/// to read the *same* clock `eio:core`'s `time_mono_ms` does rather than starting a second one
+/// with its own origin. A copy of this type is not a second clock — it is the same origin
+/// instant, read again — which is the distinction `timer`'s module docs lean on.
+#[derive(Clone, Copy)]
 pub struct SystemClock {
     /// The origin `time_mono_ms` counts from — this instance's construction.
     origin: Instant,

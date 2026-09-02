@@ -30,13 +30,17 @@
 //! - The baked graph in [`spawn`] and `main.rs` is a hand-written `const`-shaped table, which
 //!   LEAF §6 explicitly allows for this milestone — the *generator* that emits one from a
 //!   service file is a later expansion item, not this.
-//! - There is no `Timers` implementation and no transport client: neither golden block this
-//!   crate drives needs one, and LEAF §8 names no MQTT client on purpose.
+//! - [`timer`] backs `eio:timer` with a single-threaded, poll-driven scheduler (eieio-x7g.2's
+//!   second milestone) — see that module's own docs for why its [`timer::pump`] is a
+//!   legitimate scheduler and not a second lifecycle driver, and for why it is not LEAF §4's
+//!   watchdog. There is still no transport client: no golden block this crate drives needs
+//!   one, and LEAF §8 names no MQTT client on purpose.
 
 pub mod core_fns;
 pub mod engine;
 pub mod fixtures;
 pub mod state;
+pub mod timer;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -66,6 +70,10 @@ pub struct Instance {
     pub descriptor: Descriptor,
     /// Its manifest, for a caller that wants to know what it declares.
     pub manifest: Manifest,
+    /// Its timer scheduler, if it declares `eio:timer` — `None` otherwise. A cloneable handle
+    /// (see [`timer::Scheduler`]): a caller keeps this clone to drive [`timer::pump`] between
+    /// guest callbacks, while another clone is the one actually registered on the guest.
+    pub timers: Option<timer::Scheduler>,
 }
 
 /// A leaf's own budgets (LEAF §4): EXPR §9's floors, not the reference defaults.
@@ -105,11 +113,11 @@ pub fn spawn(
     let manifest = eio_manifest::validate(wasm, None).map_err(|error| error.to_string())?;
 
     for capability in &manifest.capabilities {
-        if *capability != Capability::State {
+        if !matches!(capability, Capability::State | Capability::Timer) {
             return Err(format!(
                 "instance {instance_id:?} declares capability {capability:?}, which this \
-                 milestone's bring-up does not wire (only `state` is; LEAF §8 names no \
-                 transport client and this crate has no `Timers`/`gpio`/`i2c`/`http` yet)"
+                 milestone's bring-up does not wire (`state` and `timer` are; LEAF §8 names no \
+                 transport client and this crate has no `gpio`/`i2c`/`http` yet)"
             ));
         }
     }
@@ -122,12 +130,16 @@ pub fn spawn(
     let properties = eio_host_core::PropContext::compile_with_limits(&sources, EvalLimits::FLOORS)
         .map_err(|error| error.to_string())?;
 
+    // One clock, not two: a copy of it goes to `eio:core` below and, if this instance declares
+    // `timer`, another copy goes to its scheduler — see `SystemClock`'s own docs for why a
+    // `Copy` is the same clock and not a second one.
+    let clock = core_fns::SystemClock::new();
     let budgets = leaf_budgets();
     let core = core_fns::Core::new(
         limits,
         budgets,
         descriptor.outputs.len() as u32,
-        core_fns::SystemClock::new(),
+        clock,
         core_fns::BringUpEntropy::new(instance_id),
     );
 
@@ -145,6 +157,15 @@ pub fn spawn(
         state_import::register(&mut guest, store)
             .map_err(|error| format!("registering eio:state for {instance_id:?}: {error}"))?;
     }
+
+    let timers = if manifest.declares(Capability::Timer) {
+        let scheduler = timer::Scheduler::new(clock);
+        eio_host_core::timer::register(&mut guest, scheduler.clone())
+            .map_err(|error| format!("registering eio:timer for {instance_id:?}: {error}"))?;
+        Some(scheduler)
+    } else {
+        None
+    };
 
     let configured = match Configured::configure(guest, &descriptor, properties) {
         Configuring::Configured(configured) => configured,
@@ -170,6 +191,7 @@ pub fn spawn(
         core,
         descriptor,
         manifest,
+        timers,
     })
 }
 

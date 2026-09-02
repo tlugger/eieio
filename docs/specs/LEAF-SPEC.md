@@ -175,7 +175,7 @@ Needed before implementation, and deliberately not guessed at in this draft:
 - **The generated `main`**: what the baked graph looks like as Rust, and whether it is generated source or a const table.
 - **Memory budget**: heap sizing per target, and what a leaf does when a batch will not fit.
 - **The transport client** (§8), once one has been measured.
-- **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on.
+- **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on. **A host bring-up cannot stand in for this one**, measured rather than assumed: `wasm3x` 0.1.0 exposes no interruption, abort or termination entry point at all, so nothing outside a running guest call can end it, and the host leaf therefore answers `enforces_budgets = false` and has ABI §13's budget scenario skipped by name — which is §4's honest-binding rule working as intended, not a gap in the leaf. The watchdog becomes implementable at the same moment the target does: a hardware timer and an engine that can be told to stop.
 - **Observability without an API** (§7): what a leaf publishes about itself, and on which topic.
 - **A class-aware CLI** (§7): `nodes.toml` records no node class, so `eio` will happily try to reach a leaf. Either it learns the class or it stays a documented sharp edge.
 - **Flash layout**: where AOT artifacts, state and configuration sit, and how a firmware update treats existing state.

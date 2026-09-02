@@ -26,13 +26,18 @@ impl Host for Wasm3Leaf {
         "eio-leaf (wasm3)"
     }
 
-    /// Only `eio:state` has a host-side implementation wired anywhere in this crate today
-    /// (`eio_leaf::spawn`'s capability check refuses every other one) — `timer`, `gpio`,
-    /// `i2c` and `http` are unimplemented, not merely untested, so scenarios needing them
-    /// must be skipped by name rather than left to fail at a link the harness's own generic
-    /// registration would otherwise attempt.
+    /// `eio:state` and `eio:timer` are the two host-side implementations wired anywhere in
+    /// this crate today (`eio_leaf::spawn`'s capability check refuses every other one) —
+    /// `gpio`, `i2c` and `http` are unimplemented, not merely untested, so scenarios needing
+    /// them must be skipped by name rather than left to fail at a link the harness's own
+    /// generic registration would otherwise attempt.
+    ///
+    /// The harness answers the timer scenario's own `eio:timer` calls with its own generic
+    /// `Capabilities` implementation (`crates/conformance/src/capability.rs`), the same way it
+    /// does for `state` — this crate's own `timer::Scheduler` is exercised by
+    /// `tests/timer.rs`, not by this suite.
     fn capabilities(&self) -> &[Capability] {
-        &[Capability::State]
+        &[Capability::State, Capability::Timer]
     }
 
     /// wasm3 has no fuel counter, and this milestone adds no watchdog of its own (LEAF §4
