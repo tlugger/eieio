@@ -31,6 +31,7 @@
     mintBlockId,
     setAutostartOperations,
     setPropertiesOperations,
+  setNameOperations,
     type PortRef,
   } from './lib/service/operations';
   import type {
@@ -270,9 +271,18 @@
     configuringInstanceId = id;
   }
 
-  async function handleConfigAccept(changedProps: Record<string, string | undefined>) {
+  async function handleConfigAccept(
+    changedProps: Record<string, string | undefined>,
+    changedName?: string | undefined,
+  ) {
     if (!configuringInstanceId) return;
     const operations = setPropertiesOperations(configuringInstanceId, changedProps);
+    // The label goes in the same batch, because DESIGNER §3.2 applies a batch
+    // all-or-nothing: an accept that renamed the block and then failed on a
+    // property must not leave the rename behind.
+    if (changedName !== undefined) {
+      operations.push(...setNameOperations(configuringInstanceId, changedName));
+    }
     if (operations.length === 0) {
       configuringInstanceId = null;
       return;

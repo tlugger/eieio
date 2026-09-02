@@ -13,6 +13,7 @@ import {
   removeBlockOperations,
   setAutostartOperations,
   setPropertiesOperations,
+  setNameOperations,
 } from './operations';
 import { ERROR_PORT } from '../api/types';
 
@@ -167,5 +168,38 @@ describe('layoutOperations', () => {
 
     const changed = layoutOperations({ blocks: {}, viewport: { x: 0, y: 0, zoom: 1.5 } }, previous);
     expect(changed).toEqual([{ op: 'set_ui', key: 'viewport', value: '{ x = 0.0, y = 0.0, zoom = 1.5 }' }]);
+  });
+});
+
+describe('setNameOperations', () => {
+  it('sets a label', () => {
+    expect(setNameOperations('b7k2', 'Window sensor')).toEqual([
+      { op: 'set_name', id: 'b7k2', name: 'Window sensor' },
+    ]);
+  });
+
+  it('trims, so trailing whitespace is not part of the label', () => {
+    expect(setNameOperations('b7k2', '  Window sensor  ')).toEqual([
+      { op: 'set_name', id: 'b7k2', name: 'Window sensor' },
+    ]);
+  });
+
+  it('clears the key rather than writing an empty string', () => {
+    // SERVICE §6 makes `name` OPTIONAL, and absent is not the same as empty to
+    // a reader — so an emptied field removes the key.
+    expect(setNameOperations('b7k2', '')).toEqual([{ op: 'remove_name', id: 'b7k2' }]);
+    expect(setNameOperations('b7k2', '   ')).toEqual([{ op: 'remove_name', id: 'b7k2' }]);
+    expect(setNameOperations('b7k2', undefined)).toEqual([{ op: 'remove_name', id: 'b7k2' }]);
+  });
+
+  it('never emits an operation that touches anything but the name', () => {
+    // The failure this whole issue exists to prevent: remove-and-re-add would
+    // change the block's id, and DAEMON §10 keys eio:state by id.
+    for (const label of ['Window sensor', '', undefined]) {
+      for (const op of setNameOperations('b7k2', label)) {
+        expect(op.op).toMatch(/^(set_name|remove_name)$/);
+        expect(Object.keys(op).sort()).not.toContain('block');
+      }
+    }
   });
 });

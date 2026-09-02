@@ -183,6 +183,8 @@ export interface ServiceDefinition {
 export type ServiceEditOperation =
   | { op: 'add_block'; id?: string; block: string; name?: string; props?: Record<string, string> }
   | { op: 'remove_block'; id: string }
+  | { op: 'set_name'; id: string; name: string }
+  | { op: 'remove_name'; id: string }
   | { op: 'set_prop'; id: string; property: string; expression: string }
   | { op: 'remove_prop'; id: string; property: string }
   | { op: 'connect'; from: string; to: string }

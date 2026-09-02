@@ -507,6 +507,25 @@ async function applyOneOperation(
       file.connections = next;
       return { error: null };
     }
+    case 'set_name': {
+      const block = file.blocks[op.id];
+      if (!block) return { error: { message: `no such block "${op.id}"`, instance: op.id } };
+      // The id is untouched, and so is everything else — SERVICE §9's whole
+      // point, since remove-and-re-add would change the id and discard the
+      // block's eio:state (DAEMON §10).
+      file.blocks = { ...file.blocks, [op.id]: { ...block, name: op.name } };
+      return { error: null };
+    }
+    case 'remove_name': {
+      const block = file.blocks[op.id];
+      if (!block) return { error: { message: `no such block "${op.id}"`, instance: op.id } };
+      // Idempotent, and it removes the key rather than emptying it: `name` is
+      // OPTIONAL (SERVICE §6), and clearing an OPTIONAL thing states an end
+      // state rather than naming a transition (SERVICE §9).
+      const { name: _dropped, ...withoutName } = block;
+      file.blocks = { ...file.blocks, [op.id]: withoutName };
+      return { error: null };
+    }
     case 'set_autostart': {
       file.autostart = op.value;
       return { error: null };

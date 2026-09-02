@@ -110,6 +110,20 @@ export function isValidConnectionTarget(source: PortRef, target: PortRef): boole
  * spec gap rather than guessing a `rename_block` operation into existence
  * (see the final report / lib/components/ConfigModal.svelte's doc comment).
  */
+/** A block's label, changed or cleared.
+ *
+ *  SERVICE §9 requires this to be a one-line edit that touches nothing else. The
+ *  reason it is an operation at all rather than remove-and-re-add: the latter
+ *  changes the block's `id`, and DAEMON §10 keys the state store by id, so it
+ *  would discard the block's `eio:state` behind something that looks cosmetic.
+ *
+ *  An empty or whitespace-only label clears the key rather than writing `""` —
+ *  `name` is OPTIONAL (SERVICE §6) and absent is not the same as empty. */
+export function setNameOperations(id: string, label: string | undefined): ServiceEditOperation[] {
+  const trimmed = (label ?? '').trim();
+  return trimmed.length === 0 ? [{ op: 'remove_name', id }] : [{ op: 'set_name', id, name: trimmed }];
+}
+
 export function setPropertiesOperations(id: string, changedProps: Record<string, string | undefined>): ServiceEditOperation[] {
   const ops: ServiceEditOperation[] = [];
   for (const [property, expression] of Object.entries(changedProps)) {

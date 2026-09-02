@@ -3,15 +3,13 @@
   // attention on one block" — the owner's own words are quoted in the spec.
   // Double-click a block: name, then properties, then accept/cancel.
   //
-  // NAME IS DISPLAY-ONLY, and that is a guess this shell is reporting rather
-  // than picking silently: DESIGNER §3.2 enumerates the operations a service
-  // edit may contain (`add_block, remove_block, set_prop, remove_prop,
-  // connect, disconnect, set_autostart, set_ui, remove_ui`), and none of
-  // them retargets an existing instance's `name` — only `add_block` carries
-  // one, once, at creation. Reading "its name, then its properties" as two
-  // *editable* fields would need a tenth operation the spec does not list;
-  // reading it as "shown, then edited" needs none. This shell takes the
-  // narrower reading and shows the name as a heading. See the final report.
+  // The name IS editable. It was display-only while DESIGNER §3.2 listed no
+  // operation that could retarget an existing instance's `name` — that gap was
+  // reported rather than papered over, and SERVICE §9 was then amended for it
+  // (eieio-m9s.8): a label can be changed, and changing it changes nothing else.
+  // Why that needed a spec rule rather than a workaround: remove-and-re-add
+  // changes the block's `id`, and DAEMON §10 keys the state store by id, so
+  // "rename" done that way silently discards the block's `eio:state`.
   import { resolveManifest } from '../derive/capabilities';
   import ExpressionField from './ExpressionField.svelte';
   import type { BlockInstance, BlockManifest, Connection } from '../api/types';
@@ -27,7 +25,10 @@
      * (DESIGNER §3.2's `422`) — shown here rather than only in a canvas-wide
      * banner, since the modal is where the operator can act on it. */
     errorMessage?: string | null;
-    onAccept: (changedProps: Record<string, string | undefined>) => void;
+    onAccept: (
+      changedProps: Record<string, string | undefined>,
+      changedName?: string | undefined,
+    ) => void;
     onCancel: () => void;
   }
 
@@ -40,6 +41,10 @@
   // changes under a mounted modal, and an accept always closes it.
   // svelte-ignore state_referenced_locally
   let overrides = $state<Record<string, string>>({ ...instance.props });
+  // svelte-ignore state_referenced_locally
+  let label = $state(instance.name ?? '');
+  // svelte-ignore state_referenced_locally
+  const originalLabel = instance.name ?? '';
   let resetRequested = $state<Set<string>>(new Set());
   let docsOpen = $state(false);
 
@@ -71,7 +76,11 @@
         changed[prop.name] = overrides[prop.name];
       }
     }
-    onAccept(changed);
+    // `undefined` means "unchanged", which is what lets the caller send no name
+    // operation at all rather than a redundant one — the trimmed comparison is
+    // so that adding and removing whitespace is not an edit.
+    const nameChanged = label.trim() !== originalLabel.trim() ? label : undefined;
+    onAccept(changed, nameChanged);
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -130,8 +139,18 @@
   >
     <div class="modal__header">
       <div class="modal__title">
-        <div class="modal__name">{instance.name?.trim() || instance.id}</div>
-        <div class="modal__type">{manifest?.name ?? instance.block}</div>
+        <label class="modal__name-label" for="block-label">Name</label>
+        <input
+          id="block-label"
+          class="modal__name-input"
+          type="text"
+          bind:value={label}
+          placeholder={instance.id}
+          autocomplete="off"
+        />
+        <div class="modal__type">
+          {manifest?.name ?? instance.block} · <code>{instance.id}</code>
+        </div>
       </div>
       <button
         type="button"
@@ -245,9 +264,31 @@
     border-bottom: 1px solid var(--chrome-border);
   }
 
-  .modal__name {
-    font-weight: 700;
-    font-size: 15px;
+
+  .modal__name-label {
+    display: block;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.2rem;
+  }
+
+  .modal__name-input {
+    width: 100%;
+    font: inherit;
+    font-weight: 600;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 0.28rem 0.42rem;
+  }
+
+  .modal__name-input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
 
   .modal__type {
