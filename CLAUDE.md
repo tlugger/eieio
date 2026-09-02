@@ -8,7 +8,11 @@ eieio is a distributed stream-processing platform: WASM **blocks** wired into **
 
 **Current state: items 1–6 of [Implementation order](#implementation-order) are built, plus pub/sub.** `signal`, `expr` and `manifest` are the `no_std` foundation with their conformance vectors. `host-core` + `daemon` is a working node: lifecycle driver, executor, router, `eio:state` behind a real store, `eio:timer`, taps and log streaming over SSE, an OCI block manager that verifies digests and both cosign signature shapes, and the DAEMON §9 management API with OpenAPI at `/openapi.json` and a per-node bearer token. `service` is the service-file schema, parser and validator (SERVICE-SPEC). `block-sdk` is the guest runtime and `block-sdk-macros` the `#[block]` macro that generates the ABI exports, port enums, `Prop<T>` and the `eio:manifest` section; `cargo-eio` is `cargo eio new/build/test/publish`; `test-host` runs a block natively for the fast inner loop; `conformance` is the reference harness plus its scenario suite over wasmtime, wasm3 and WAMR; `cli` is the `eio` binary with management-API parity across every node in `~/.config/eieio/nodes.toml`, and `eio mcp` serves that same surface as MCP over stdio (SCOPE §4). Cross-node signals move over MQTT behind a swappable `Bridge`, with `publisher`/`subscriber` as host-native system blocks. `examples/blocks/` holds ABI §13.2's five golden blocks, written with the SDK, and `crates/conformance/scenarios/blocks/` the hand-written fixtures that test the harness itself.
 
-**Not built yet:** the Designer (`designer/` does not exist; DESIGNER-SPEC is 79 lines and every stack claim in it is still PROPOSED) and the leaf runtime and firmware pipeline. `cargo eio aot` is blocked on a `wamrc` toolchain — see eieio-7d8.21's notes before attempting it.
+**The Designer is built**: `designer/` is the Vite + Svelte 5 + Svelte Flow SPA and `crates/designer` its axum + rusqlite + rust-embed server — one catch-all proxy to a node, a SQLite registry of Systems and node addresses, session auth, canvas editing with live expression linting, and a schema-parity check that holds its hand-written response types against the daemon's own OpenAPI schemas.
+
+**`crates/leaf` exists as a host build**, not a firmware one: it links the five ★ crates unmodified, binds wasm3, wires `eio:state`, `eio:core` and `eio:timer`, and passes 28 of 32 conformance scenarios. That is the whole of what it proves — it is not a cross-compile, not `no_std`, and says nothing about fitting on an MCU.
+
+**Not built yet:** the firmware build pipeline, an MCU target, and `no_std` for the leaf (LEAF §11 lists what each needs). `cargo eio aot` is blocked on a `wamrc` toolchain — see eieio-7d8.21's notes before attempting it, and LEAF §4 for why the interpreter path needs none of it.
 
 ## The prime directive: specs are normative
 
@@ -63,11 +67,12 @@ Cargo.toml            workspace root
 crates/
   abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
   service/  daemon/  cli/  designer/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
+  leaf/                                    the leaf runtime, host build (LEAF §2)
   conformance/
 expr-tests/           host-agnostic vectors: expressions, property types, canonical CBOR
 schemas/              published JSON Schemas: manifest, service
-designer/             not created yet — the Vite + Svelte 5 SPA, own package.json;
-                      its server is `crates/designer` (DESIGNER §1)
+designer/             the Vite + Svelte 5 SPA, own package.json; its server is
+                      `crates/designer` (DESIGNER §1)
 examples/
   services/           sample service TOMLs
   blocks/             ABI §13.2's golden blocks — their own cargo workspace
@@ -91,8 +96,8 @@ Bottom-up, most-specified first. Do not start a later item because an earlier on
 6. Service file format + management API (DAEMON §2, §9). ✅
 7. Pub/sub transport + cross-node signals (DAEMON §7). ✅
 8. **CLI + agent tooling (MCP)** — `eio` and `eio mcp` are built. ✅
-9. Designer UI — nothing built; DESIGNER-SPEC needs its §10 expansion first.
-10. Leaf runtime + firmware build pipeline — LEAF-SPEC is drafted; nothing is built.
+9. Designer UI — built (DESIGNER §1–§7 ratified); §10's expansion list is what remains. ✅
+10. Leaf runtime + firmware build pipeline — `crates/leaf` runs on the host and passes conformance; the MCU target, `no_std`, AOT and the firmware pipeline are LEAF §11's expansion items.
 
 Items 1–4 are ✅ too. The authoritative list is SCOPE §7, with the epic-to-item mapping in §7.1; this is the same sequence, annotated.
 
