@@ -214,9 +214,14 @@ fn a_refused_command_writes_nothing() {
             "already connects",
         ),
         (&["remove-block", "kitchen.toml", "nope"], "defines no"),
+        // `unset-prop` on an absent property is deliberately NOT here. It used to be, and
+        // eieio-m9s.10 moved it: SERVICE §9 puts clearing an OPTIONAL thing on the
+        // end-state side of its removal line, so unsetting a property that was never set
+        // succeeds and reports that it did nothing. What still refuses is an unknown
+        // *instance* — the identified half of the same call — which the case below covers.
         (
-            &["unset-prop", "kitchen.toml", "b7k2", "nope"],
-            "configures no property",
+            &["unset-prop", "kitchen.toml", "nope", "interval_ms"],
+            "defines no",
         ),
     ];
     for (args, expected) in cases {
@@ -520,5 +525,30 @@ fn a_property_that_cannot_mean_anything_is_refused_before_it_is_written() {
         ],
     );
     assert!(refusal.contains("not a valid service file"), "{refusal}");
+    assert_eq!(text(&dir, "kitchen.toml"), before);
+}
+
+#[test]
+fn unsetting_a_property_that_was_never_set_reports_rather_than_refuses() {
+    // eieio-m9s.10, and the other half of `a_refused_command_writes_nothing`'s table: SERVICE
+    // §9 puts clearing an OPTIONAL thing on the end-state side of its removal line, so this
+    // succeeds. It is worth a positive test because the refusal table can only prove what
+    // still refuses, and the interesting claim here is what a person is *told* — silence
+    // would leave them unsure whether the command had understood them.
+    let dir = fixture("unset-absent");
+    let before = text(&dir, "kitchen.toml");
+
+    let output = eio(&dir, &["unset-prop", "kitchen.toml", "b7k2", "nope"]);
+    assert!(
+        output.status.success(),
+        "absent is an end state, not a refusal: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        said.contains("already unset"),
+        "it has to say it did nothing, not just exit 0: {said}"
+    );
+    // And it wrote nothing, which is the same promise the refusal table checks.
     assert_eq!(text(&dir, "kitchen.toml"), before);
 }
