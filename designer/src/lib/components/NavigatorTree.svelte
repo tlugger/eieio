@@ -49,8 +49,17 @@
 
   // Nodes start collapsed the first render; expand any node that already
   // holds the current selection so navigating in deep-linked never hides it.
+  //
+  // Guarded on `.has()` before writing: this effect reads `expandedNodes`
+  // (to build `next`) and writes it back, and unconditionally assigning a
+  // *new* Set every run — even one with identical contents — would give the
+  // effect a fresh reference to react to on every one of its own runs,
+  // looping forever the moment `selected` first became non-null
+  // (`effect_update_depth_exceeded`). Only writing when the id is actually
+  // missing makes the second run's `next` reference-stable, so there is
+  // nothing left to react to once expansion has already happened.
   $effect(() => {
-    if (selected) {
+    if (selected && !expandedNodes.has(selected.nodeId)) {
       const next = new Set(expandedNodes);
       next.add(selected.nodeId);
       expandedNodes = next;

@@ -24,6 +24,8 @@ export {
   startService,
   stopService,
   reloadService,
+  serviceEdit,
+  putService,
 } from './mock';
 
 export type * from './types';

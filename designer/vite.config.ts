@@ -21,6 +21,16 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+    fs: {
+      // `lib/expr/lint.ts` imports `crates/expr-wasm/pkg` (DESIGNER §5,
+      // §1's "expr crate compiled to WASM"), which sits outside this
+      // package's root — Vite's dev server otherwise 403s a request for
+      // anything outside it (`server.fs.strict`'s default). `npm run
+      // build`'s bundling is unaffected either way (module resolution at
+      // build time isn't subject to this dev-only guard); only `npm run
+      // dev` needs it.
+      allow: ['..'],
+    },
   },
   test: {
     environment: 'jsdom',

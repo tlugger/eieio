@@ -7,16 +7,35 @@
   // re-exports the mock layer (src/lib/api/mock.ts) — the backend
   // (crates/designer) doesn't exist in this worktree yet. Swapping the mock
   // for real `fetch` calls is a change confined to client.ts.
+  //
+  // This component is also where every canvas edit becomes a network
+  // round-trip: `applyEdit` is the one place that calls `serviceEdit` then
+  // `putService` then re-`getService`s (DESIGNER §3.2's "text in, text
+  // out"), so every gesture — connect, disconnect, delete, drag, configure,
+  // add-block, autostart — funnels through it and gets the same conflict
+  // handling and inline-error rendering for free.
   import IconRail from './lib/components/IconRail.svelte';
   import NavigatorTree from './lib/components/NavigatorTree.svelte';
   import Toolbar from './lib/components/Toolbar.svelte';
   import ServiceCanvas from './lib/components/ServiceCanvas.svelte';
   import BlockLibrary from './lib/components/BlockLibrary.svelte';
+  import ConfigModal from './lib/components/ConfigModal.svelte';
+  import ConflictBanner from './lib/components/ConflictBanner.svelte';
   import * as api from './lib/api/client';
+  import { resolveManifest } from './lib/derive/capabilities';
+  import {
+    addBlockOperations,
+    connectOperations,
+    mintBlockId,
+    setAutostartOperations,
+    setPropertiesOperations,
+    type PortRef,
+  } from './lib/service/operations';
   import type {
     BlockManifest,
     NodeSummary,
     ServiceDefinition,
+    ServiceEditOperation,
     ServiceSummary,
     SystemSummary,
   } from './lib/api/client';
@@ -31,6 +50,17 @@
   let busy = $state(false);
   let libraryOpen = $state(false);
   let loadError = $state<string | null>(null);
+
+  // The last edit attempt's refusal, if any (DESIGNER §5: rendered inline on
+  // the offending block/property/connection, never silently swallowed).
+  let editErrorMessage = $state<string | null>(null);
+  let editErrorBlockId = $state<string | null>(null);
+
+  // DAEMON §9.3's stale-`PUT` refusal (DESIGNER §4/§5): rendered, never
+  // silently overwritten.
+  let conflict = $state<{ current: string } | null>(null);
+
+  let configuringInstanceId = $state<string | null>(null);
 
   async function loadAll() {
     try {
@@ -69,6 +99,10 @@
   async function selectService(nodeId: string, serviceName: string) {
     selected = { nodeId, serviceName };
     currentService = null;
+    editErrorMessage = null;
+    editErrorBlockId = null;
+    conflict = null;
+    configuringInstanceId = null;
     currentService = await api.getService(nodeId, serviceName);
   }
 
@@ -91,6 +125,68 @@
       busy = false;
     }
   }
+
+  // --- The one path every canvas edit takes (DESIGNER §3.2, §4) ----------
+
+  // `applyEdit` calls are chained through this rather than fired
+  // concurrently: two gestures issued close together (a drag-stop alongside
+  // an incidental pane click, say) would otherwise both read the same
+  // `currentService.etag` and race — the second always losing to DAEMON
+  // §9.3's conflict check even though nothing outside this tab touched the
+  // file, which is a confusing thing to show an operator for an edit their
+  // own second click made. Chaining serializes this tab's own edits so only
+  // a *genuine* outside change (an agent, another tab) produces a conflict.
+  let editQueue: Promise<boolean> = Promise.resolve(true);
+
+  /**
+   * `serviceEdit` (validate + transform) -> `putService` (conditional write)
+   * -> `getService` (refetch the truth the canvas renders). Returns whether
+   * it succeeded; every caller below is a thin translation from a gesture to
+   * an operation batch, and this is the only one that talks to the network.
+   */
+  function applyEdit(operations: ServiceEditOperation[]): Promise<boolean> {
+    const next = editQueue.then(() => applyEditNow(operations));
+    // A failed edit must not poison every edit queued after it.
+    editQueue = next.catch(() => false);
+    return next;
+  }
+
+  async function applyEditNow(operations: ServiceEditOperation[]): Promise<boolean> {
+    if (!selected || !currentService) return false;
+    editErrorMessage = null;
+    editErrorBlockId = null;
+    let ok = false;
+    await withBusy(async () => {
+      const editResult = await api.serviceEdit(currentService!.text, operations);
+      if (!editResult.ok) {
+        const failure = editResult.errors[0];
+        editErrorMessage = failure?.message ?? 'the edit was refused';
+        editErrorBlockId = failure?.instance ?? null;
+        return;
+      }
+      const putResult = await api.putService(selected!.nodeId, selected!.serviceName, editResult.toml, currentService!.etag);
+      if (!putResult.ok) {
+        if (putResult.status === 412) {
+          conflict = { current: putResult.current ?? '' };
+        } else {
+          editErrorMessage = putResult.message ?? 'the node refused this edit';
+        }
+        return;
+      }
+      currentService = await api.getService(selected!.nodeId, selected!.serviceName);
+      await refreshServiceList(selected!.nodeId);
+      ok = true;
+    });
+    return ok;
+  }
+
+  async function handleReloadLatest() {
+    if (!selected) return;
+    conflict = null;
+    currentService = await api.getService(selected.nodeId, selected.serviceName);
+  }
+
+  // --- Lifecycle (Toolbar) -------------------------------------------------
 
   async function handleStart() {
     if (!selected) return;
@@ -118,6 +214,62 @@
       await refreshServiceList(selected!.nodeId);
     });
   }
+
+  async function handleToggleAutostart() {
+    if (!currentService) return;
+    await applyEdit(setAutostartOperations(!currentService.autostart));
+  }
+
+  // --- Canvas edits ---------------------------------------------------------
+
+  function handleConnect(source: PortRef, target: PortRef) {
+    void applyEdit(connectOperations(source, target));
+  }
+
+  async function handleAddBlock(blockRef: string) {
+    if (!currentService) return;
+    const id = mintBlockId(Object.keys(currentService.blocks));
+    // A simple cascade so successive adds don't stack exactly on top of one
+    // another: to the right of the current rightmost block, or a fixed
+    // start position for the first block in an empty service.
+    const positions = Object.values(currentService.ui.blocks);
+    const position =
+      positions.length > 0
+        ? { x: Math.max(...positions.map((p) => p.x)) + 260, y: 80 }
+        : { x: 80, y: 80 };
+    const ok = await applyEdit(addBlockOperations(id, blockRef, position));
+    if (ok) libraryOpen = false;
+  }
+
+  const configuringInstance = $derived(
+    configuringInstanceId && currentService ? (currentService.blocks[configuringInstanceId] ?? null) : null,
+  );
+  const configuringManifest = $derived(
+    configuringInstance ? resolveManifest(configuringInstance.block, manifests) : undefined,
+  );
+
+  function handleConfigure(id: string) {
+    editErrorMessage = null;
+    editErrorBlockId = null;
+    configuringInstanceId = id;
+  }
+
+  async function handleConfigAccept(changedProps: Record<string, string | undefined>) {
+    if (!configuringInstanceId) return;
+    const operations = setPropertiesOperations(configuringInstanceId, changedProps);
+    if (operations.length === 0) {
+      configuringInstanceId = null;
+      return;
+    }
+    const ok = await applyEdit(operations);
+    if (ok) configuringInstanceId = null;
+  }
+
+  function handleConfigCancel() {
+    configuringInstanceId = null;
+    editErrorMessage = null;
+    editErrorBlockId = null;
+  }
 </script>
 
 <IconRail />
@@ -129,10 +281,12 @@
     serviceName={selected?.serviceName ?? null}
     nodeName={selectedNode?.name ?? null}
     state={selectedServiceSummary?.state ?? null}
+    autostart={currentService?.autostart ?? null}
     {busy}
     onStart={handleStart}
     onStop={handleStop}
     onReload={handleReload}
+    onToggleAutostart={handleToggleAutostart}
     onAddBlock={() => (libraryOpen = true)}
   />
 
@@ -140,11 +294,38 @@
     <div class="main__error" role="alert">Failed to load: {loadError}</div>
   {/if}
 
-  <ServiceCanvas service={currentService} {manifests} node={selectedNode} />
+  {#if conflict}
+    <ConflictBanner current={conflict.current} onReloadLatest={handleReloadLatest} onDismiss={() => (conflict = null)} />
+  {:else if editErrorMessage}
+    <div class="main__error" role="alert">{editErrorMessage}</div>
+  {/if}
+
+  <ServiceCanvas
+    service={currentService}
+    {manifests}
+    node={selectedNode}
+    {editErrorBlockId}
+    onConfigure={handleConfigure}
+    onConnect={handleConnect}
+    onApplyOperations={applyEdit}
+  />
 </main>
 
 {#if libraryOpen}
-  <BlockLibrary {manifests} onClose={() => (libraryOpen = false)} />
+  <BlockLibrary {manifests} node={selectedNode} onSelect={handleAddBlock} onClose={() => (libraryOpen = false)} />
+{/if}
+
+{#if configuringInstance && currentService}
+  <ConfigModal
+    instance={configuringInstance}
+    manifest={configuringManifest}
+    {manifests}
+    blocks={currentService.blocks}
+    connections={currentService.connections}
+    errorMessage={editErrorBlockId === configuringInstance.id ? editErrorMessage : null}
+    onAccept={handleConfigAccept}
+    onCancel={handleConfigCancel}
+  />
 {/if}
 
 <style>

@@ -4,17 +4,29 @@
   // colour is a canvas-only recognition aid (§5), so library rows all
   // share one neutral swatch colour.
   //
-  // Browsing only: dragging a block onto the canvas to create an instance
-  // is editing behaviour, out of scope for this shell (eieio-m9s.2).
+  // GUESS: a row *click* adds the block rather than a drag-and-drop from
+  // here onto the canvas. §5 pictures "a gpio block dragged toward a node",
+  // but this library (as this shell built it, before this issue) is a
+  // centered dialog over a full-viewport backdrop — the canvas is not
+  // visible to drop onto while it is open. Click-to-add keeps the existing
+  // shell's chrome intact and reaches the same outcome (a block added at a
+  // sensible position, DESIGNER §5's capability warning shown first); real
+  // HTML5 drag-and-drop would need the library restructured into a panel
+  // that does not cover the canvas, which is a bigger change than this
+  // issue's scope of "the palette, with capability badges".
   import { deriveAbbreviation } from '../derive/abbreviation';
-  import type { BlockManifest } from '../api/types';
+  import { missingCapabilities } from '../derive/capabilities';
+  import type { BlockManifest, Capability, NodeSummary } from '../api/types';
 
   interface Props {
     manifests: BlockManifest[];
+    /** The node the open service targets — `null` cross-checks nothing. */
+    node: NodeSummary | null;
+    onSelect: (blockRef: string) => void;
     onClose: () => void;
   }
 
-  let { manifests, onClose }: Props = $props();
+  let { manifests, node, onSelect, onClose }: Props = $props();
 
   let query = $state('');
 
@@ -25,6 +37,10 @@
       return m.name.toLowerCase().includes(q) || (m.description ?? '').toLowerCase().includes(q);
     }),
   );
+
+  function missing(manifest: BlockManifest): Capability[] {
+    return node ? missingCapabilities(manifest, node.capabilities) : [];
+  }
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') onClose();
@@ -63,29 +79,37 @@
     </div>
 
     <ul class="library__list">
-      {#each filtered as manifest (manifest.name)}
-        <li class="library__row">
-          <div class="library__swatch">{deriveAbbreviation(manifest.name)}</div>
-          <div class="library__info">
-            <div class="library__name">
-              {manifest.name}
-              <span class="library__version">{manifest.version}</span>
-            </div>
-            {#if manifest.description}
-              <div class="library__description">{manifest.description}</div>
-            {/if}
-            <div class="library__meta">
-              {#if manifest.inputs.length > 0}
-                <span class="library__ports">in: {manifest.inputs.map((p) => p.name).join(', ')}</span>
+      {#each filtered as manifest (manifest.block_ref)}
+        {@const unmet = missing(manifest)}
+        <li>
+          <button type="button" class="library__row" onclick={() => onSelect(manifest.block_ref)}>
+            <div class="library__swatch">{deriveAbbreviation(manifest.name)}</div>
+            <div class="library__info">
+              <div class="library__name">
+                {manifest.name}
+                <span class="library__version">{manifest.version}</span>
+              </div>
+              {#if manifest.description}
+                <div class="library__description">{manifest.description}</div>
               {/if}
-              {#if manifest.outputs.length > 0}
-                <span class="library__ports">out: {manifest.outputs.map((p) => p.name).join(', ')}</span>
+              <div class="library__meta">
+                {#if manifest.inputs.length > 0}
+                  <span class="library__ports">in: {manifest.inputs.map((p) => p.name).join(', ')}</span>
+                {/if}
+                {#if manifest.outputs.length > 0}
+                  <span class="library__ports">out: {manifest.outputs.map((p) => p.name).join(', ')}</span>
+                {/if}
+                {#each manifest.capabilities as cap (cap)}
+                  <span class="library__capability" class:library__capability--missing={unmet.includes(cap)}>{cap}</span>
+                {/each}
+              </div>
+              {#if unmet.length > 0}
+                <div class="library__warning" role="alert">
+                  {node?.name} is missing capabilit{unmet.length > 1 ? 'ies' : 'y'}: {unmet.join(', ')}
+                </div>
               {/if}
-              {#each manifest.capabilities as cap (cap)}
-                <span class="library__capability">{cap}</span>
-              {/each}
             </div>
-          </div>
+          </button>
         </li>
       {/each}
       {#if filtered.length === 0}
@@ -159,12 +183,20 @@
 
   .library__row {
     display: flex;
+    width: 100%;
     gap: 10px;
     padding: 8px;
     border-radius: 6px;
+    border: none;
+    background: none;
+    text-align: left;
+    cursor: pointer;
+    color: inherit;
+    font: inherit;
   }
 
-  .library__row:hover {
+  .library__row:hover,
+  .library__row:focus-visible {
     background: var(--chrome-bg);
   }
 
@@ -226,6 +258,20 @@
     border-radius: 10px;
     background: var(--accent);
     color: var(--accent-contrast);
+  }
+
+  /* DESIGNER §5: "a gpio block dragged toward a node without GPIO warns at
+     design time" — the palette's half of that check (BlockCard.svelte
+     carries the other half, once the block is actually on the canvas). */
+  .library__capability--missing {
+    background: var(--state-errored);
+    color: #fff;
+  }
+
+  .library__warning {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--state-errored);
   }
 
   .library__empty {

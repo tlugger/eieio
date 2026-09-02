@@ -1,0 +1,364 @@
+<script lang="ts">
+  // DESIGNER §5: block config as a modal, "chosen deliberately to keep
+  // attention on one block" — the owner's own words are quoted in the spec.
+  // Double-click a block: name, then properties, then accept/cancel.
+  //
+  // NAME IS DISPLAY-ONLY, and that is a guess this shell is reporting rather
+  // than picking silently: DESIGNER §3.2 enumerates the operations a service
+  // edit may contain (`add_block, remove_block, set_prop, remove_prop,
+  // connect, disconnect, set_autostart, set_ui, remove_ui`), and none of
+  // them retargets an existing instance's `name` — only `add_block` carries
+  // one, once, at creation. Reading "its name, then its properties" as two
+  // *editable* fields would need a tenth operation the spec does not list;
+  // reading it as "shown, then edited" needs none. This shell takes the
+  // narrower reading and shows the name as a heading. See the final report.
+  import { resolveManifest } from '../derive/capabilities';
+  import ExpressionField from './ExpressionField.svelte';
+  import type { BlockInstance, BlockManifest, Connection } from '../api/types';
+  import { ERROR_PORT } from '../api/types';
+
+  interface Props {
+    instance: BlockInstance;
+    manifest: BlockManifest | undefined;
+    manifests: BlockManifest[];
+    blocks: Record<string, BlockInstance>;
+    connections: Connection[];
+    /** The node's refusal of the last "accept" naming this block, if any
+     * (DESIGNER §3.2's `422`) — shown here rather than only in a canvas-wide
+     * banner, since the modal is where the operator can act on it. */
+    errorMessage?: string | null;
+    onAccept: (changedProps: Record<string, string | undefined>) => void;
+    onCancel: () => void;
+  }
+
+  let { instance, manifest, manifests, blocks, connections, errorMessage = null, onAccept, onCancel }: Props = $props();
+
+  // Local, staged edits — nothing here reaches the network until "accept"
+  // (DESIGNER §5's "honest commit point"). Deliberately a one-time snapshot,
+  // not a `$derived` of `instance`: the caller mounts a fresh modal per
+  // configure (App.svelte keys it by instance id), so `instance` never
+  // changes under a mounted modal, and an accept always closes it.
+  // svelte-ignore state_referenced_locally
+  let overrides = $state<Record<string, string>>({ ...instance.props });
+  let resetRequested = $state<Set<string>>(new Set());
+  let docsOpen = $state(false);
+
+  function setOverride(property: string, value: string) {
+    overrides = { ...overrides, [property]: value };
+    if (resetRequested.has(property)) {
+      const next = new Set(resetRequested);
+      next.delete(property);
+      resetRequested = next;
+    }
+  }
+
+  function requestReset(property: string) {
+    const next = { ...overrides };
+    delete next[property];
+    overrides = next;
+    resetRequested = new Set(resetRequested).add(property);
+  }
+
+  function handleAccept() {
+    const changed: Record<string, string | undefined> = {};
+    const properties = manifest?.properties ?? [];
+    for (const prop of properties) {
+      const had = Object.prototype.hasOwnProperty.call(instance.props, prop.name);
+      const has = Object.prototype.hasOwnProperty.call(overrides, prop.name);
+      if (resetRequested.has(prop.name) && had) {
+        changed[prop.name] = undefined; // -> remove_prop
+      } else if (has && overrides[prop.name] !== instance.props[prop.name]) {
+        changed[prop.name] = overrides[prop.name];
+      }
+    }
+    onAccept(changed);
+  }
+
+  function handleKeydown(event: KeyboardEvent) {
+    if (event.key === 'Escape') onCancel();
+  }
+
+  // DESIGNER §5: "the modal lists the fields reaching this block's input,
+  // resolved from the upstream block's manifest" — grouped by this block's
+  // own input port.
+  interface UpstreamField {
+    inputPort: string;
+    fromLabel: string;
+    fromPort: string;
+    fields: string[] | undefined;
+  }
+
+  const upstream = $derived.by((): UpstreamField[] => {
+    const inputs = manifest?.inputs ?? [];
+    const rows: UpstreamField[] = [];
+    for (const input of inputs) {
+      const edges = connections.filter((c) => c.toId === instance.id && c.toPort === input.name);
+      if (edges.length === 0) {
+        rows.push({ inputPort: input.name, fromLabel: '(nothing connected)', fromPort: '', fields: undefined });
+        continue;
+      }
+      for (const edge of edges) {
+        const upstreamInstance = blocks[edge.fromId];
+        const upstreamManifest = upstreamInstance ? resolveManifest(upstreamInstance.block, manifests) : undefined;
+        const outputPort =
+          edge.fromPort === ERROR_PORT
+            ? { name: ERROR_PORT, fields: undefined }
+            : upstreamManifest?.outputs.find((o) => o.name === edge.fromPort);
+        rows.push({
+          inputPort: input.name,
+          fromLabel: upstreamInstance ? (upstreamInstance.name?.trim() || upstreamInstance.id) : edge.fromId,
+          fromPort: edge.fromPort,
+          fields: outputPort?.fields,
+        });
+      }
+    }
+    return rows;
+  });
+</script>
+
+<svelte:window onkeydown={handleKeydown} />
+
+<div class="modal-backdrop" role="presentation" onclick={onCancel}>
+  <div
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-label={`Configure ${instance.name?.trim() || instance.id}`}
+    tabindex="-1"
+    onclick={(e) => e.stopPropagation()}
+    onkeydown={(e) => e.stopPropagation()}
+  >
+    <div class="modal__header">
+      <div class="modal__title">
+        <div class="modal__name">{instance.name?.trim() || instance.id}</div>
+        <div class="modal__type">{manifest?.name ?? instance.block}</div>
+      </div>
+      <button
+        type="button"
+        class="modal__docs-toggle"
+        title="Show this block's own documentation"
+        aria-label="Show this block's own documentation"
+        aria-pressed={docsOpen}
+        onclick={() => (docsOpen = !docsOpen)}
+      >
+        ?
+      </button>
+    </div>
+
+    {#if docsOpen}
+      <div class="modal__docs">
+        {#if manifest}
+          <p>{manifest.description ?? 'No description.'}</p>
+          <dl>
+            <dt>Version</dt>
+            <dd>{manifest.version}</dd>
+            <dt>Capabilities</dt>
+            <dd>{manifest.capabilities.length > 0 ? manifest.capabilities.join(', ') : 'none'}</dd>
+            <dt>Targets</dt>
+            <dd>{manifest.targets.length > 0 ? manifest.targets.join(', ') : 'host-implemented (no compiled artifact)'}</dd>
+          </dl>
+        {:else}
+          <p>No manifest resolved for <code>{instance.block}</code>.</p>
+        {/if}
+      </div>
+    {/if}
+
+    {#if upstream.length > 0}
+      <div class="modal__upstream">
+        <h3 class="modal__section-title">Fields arriving at this block's input</h3>
+        <ul>
+          {#each upstream as row, i (i)}
+            <li>
+              <code>{row.inputPort}</code> ← {row.fromLabel}{row.fromPort ? `.${row.fromPort}` : ''}
+              {#if row.fields}
+                : <code>{row.fields.map((f) => `$${f}`).join(', ')}</code>
+              {:else if row.fromPort}
+                <span class="modal__unknown-fields">(fields not declared for this block)</span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+
+    <div class="modal__properties">
+      {#if manifest && manifest.properties.length > 0}
+        {#each manifest.properties as prop (prop.name)}
+          <ExpressionField
+            name={prop.name}
+            type={prop.type}
+            description={prop.description}
+            required={prop.required}
+            default={prop.default}
+            value={resetRequested.has(prop.name) ? undefined : (overrides[prop.name] ?? instance.props[prop.name])}
+            onInput={(value) => setOverride(prop.name, value)}
+            onReset={Object.prototype.hasOwnProperty.call(instance.props, prop.name) || overrides[prop.name] !== undefined
+              ? () => requestReset(prop.name)
+              : undefined}
+          />
+        {/each}
+      {:else}
+        <p class="modal__no-properties">This block has no properties.</p>
+      {/if}
+    </div>
+
+    {#if errorMessage}
+      <p class="modal__error" role="alert">{errorMessage}</p>
+    {/if}
+
+    <div class="modal__actions">
+      <button type="button" class="modal__button" onclick={onCancel}>Cancel</button>
+      <button type="button" class="modal__button modal__button--primary" onclick={handleAccept}>Accept</button>
+    </div>
+  </div>
+</div>
+
+<style>
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 60;
+  }
+
+  .modal {
+    width: min(480px, 92vw);
+    max-height: min(720px, 88vh);
+    display: flex;
+    flex-direction: column;
+    background: var(--chrome-bg-raised);
+    border: 1px solid var(--chrome-border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-modal);
+    overflow: hidden;
+  }
+
+  .modal__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--chrome-border);
+  }
+
+  .modal__name {
+    font-weight: 700;
+    font-size: 15px;
+  }
+
+  .modal__type {
+    font-size: 11px;
+    color: var(--chrome-text-muted);
+  }
+
+  .modal__docs-toggle {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    border: 1px solid var(--chrome-border);
+    background: var(--chrome-bg);
+    color: var(--chrome-text-muted);
+    cursor: pointer;
+    font-weight: 700;
+    flex: 0 0 auto;
+  }
+
+  .modal__docs-toggle[aria-pressed='true'] {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+  }
+
+  .modal__docs {
+    padding: 10px 16px;
+    font-size: 12px;
+    border-bottom: 1px solid var(--chrome-border);
+    background: var(--chrome-bg);
+  }
+
+  .modal__docs dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 8px;
+    margin: 6px 0 0;
+  }
+
+  .modal__docs dt {
+    color: var(--chrome-text-muted);
+  }
+
+  .modal__upstream {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--chrome-border);
+    font-size: 12px;
+  }
+
+  .modal__section-title {
+    margin: 0 0 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--chrome-text-muted);
+  }
+
+  .modal__upstream ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .modal__unknown-fields {
+    color: var(--chrome-text-muted);
+    font-style: italic;
+  }
+
+  .modal__properties {
+    padding: 4px 16px;
+    overflow-y: auto;
+  }
+
+  .modal__no-properties {
+    font-size: 12px;
+    color: var(--chrome-text-muted);
+    padding: 12px 0;
+  }
+
+  .modal__error {
+    margin: 0;
+    padding: 8px 16px;
+    font-size: 12px;
+    color: #fff;
+    background: var(--state-errored);
+  }
+
+  .modal__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--chrome-border);
+  }
+
+  .modal__button {
+    padding: 6px 14px;
+    border-radius: 6px;
+    border: 1px solid var(--chrome-border);
+    background: var(--chrome-bg);
+    color: var(--chrome-text);
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  .modal__button--primary {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
+  }
+</style>

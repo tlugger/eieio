@@ -14,9 +14,27 @@
     instance: BlockInstance;
     manifest: BlockManifest | undefined;
     missingCapabilities: Capability[];
+    /** Set when the last edit attempt naming this block was refused
+     * (DESIGNER §5: "validation errors... rendered inline on the offending
+     * block"). A custom node's `data` is the only channel SvelteFlow gives a
+     * node type back to its owner, so the callback and the error flag both
+     * travel through it rather than through a prop SvelteFlow does not have. */
+    hasError?: boolean;
+    onConfigure?: (id: string) => void;
   }
 
   let { data }: NodeProps & { data: BlockCardData } = $props();
+
+  // The mouse path to "configure" is `ServiceCanvas.svelte`'s `onnodeclick`
+  // double-click detection, not this handler: `@xyflow/svelte` captures a
+  // node's pointer events for drag detection, which swallows a real
+  // double-click gesture before the browser's native `dblclick` ever
+  // reaches this element (confirmed by hand — only a synthetic `dblclick`
+  // dispatched directly fires it). This stays wired for the keyboard path
+  // below, which is an ordinary `keydown` and unaffected by that capture.
+  function handleDblClick() {
+    data.onConfigure?.(data.instance.id);
+  }
 
   // The abbreviation and colour are derived from the *manifest* name (the
   // block's type, e.g. "temp-sensor"), never from the instance's own label
@@ -34,7 +52,17 @@
   const outputs = $derived(data.manifest?.outputs ?? []);
 </script>
 
-<div class="block-card">
+<div
+  class="block-card"
+  class:block-card--error={data.hasError}
+  role="button"
+  tabindex="0"
+  ondblclick={handleDblClick}
+  onkeydown={(e) => {
+    if (e.key === 'Enter') handleDblClick();
+  }}
+  title="Double-click to configure"
+>
   {#if data.missingCapabilities.length > 0}
     <div
       class="capability-badge"
@@ -89,6 +117,14 @@
     background: var(--card-bg);
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
     font-family: var(--sans);
+  }
+
+  /* A validation refusal naming this block (DESIGNER §5): rendered on the
+     block itself rather than only in a toast, so the mistake is visible
+     where it was made. */
+  .block-card--error {
+    border-color: var(--canvas-edge-error);
+    box-shadow: 0 0 0 2px var(--canvas-edge-error);
   }
 
   .block-card__header {

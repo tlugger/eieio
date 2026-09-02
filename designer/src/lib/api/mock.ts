@@ -7,21 +7,46 @@
 // change DESIGNER §3.1's proxy design calls for. Nothing outside this
 // module and client.ts should import from here directly.
 //
-// GUESS (spec silent on exact wire shapes beyond the endpoint table in
-// DESIGNER §3.1): the request/response shapes below are inferred from that
-// table, SERVICE-SPEC, and DAEMON-SPEC §9; they are this shell's working
-// assumption, not a transcription of anything the backend agent has built.
+// The request/response shapes for `/api/service-edit` match what the real
+// `crates/designer` backend landed with (DESIGNER §3.2, amended commit
+// dc83e98 — see the doc comment on `ServiceEditOperation` in `./types`);
+// everything else below (systems/nodes/manifests, and the mock's own
+// storage shape) is still a GUESS, since DESIGNER §3.1 gives only an
+// endpoint table for those.
+//
+// **What stands in for `eio-service` here, and why it is not a TOML writer.**
+// The real `/api/service-edit` calls `eio-service`'s preserving `Document`
+// editor — a `std` Rust crate with no browser build — and SERVICE §9's
+// one-editor rule is exactly why this file MUST NOT grow a second one in
+// TypeScript. So the "service file text" this mock hands back and forth is
+// not TOML at all: it is `JSON.stringify` of the file-content fields only
+// (`name`, `autostart`, `overflow`, `blocks`, `connections`, `ui` — never
+// `state`, which is daemon-computed and never written to a file).
+// `serviceEdit` and `putService` below parse and produce that JSON, never
+// TOML syntax, which is what keeps this a faithful *shape* stand-in
+// (operations in, opaque text out, `ETag` conflicts) without becoming the
+// mistake DESIGNER §3.2 calls out by name. `etagFor` already used exactly
+// this kind of documented placeholder before this file grew an edit path.
+// The one exception is `set_ui`'s value, which the real contract fixes as
+// TOML source text regardless of what carries it — see
+// `lib/service/toml-values.ts`.
 
 import type {
   BlockInstance,
   BlockManifest,
   Connection,
   NodeSummary,
+  PutServiceResult,
   ServiceDefinition,
+  ServiceEditOperation,
+  ServiceEditResult,
   ServiceState,
   ServiceSummary,
   SystemSummary,
 } from './types';
+import { ERROR_PORT } from './types';
+import { ensureLinterReady, lintExpression } from '../expr/lint';
+import { parseInlineNumberTable } from '../service/toml-values';
 
 function delay<T>(value: T, ms = 120): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
@@ -38,7 +63,7 @@ const MANIFESTS: BlockManifest[] = [
     description: 'Emits a simulated temperature reading on a timer.',
     capabilities: ['timer'],
     inputs: [],
-    outputs: [{ name: 'out' }],
+    outputs: [{ name: 'out', fields: ['temp'] }],
     properties: [
       {
         name: 'interval_ms',
@@ -80,7 +105,7 @@ const MANIFESTS: BlockManifest[] = [
     description: 'Emits a moving average of a numeric field over a window.',
     capabilities: ['state'],
     inputs: [{ name: 'in' }],
-    outputs: [{ name: 'out' }],
+    outputs: [{ name: 'out', fields: ['average'] }],
     properties: [
       { name: 'field', type: 'string', required: true },
       { name: 'window', type: 'int', default: '10', required: false },
@@ -96,7 +121,7 @@ const MANIFESTS: BlockManifest[] = [
     description: 'Reads a GPIO pin and echoes it as a signal.',
     capabilities: ['gpio'],
     inputs: [{ name: 'in' }],
-    outputs: [{ name: 'out' }],
+    outputs: [{ name: 'out', fields: ['pin', 'level'] }],
     properties: [{ name: 'pin', type: 'int', required: true }],
     targets: ['wasm32-unknown-unknown'],
     aot: ['esp32s3'],
@@ -182,18 +207,25 @@ export async function listNodes(systemId: string): Promise<NodeSummary[]> {
 
 // --- Services (proxied per-node, /api/nodes/{id}/daemon/services/...) ---
 
+/** The fields a service *file* actually holds (SERVICE §3, §5, §6) — never
+ * `state`, which DAEMON §9 computes from what is running and a file never
+ * carries. Kept as its own type because it is also the shape `serviceEdit`
+ * and `putService` read and write as their opaque "text". */
+type ServiceFile = Pick<ServiceDefinition, 'name' | 'autostart' | 'overflow' | 'blocks' | 'connections' | 'ui'>;
+
 interface MockService {
-  def: Omit<ServiceDefinition, 'etag'>;
+  file: ServiceFile;
+  state: ServiceState;
 }
 
 const SERVICES: Record<string, MockService[]> = {
   'node-porch': [
     {
-      def: {
+      state: 'running',
+      file: {
         name: 'kitchen',
         autostart: true,
         overflow: 'drop-oldest',
-        state: 'running',
         blocks: {
           b7k2: { id: 'b7k2', name: 'Thermometer', block: 'ghcr.io/tlugger/temp-sensor:1.0.0', props: { interval_ms: '5000' } },
           f3m9: { id: 'f3m9', name: 'Too cold?', block: 'filter:1.2.0', props: { predicate: '(< $temp 18.0)' } },
@@ -215,11 +247,11 @@ const SERVICES: Record<string, MockService[]> = {
       },
     },
     {
-      def: {
+      state: 'stopped',
+      file: {
         name: 'greenhouse',
         autostart: false,
         overflow: 'backpressure',
-        state: 'stopped',
         blocks: {
           t1: { id: 't1', name: 'Soil sensor', block: 'ghcr.io/tlugger/temp-sensor:1.0.0', props: { interval_ms: '30000' } },
           a1: { id: 'a1', name: 'Trend', block: 'rolling-average:0.3.0', props: { field: '"moisture"', window: '20' } },
@@ -234,11 +266,11 @@ const SERVICES: Record<string, MockService[]> = {
   ],
   'node-attic': [
     {
-      def: {
+      state: 'errored',
+      file: {
         name: 'attic-fan',
         autostart: true,
         overflow: 'backpressure',
-        state: 'errored',
         blocks: {
           s1: { id: 's1', name: 'Attic temp', block: 'ghcr.io/tlugger/temp-sensor:1.0.0', props: { interval_ms: '10000' } },
         },
@@ -249,14 +281,14 @@ const SERVICES: Record<string, MockService[]> = {
   ],
   'node-closet': [
     {
-      def: {
+      // gpio-echo needs `gpio`, and closet-relay's capability list above
+      // does not include it — exercises the unmet-capability badge
+      // (DESIGNER §5).
+      state: 'stopped',
+      file: {
         name: 'relay-control',
         autostart: false,
         overflow: 'backpressure',
-        // gpio-echo needs `gpio`, and closet-relay's capability list above
-        // does not include it — exercises the unmet-capability badge
-        // (DESIGNER §5).
-        state: 'stopped',
         blocks: {
           g1: { id: 'g1', name: 'Door sensor', block: 'gpio-echo:0.1.0', props: { pin: '4' } },
         },
@@ -267,27 +299,42 @@ const SERVICES: Record<string, MockService[]> = {
   ],
 };
 
-function etagFor(def: Omit<ServiceDefinition, 'etag'>): string {
-  // Not a real content hash (DAEMON §9.3 wants sha256 over the file's
-  // bytes) — this shell never round-trips a service file, so a stable
-  // per-name placeholder is enough to prove the field is plumbed through.
-  return `"sha256:mock-${def.name}"`;
+/** The mock's stand-in for a service file's bytes — see this module's
+ * header doc for why it is JSON and not TOML. */
+function textFor(file: ServiceFile): string {
+  return JSON.stringify(file);
+}
+
+function etagFor(text: string): string {
+  // Not DAEMON §9.3's real `sha256:<hex>` — a small stable hash of the mock
+  // text is enough to prove the field is plumbed through, and unlike the
+  // former per-name placeholder it actually changes when the content does,
+  // which the conflict flow (§9.3, DESIGNER §5) needs to be exercisable at
+  // all: a tag that never changed could never go stale.
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) hash = (Math.imul(hash, 31) + text.charCodeAt(i)) | 0;
+  return `"sha256:mock-${(hash >>> 0).toString(16).padStart(8, '0')}"`;
+}
+
+function findServiceRecord(nodeId: string, serviceName: string): MockService | undefined {
+  return (SERVICES[nodeId] ?? []).find((s) => s.file.name === serviceName);
 }
 
 export async function listServices(nodeId: string): Promise<ServiceSummary[]> {
   const services = SERVICES[nodeId] ?? [];
-  return delay(services.map((s) => ({ name: s.def.name, state: s.def.state, autostart: s.def.autostart })));
+  return delay(services.map((s) => ({ name: s.file.name, state: s.state, autostart: s.file.autostart })));
 }
 
 export async function getService(nodeId: string, serviceName: string): Promise<ServiceDefinition> {
-  const svc = (SERVICES[nodeId] ?? []).find((s) => s.def.name === serviceName);
+  const svc = findServiceRecord(nodeId, serviceName);
   if (!svc) throw new Error(`no such service: ${nodeId}/${serviceName}`);
-  return delay({ ...svc.def, etag: etagFor(svc.def) });
+  const text = textFor(svc.file);
+  return delay({ ...svc.file, state: svc.state, text, etag: etagFor(text) });
 }
 
 function setState(nodeId: string, serviceName: string, state: ServiceState): void {
-  const svc = (SERVICES[nodeId] ?? []).find((s) => s.def.name === serviceName);
-  if (svc) svc.def = { ...svc.def, state };
+  const svc = findServiceRecord(nodeId, serviceName);
+  if (svc) svc.state = state;
 }
 
 export async function startService(nodeId: string, serviceName: string): Promise<void> {
@@ -302,6 +349,248 @@ export async function stopService(nodeId: string, serviceName: string): Promise<
 
 export async function reloadService(nodeId: string, serviceName: string): Promise<void> {
   return delay(undefined, 200);
+}
+
+// --- Service editing (DESIGNER §3.2 / SERVICE §9) ------------------------
+//
+// The exact request/response shapes below match what the real
+// `crates/designer` backend landed with (DESIGNER §3.2, amended commit
+// dc83e98 — outside this worktree, relayed by the coordinator): `add_block`
+// takes an optional `id`; a `422` carries `errors: [{message, operation?,
+// instance?, property?, code?, span?}]`; a success carries `created`, an
+// operation-index-keyed map of minted ids; `set_ui`'s `value` is TOML source
+// text (`lib/service/toml-values.ts`).
+
+const ID_PATTERN = /^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$/;
+const MINT_ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyz';
+
+/** Mints an id for an `add_block` that omitted one — this mock's stand-in
+ * for what `Document::add_block` does server-side. Separate from
+ * `lib/service/operations.ts`'s `mintBlockId`, which is the *client's* mint
+ * for the batch that names its own new block in the same breath (§3.2's
+ * amendment); this one exists only for the omitted-id path this shell's own
+ * canvas never takes. */
+function mintServerId(existingIds: Iterable<string>): string {
+  const taken = new Set(existingIds);
+  for (;;) {
+    let id = '';
+    for (let i = 0; i < 4; i++) id += MINT_ALPHABET[Math.floor(Math.random() * MINT_ALPHABET.length)];
+    if (!taken.has(id)) return id;
+  }
+}
+
+/** `"id.port"` per SERVICE §5's `source`/`destination` grammar. */
+function splitPortRef(ref: string): [id: string, port: string] {
+  const dot = ref.indexOf('.');
+  if (dot < 0) return [ref, ''];
+  return [ref.slice(0, dot), ref.slice(dot + 1)];
+}
+
+/** Lints one property expression through the real interpreter
+ * (`crates/expr-wasm`, the same WASM build `ExpressionField` lints with on
+ * keystroke) so a `set_prop`/`add_block` naming an unsound expression fails
+ * with EXPR §8's own `code`/`span`/`message` — exactly the shape the landed
+ * `/api/service-edit` reports, and the reason this mock can match it
+ * faithfully without re-implementing EXPR-SPEC's rules by hand. */
+async function lintProperty(expression: string): Promise<{ code: string; span: { start: number; end: number }; message: string } | null> {
+  await ensureLinterReady();
+  const result = lintExpression(expression);
+  if (result.ok) return null;
+  const diagnostic = result.diagnostics[0];
+  return diagnostic
+    ? { code: diagnostic.code, span: diagnostic.span, message: diagnostic.message }
+    : { code: 'PARSE', span: { start: 0, end: expression.length }, message: 'invalid expression' };
+}
+
+interface OperationFailure {
+  message: string;
+  instance?: string;
+  property?: string;
+  code?: string;
+  span?: { start: number; end: number };
+}
+
+/** Applies one operation to `file` in place, or reports why it could not
+ * (SERVICE §9: "the caller is told which rule it broke"). This is
+ * deliberately a small subset of SERVICE §7's two validation stages — id
+ * syntax, dangling references, the error-port-as-destination rule, duplicate
+ * edges, and property-expression soundness (via the real interpreter, above)
+ * are exactly what a canvas gesture can get wrong; full manifest-aware
+ * type-checking (§7 stage 2's rest) is not re-implemented here — the mock
+ * stands in for the wire contract, not for `eio-service`'s full validator.
+ *
+ * `mintedId`, when the operation is an id-omitting `add_block`, is the id
+ * this call chose — the caller records it into the batch's `created` map. */
+async function applyOneOperation(
+  file: ServiceFile,
+  op: ServiceEditOperation,
+): Promise<{ error: OperationFailure | null; mintedId?: string }> {
+  switch (op.op) {
+    case 'add_block': {
+      const id = op.id ?? mintServerId(Object.keys(file.blocks));
+      if (!ID_PATTERN.test(id) || id.length > 64) {
+        return { error: { message: `"${id}" is not a valid block id (SERVICE §2.1)`, instance: id } };
+      }
+      if (id in file.blocks) {
+        return { error: { message: `duplicate block id "${id}"`, instance: id } };
+      }
+      for (const [property, expression] of Object.entries(op.props ?? {})) {
+        const failure = await lintProperty(expression);
+        if (failure) return { error: { ...failure, instance: id, property } };
+      }
+      file.blocks = {
+        ...file.blocks,
+        [id]: { id, name: op.name, block: op.block, props: { ...(op.props ?? {}) } },
+      };
+      return { error: null, mintedId: op.id === undefined ? id : undefined };
+    }
+    case 'remove_block': {
+      if (!(op.id in file.blocks)) return { error: { message: `no such block "${op.id}"`, instance: op.id } };
+      const { [op.id]: _removed, ...rest } = file.blocks;
+      file.blocks = rest;
+      // SERVICE §9: removing a block removes the connections that name it,
+      // and does not touch [ui] — a stale [ui] entry is inert (§6).
+      file.connections = file.connections.filter((c) => c.fromId !== op.id && c.toId !== op.id);
+      return { error: null };
+    }
+    case 'set_prop': {
+      const block = file.blocks[op.id];
+      if (!block) return { error: { message: `no such block "${op.id}"`, instance: op.id } };
+      const failure = await lintProperty(op.expression);
+      if (failure) return { error: { ...failure, instance: op.id, property: op.property } };
+      file.blocks = { ...file.blocks, [op.id]: { ...block, props: { ...block.props, [op.property]: op.expression } } };
+      return { error: null };
+    }
+    case 'remove_prop': {
+      const block = file.blocks[op.id];
+      if (!block) return { error: { message: `no such block "${op.id}"`, instance: op.id } };
+      const { [op.property]: _removed, ...rest } = block.props;
+      file.blocks = { ...file.blocks, [op.id]: { ...block, props: rest } };
+      return { error: null };
+    }
+    case 'connect': {
+      const [fromId, fromPort] = splitPortRef(op.from);
+      const [toId, toPort] = splitPortRef(op.to);
+      if (!(fromId in file.blocks)) return { error: { message: `no such block "${fromId}"`, instance: fromId } };
+      if (!(toId in file.blocks)) return { error: { message: `no such block "${toId}"`, instance: toId } };
+      if (toPort === ERROR_PORT) {
+        return {
+          error: {
+            message: `"${ERROR_PORT}" is an output-only port (ABI §6.4) and cannot be a connection destination`,
+            instance: toId,
+          },
+        };
+      }
+      const duplicate = file.connections.some(
+        (c) => c.fromId === fromId && c.fromPort === fromPort && c.toId === toId && c.toPort === toPort,
+      );
+      if (duplicate) return { error: { message: `duplicate connection "${op.from} -> ${op.to}" (SERVICE §5)` } };
+      file.connections = [...file.connections, { fromId, fromPort, toId, toPort }];
+      return { error: null };
+    }
+    case 'disconnect': {
+      const [fromId, fromPort] = splitPortRef(op.from);
+      const [toId, toPort] = splitPortRef(op.to);
+      const next = file.connections.filter(
+        (c) => !(c.fromId === fromId && c.fromPort === fromPort && c.toId === toId && c.toPort === toPort),
+      );
+      if (next.length === file.connections.length) return { error: { message: `no such connection "${op.from} -> ${op.to}"` } };
+      file.connections = next;
+      return { error: null };
+    }
+    case 'set_autostart': {
+      file.autostart = op.value;
+      return { error: null };
+    }
+    case 'set_ui': {
+      const values = parseInlineNumberTable(op.value);
+      if (op.key === 'viewport') {
+        const { x, y, zoom } = values;
+        if (x === undefined || y === undefined || zoom === undefined) {
+          return { error: { message: `"${op.value}" is not a valid viewport (expected x, y, zoom)` } };
+        }
+        file.ui = { ...file.ui, viewport: { x, y, zoom } };
+      } else {
+        const { x, y } = values;
+        if (x === undefined || y === undefined) {
+          return { error: { message: `"${op.value}" is not a valid position (expected x, y)`, instance: op.key } };
+        }
+        file.ui = { ...file.ui, blocks: { ...file.ui.blocks, [op.key]: { x, y } } };
+      }
+      return { error: null };
+    }
+    case 'remove_ui': {
+      if (op.key === 'viewport') {
+        const { viewport: _v, ...rest } = file.ui;
+        file.ui = rest;
+      } else {
+        const { [op.key]: _b, ...restBlocks } = file.ui.blocks;
+        file.ui = { ...file.ui, blocks: restBlocks };
+      }
+      return { error: null };
+    }
+    default: {
+      const exhaustive: never = op;
+      return { error: { message: `unknown operation ${JSON.stringify(exhaustive)}` } };
+    }
+  }
+}
+
+/** `POST /api/service-edit` (DESIGNER §3.2): stateless, "takes text and
+ * returns text" — no `nodeId`/`serviceName` parameter, deliberately, matching
+ * the real endpoint's "no notion of which service it is editing". Applies
+ * every operation in order and all-or-nothing (SERVICE §9): the first
+ * failure discards every change made so far and reports which operation
+ * broke, rather than committing a prefix. */
+export async function serviceEdit(toml: string, operations: ServiceEditOperation[]): Promise<ServiceEditResult> {
+  let file: ServiceFile;
+  try {
+    file = JSON.parse(toml) as ServiceFile;
+  } catch {
+    return { ok: false, errors: [{ message: 'malformed service text' }] };
+  }
+  const working: ServiceFile = structuredClone(file);
+  const created: Record<number, string> = {};
+  for (let i = 0; i < operations.length; i++) {
+    const { error, mintedId } = await applyOneOperation(working, operations[i]!);
+    if (error) return delay({ ok: false, errors: [{ ...error, operation: i }] });
+    if (mintedId !== undefined) created[i] = mintedId;
+  }
+  return delay({ ok: true, toml: JSON.stringify(working), created });
+}
+
+/** `PUT /api/nodes/{id}/daemon/services/{s}` (DAEMON §9.3), proxied. Models
+ * the one precondition path this shell exercises — every `PUT` it issues
+ * carries the `If-Match` its `GET` returned, so `428` (missing precondition)
+ * never appears here. */
+export async function putService(
+  nodeId: string,
+  serviceName: string,
+  toml: string,
+  ifMatch: string,
+): Promise<PutServiceResult> {
+  const svc = findServiceRecord(nodeId, serviceName);
+  if (!svc) {
+    return delay({ ok: false, status: 422, message: `no such service: ${nodeId}/${serviceName}` });
+  }
+  const currentText = textFor(svc.file);
+  const currentEtag = etagFor(currentText);
+  if (ifMatch !== '*' && ifMatch !== currentEtag) {
+    return delay({ ok: false, status: 412, expected: ifMatch, actual: currentEtag, current: currentText });
+  }
+  let parsed: ServiceFile;
+  try {
+    parsed = JSON.parse(toml) as ServiceFile;
+  } catch {
+    return delay({ ok: false, status: 422, message: 'malformed service text' });
+  }
+  // DAEMON §9.3: "the stem is the name" — a body naming a different service
+  // than the path is refused, not silently filed under either.
+  if (parsed.name !== serviceName) {
+    return delay({ ok: false, status: 422, message: `body declares name "${parsed.name}", path names "${serviceName}"` });
+  }
+  svc.file = parsed;
+  return delay({ ok: true, etag: etagFor(textFor(parsed)) });
 }
 
 export type { BlockInstance, Connection };

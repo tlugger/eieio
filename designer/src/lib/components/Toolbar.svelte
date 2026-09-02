@@ -10,14 +10,18 @@
     serviceName: string | null;
     nodeName: string | null;
     state: ServiceSummary['state'] | null;
+    /** `null` while no service (or no `[ui]`-bearing definition) is loaded. */
+    autostart: boolean | null;
     busy: boolean;
     onStart: () => void;
     onStop: () => void;
     onReload: () => void;
+    onToggleAutostart: () => void;
     onAddBlock: () => void;
   }
 
-  let { serviceName, nodeName, state, busy, onStart, onStop, onReload, onAddBlock }: Props = $props();
+  let { serviceName, nodeName, state, autostart, busy, onStart, onStop, onReload, onToggleAutostart, onAddBlock }: Props =
+    $props();
 </script>
 
 <div class="toolbar">
@@ -57,6 +61,12 @@
     >
       ↻
     </button>
+    {#if autostart !== null}
+      <label class="toolbar__autostart">
+        <input type="checkbox" checked={autostart} disabled={!serviceName || busy} onchange={onToggleAutostart} />
+        autostart
+      </label>
+    {/if}
     <span class="toolbar__divider" aria-hidden="true"></span>
     <button
       class="toolbar__button toolbar__button--wide"
@@ -123,6 +133,15 @@
   .toolbar__button--wide {
     font-size: 12px;
     padding: 0 10px;
+  }
+
+  .toolbar__autostart {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--chrome-text-muted);
+    cursor: pointer;
   }
 
   .toolbar__divider {
