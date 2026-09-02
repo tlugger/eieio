@@ -144,6 +144,40 @@ fn a_new_property_joins_an_existing_props_table() {
     assert!(after.contains("[ui]"), "and `[ui]` is still there");
 }
 
+#[test]
+fn removing_a_configured_property_reports_that_it_did() {
+    let mut removed_something = false;
+    let (after, removed, added) = edited(|doc| {
+        removed_something = doc.remove_prop("b7k2", "interval_ms").expect("b7k2 exists");
+    });
+    assert!(removed_something, "there was a value to take out");
+    assert_eq!(removed, ["interval_ms = \"5000\""]);
+    assert!(added.is_empty(), "{added:?}");
+    let parsed = eio_service::parse(&after).expect("still valid");
+    assert!(
+        !parsed.service.blocks["b7k2"]
+            .props
+            .contains_key("interval_ms"),
+        "unset, so it falls back to the manifest default (ABI §11.1)"
+    );
+}
+
+/// SERVICE §9 (eieio-m9s.10): unsetting is the OPTIONAL side of the removal rule, like clearing
+/// a name or a `[ui]` entry — not the identified side `remove_block` is on. An unset property
+/// already falls back to its manifest default, so "unset it" has a well-defined meaning that is
+/// already true whether or not it was configured.
+#[test]
+fn removing_a_property_that_is_already_unset_is_not_an_error() {
+    let mut removed_something = true;
+    let (_, removed, added) = edited(|doc| {
+        removed_something = doc
+            .remove_prop("b7k2", "never_configured")
+            .expect("absent is fine, not a refusal");
+    });
+    assert!(!removed_something, "nothing was there to take out");
+    assert!(removed.is_empty() && added.is_empty(), "no line changed");
+}
+
 /// What the *reader* makes of a property, which is the only thing its spelling has to preserve.
 fn doc_prop(text: &str, id: &str, property: &str) -> String {
     let parsed = eio_service::parse(text).expect("valid");
@@ -390,7 +424,7 @@ fn a_refused_edit_changes_nothing() {
         doc.remove_block("nope").unwrap_err(),
         doc.set_prop("nope", "a", "1").unwrap_err(),
         doc.set_prop("b7k2", "Interval", "1").unwrap_err(),
-        doc.remove_prop("b7k2", "nope").unwrap_err(),
+        doc.remove_prop("nope", "interval_ms").unwrap_err(),
         doc.connect("b7k2.out", "nope.in").unwrap_err(),
         doc.connect("b7k2.out", "f3m9.err").unwrap_err(),
         doc.connect("b7k2out", "f3m9.in").unwrap_err(),
@@ -418,9 +452,8 @@ fn a_refused_edit_changes_nothing() {
             EditError::BadName {
                 name: String::from("Interval")
             },
-            EditError::NoSuchProperty {
-                id: String::from("b7k2"),
-                property: String::from("nope"),
+            EditError::NoSuchInstance {
+                id: String::from("nope")
             },
             EditError::NoSuchInstance {
                 id: String::from("nope")

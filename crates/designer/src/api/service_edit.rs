@@ -101,7 +101,8 @@ pub enum Operation {
         /// The expression to set it to. Not parsed here — see the module doc.
         expression: String,
     },
-    /// [`Document::remove_prop`].
+    /// [`Document::remove_prop`]. Succeeds whether or not the property was set (SERVICE §9):
+    /// an unset property already falls back to its manifest default.
     RemoveProp {
         /// The instance.
         id: String,
@@ -300,8 +301,13 @@ fn apply(
         } => document
             .set_prop(id, property, expression)
             .map_err(|error| edit_error(index, error)),
+        // SERVICE §9: unsetting a property is the OPTIONAL side of the removal rule, so
+        // `Document::remove_prop` succeeds whether or not the property was set — whether it did
+        // anything is not something this batch endpoint reports per-operation (unlike
+        // `RemoveBlock`'s dropped connections), so the bool is dropped the same way.
         Operation::RemoveProp { id, property } => document
             .remove_prop(id, property)
+            .map(|_removed| ())
             .map_err(|error| edit_error(index, error)),
         Operation::SetName { id, name } => document
             .set_name(id, name)
@@ -365,7 +371,6 @@ fn edit_error(index: usize, error: EditError) -> Failure {
         EditError::BadId { id }
         | EditError::DuplicateInstance { id }
         | EditError::NoSuchInstance { id } => (Some(id.clone()), None),
-        EditError::NoSuchProperty { id, property } => (Some(id.clone()), Some(property.clone())),
         EditError::BadName { name } => (None, Some(name.clone())),
         _ => (None, None),
     };
@@ -603,6 +608,24 @@ b7k2 = { x = 10, y = 20 }
         );
         let parsed = eio_service::parse(&out.toml).expect("still valid");
         assert_eq!(parsed.service.blocks["b7k2"].name, None);
+    }
+
+    /// SERVICE §9 (eieio-m9s.10): unsetting a property that was never configured succeeds
+    /// through this endpoint too, the same as clearing an absent name or `[ui]` entry would —
+    /// it is the OPTIONAL side of the removal rule, not the identified side `remove_block` is on.
+    #[tokio::test]
+    async fn removing_a_property_that_was_never_set_is_not_a_failure() {
+        let out = run(
+            FIXTURE,
+            ops(serde_json::json!([
+                { "op": "remove_prop", "id": "f3m9", "property": "never_configured" },
+            ])),
+        )
+        .await
+        .expect("absent is not a refusal")
+        .0;
+
+        assert_eq!(out.toml, FIXTURE, "nothing to remove, so nothing changed");
     }
 
     #[tokio::test]

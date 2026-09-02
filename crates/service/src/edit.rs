@@ -101,13 +101,6 @@ pub enum EditError {
         /// The id.
         id: String,
     },
-    /// A property the instance does not configure.
-    NoSuchProperty {
-        /// The instance.
-        id: String,
-        /// The property.
-        property: String,
-    },
     /// A connection the file does not contain.
     NoSuchConnection {
         /// As it was asked for.
@@ -160,9 +153,6 @@ impl fmt::Display for EditError {
             }
             EditError::NoSuchInstance { id: missing } => {
                 write!(f, "this service defines no {missing:?}")
-            }
-            EditError::NoSuchProperty { id: on, property } => {
-                write!(f, "{on:?} configures no property {property:?}")
             }
             EditError::NoSuchConnection { edge } => {
                 write!(f, "this service has no connection {edge:?}")
@@ -442,6 +432,12 @@ impl Document {
 
     /// Removes a block instance and every connection that names it.
     ///
+    /// **On the identified side of SERVICE §9's line**, unlike [`remove_name`](Self::remove_name),
+    /// [`remove_prop`](Self::remove_prop) and [`remove_ui`](Self::remove_ui): `id` names an
+    /// instance rather than stating an end state, so removing one that does not exist fails with
+    /// [`EditError::NoSuchInstance`] instead of succeeding as a no-op — the caller has
+    /// misunderstood the graph, not merely repeated an unset.
+    ///
     /// The cascade is not a convenience: a connection naming an instance the file does not
     /// define is SERVICE §7's dangling-connection error, so the alternative is writing a file
     /// that will not load. Returns what was removed, so a caller can say so.
@@ -519,9 +515,12 @@ impl Document {
     /// Removes a block instance's label, leaving it with none.
     ///
     /// Removes the *key* rather than writing `name = ""`: §6 makes `name` OPTIONAL, and absent
-    /// and empty are not the same thing to a reader (SERVICE §9). Clearing a label that was
-    /// already absent is not an error, matching [`remove_ui`](Self::remove_ui)'s reasoning: a
-    /// caller asking for no name on a block that already has none has got what it asked for.
+    /// and empty are not the same thing to a reader (SERVICE §9). **On the OPTIONAL side of §9's
+    /// line**: clearing a label that was already absent is not an error, matching
+    /// [`remove_ui`](Self::remove_ui) and [`remove_prop`](Self::remove_prop)'s reasoning — a
+    /// caller asking for no name on a block that already has none has got what it asked for. The
+    /// instance itself is still identified, so an unknown `id` fails with
+    /// [`EditError::NoSuchInstance`].
     pub fn remove_name(&mut self, id: &str) -> Result<(), EditError> {
         let instance = self.instance_mut(id)?;
         instance.remove("name");
@@ -551,21 +550,29 @@ impl Document {
         Ok(())
     }
 
-    /// Removes a configured property, leaving the block to take its manifest default.
-    pub fn remove_prop(&mut self, id: &str, property: &str) -> Result<(), EditError> {
+    /// Removes a configured property, leaving the block to take its manifest default
+    /// (ABI §11.1).
+    ///
+    /// **On the OPTIONAL side of SERVICE §9's line, like [`remove_name`](Self::remove_name) and
+    /// [`remove_ui`](Self::remove_ui), not the identified side [`remove_block`](Self::remove_block)
+    /// is on.** Unsetting a property that was never set is not an error: an unset property
+    /// already falls back to its manifest default, so "unset it" has a well-defined meaning that
+    /// is already true, and a caller clearing a property twice has not misunderstood the file the
+    /// way a caller naming a block that is not there has. Returns whether a value was actually
+    /// removed, so a caller — `eio service unset-prop` among them — can tell a person which
+    /// happened rather than reporting an edit that did not occur.
+    ///
+    /// The instance itself is the identified half of this call: an unknown `id` still fails with
+    /// [`EditError::NoSuchInstance`], because that names an instance the file does not have at
+    /// all, which is SERVICE §9's other case.
+    pub fn remove_prop(&mut self, id: &str, property: &str) -> Result<bool, EditError> {
         let instance = self.instance_mut(id)?;
-        let gone = instance
+        let removed = instance
             .get_mut("props")
             .and_then(Item::as_table_like_mut)
             .and_then(|props| props.remove(property))
             .is_some();
-        if !gone {
-            return Err(EditError::NoSuchProperty {
-                id: String::from(id),
-                property: String::from(property),
-            });
-        }
-        Ok(())
+        Ok(removed)
     }
 
     /// Whether the service starts at boot (DAEMON §3).
@@ -663,8 +670,10 @@ impl Document {
         Ok(())
     }
 
-    /// Removes an annotation. Absent is not an error: a caller clearing a layout entry for a
-    /// block that never had one has got what it asked for.
+    /// Removes an annotation. **On the OPTIONAL side of SERVICE §9's line**, like
+    /// [`remove_name`](Self::remove_name) and [`remove_prop`](Self::remove_prop): absent is not
+    /// an error, because a caller clearing a layout entry for a block that never had one has got
+    /// what it asked for.
     pub fn remove_ui(&mut self, path: &[&str]) -> Result<(), EditError> {
         let (last, parents) = path.split_last().ok_or(EditError::BadUiPath)?;
         let mut table = match self.doc.get_mut("ui").and_then(Item::as_table_like_mut) {

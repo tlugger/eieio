@@ -30,7 +30,8 @@ pub enum Service {
     Disconnect(Wire),
     /// Set a property to an expression (ABI §11).
     SetProp(SetProp),
-    /// Remove a configured property, leaving the block to take its manifest default.
+    /// Remove a configured property, leaving the block to take its manifest default. Succeeds
+    /// whether or not the property was set (SERVICE §9), and says which happened.
     UnsetProp(UnsetProp),
     /// Change a block instance's label. Its id, connections, properties and `[ui]` are
     /// untouched — SERVICE §9 requires that, because remove-and-re-add would change the id
@@ -203,8 +204,18 @@ pub fn run(command: Service) -> Result<()> {
             )])
         }),
         Service::UnsetProp(args) => edit(&args.file, |doc| {
-            doc.remove_prop(&args.id, &args.property)?;
-            Ok(vec![format!("unset {}.{}", args.id, args.property)])
+            // SERVICE §9: unsetting a property is the OPTIONAL side of the removal rule, so an
+            // already-unset property is not a refusal — it is a report of which happened, the
+            // same way `remove_name` and `remove_ui` need none because they say only one thing.
+            let removed = doc.remove_prop(&args.id, &args.property)?;
+            Ok(vec![if removed {
+                format!("unset {}.{}", args.id, args.property)
+            } else {
+                format!(
+                    "{}.{} was already unset; nothing to do",
+                    args.id, args.property
+                )
+            }])
         }),
         Service::SetName(args) => edit(&args.file, |doc| {
             doc.set_name(&args.id, &args.label)?;
