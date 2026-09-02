@@ -132,6 +132,10 @@ Two node classes, one wire protocol:
 
 The Designer flow is identical for both: design a service (subscriber/sensor blocks → logic → publisher/actuator blocks), deploy. For leaf targets, "deploy" runs a firmware build+flash pipeline instead of a config push. Extra flashing steps are acceptable; a different design flow is not.
 
+Specified in `docs/specs/LEAF-SPEC.md`.
+
+- **OPEN:** the **flash wear budget policy** — how much writing is too much, over what window, and what a leaf does when a block ignores repeated refusals. ABI §7.2 already gives a leaf host the vocabulary (`ERR_THROTTLED`, refused rather than silently dropped) and LEAF §5 already requires it be used; what is unsettled is the *policy behind* the refusal. Deferred deliberately: the answer depends on the flash part and the write pattern, and neither exists to measure yet. Until it does, a leaf refuses on whatever budget it was built with and blocks may assume only that a refusal is possible.
+
 ### 3.8 Configuration source of truth: files on the node
 
 Each daemon owns its configuration as **declarative text files on disk**. The management API reads/applies them. The Designer's backend DB is a registry (Systems, node connection info) — never the system of record. Rationale: survivability (nio's cloud-state failure mode), GitOps-compatibility, and the agentic goal — agents and CLIs operate on text artifacts, not DB rows behind an API.

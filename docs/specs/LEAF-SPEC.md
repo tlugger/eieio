@@ -1,0 +1,181 @@
+# Leaf Runtime Specification
+
+**Status:** Draft 1 — architecture and contracts; expects per-subsystem expansion (§11). **Depends on:** SCOPE.md, ABI-SPEC.md, EXPR-SPEC.md, SERVICE-SPEC.md, DAEMON-SPEC.md. **Markers:** Settled decisions are stated plainly. **PROPOSED** = drafted here, awaiting ratification. **OPEN** = tracked in SCOPE.md §3, never decided here.
+
+The leaf runtime is the leaf-class node runtime (SCOPE §3.7): a `no_std` Rust firmware image for MCU-class hardware that executes a service graph fixed at build time. DAEMON-SPEC's preamble defers to this document; this is that deferral answered.
+
+---
+
+## 1. What a leaf is, and what it is not
+
+**A leaf is not a smaller daemon.** Both run the same blocks against the same ABI, and that is the whole of what they share operationally. The difference is *when the graph is decided*:
+
+|                | Daemon-class | Leaf-class |
+|---|---|---|
+| Service graph | read from a file at boot, changeable at runtime | compiled into the image |
+| Blocks | pulled from a registry, hot-loaded | AOT-compiled and linked in |
+| Deploy | `PUT` a file, start it | build firmware, flash it |
+| Management API | the whole of DAEMON §9 | none (§7) |
+| Filesystem | a data directory (DAEMON §2) | none required |
+
+Every one of those follows from a single physical fact: an MCU has no room to compile WASM and nowhere to put a block registry. **The design consequence that matters is that a leaf has no configuration surface at runtime** — there is no file to edit and no endpoint to call, so everything a daemon reads from `node.toml` and a service file is instead *baked* (§6).
+
+**What is identical, and MUST stay identical:** the ABI a block sees (ABI-SPEC in full), the expression language and its semantics (EXPR-SPEC), the canonical CBOR encoding (ABI §6.3.1), the manifest schema (ABI §11), and the wire vocabulary of a signal. A block author targets one platform, not two. SCOPE §3.7 puts it as "extra flashing steps are acceptable; a different design flow is not"; this section is the runtime half of that sentence.
+
+## 2. Architecture
+
+The leaf runtime is a Rust binary crate — `crates/leaf` **PROPOSED** — that links the ★ crates unchanged:
+
+```
+  eio-abi        status codes, sentinels, alignment (ABI §8, §3, §9.6)
+  eio-signal     CBOR value/signal/batch types (ABI §6.3)
+  eio-expr       the expression language (EXPR-SPEC)
+  eio-manifest   manifest schema and the ABI §4.3 load-time cross-check
+  eio-host-core  lifecycle driver, memory conventions, property resolution,
+                 router core, the StateStore and Timers traits
+```
+
+**This is the entire reason those crates are `no_std`.** DAEMON §1 calls the host-core/daemon split "load-bearing"; a leaf runtime is the load it bears. `just check-nostd` compiles them for `thumbv7em-none-eabihf` and `riscv32imc-unknown-none-elf` on every gate run, which is the guard that keeps this section implementable rather than aspirational.
+
+What the leaf adds on top, and what it MUST NOT:
+
+- **Adds:** an engine binding (§3), a `StateStore` against flash (§5), a `Timers` implementation against a hardware timer, a transport client (§8), and a generated `main` that constructs the baked graph (§6).
+- **MUST NOT add:** a second lifecycle driver, a second property-resolution rule, a second router, a second expression interpreter, or a second CBOR encoder. Every one of those exists in a ★ crate precisely so that two hosts cannot disagree, and reimplementing one for size or speed is the divergence ABI §13 calls a conformance bug by definition.
+
+**No allocator is not an option.** The ★ crates permit `alloc`, and ABI §6.3's batches are dynamically sized. A leaf therefore ships a global allocator over a fixed heap. Which allocator, and the heap's size, are per-target build configuration.
+
+## 3. The engine
+
+**WAMR** (WebAssembly Micro Runtime), in AOT mode for deployment (SCOPE §3.2, SDK §5). Its interpreter is also a supported mode and is what a bring-up or a debugging build uses.
+
+This choice is **measured, not assumed** — `crates/conformance/tests/wamr.rs` runs the full ABI §13 scenario suite and the ABI §4.3 instruction checks against WAMR's fast interpreter. What that measurement established, and what this spec therefore inherits:
+
+- **31 of 32 scenarios pass.** The one skip is `07_budget_exhausted`, for the reason in §4.
+- **WAMR refuses all nine proposals outside the accepted six**, including tail call, memory64 and threads — the three wasm3 *runs* (ABI §4.3's measured gaps). A leaf on WAMR needs no loader carve-out of its own for those three; the carve-out stays because it is wasm3's.
+- **WAMR runs the whole of bulk memory and reference types**, where wasm3 runs part. This widens nothing: ABI §4.3's portable subset is the floor across leaf engines, not a description of one, and a module using `table.copy` runs on WAMR and fails on wasm3. The loader refuses it on both.
+- **WAMR's rejections do not name the proposal they objected to.** They are opcode- and section-level parse errors (`unsupported opcode fd`, `invalid limits flags`). ABI §4.3 makes naming a MUST only where the engine reports it; a host cannot invent a name its engine does not give.
+
+**wasm3** is the second measured interpreter (`crates/conformance/tests/wasm3.rs`) and remains a valid leaf engine. It has no AOT path, so a wasm3 leaf is interpreted throughout.
+
+### 3.1 The engine is the only place the feature set is enforced (ABI §4.3)
+
+ABI §4.3 splits refusal across two layers, and a leaf implements both. Stated concretely, because "configure the engine to the accepted set" is not an instruction anyone can follow twice the same way:
+
+- **WAMR** selects features at *build* time through its CMake configuration, not at runtime through a config object. A leaf's WAMR build MUST enable `bulk-memory` and `reference-types` and MUST NOT enable SIMD, tail call, multi-memory, memory64, threads, exceptions or GC. The default build already refuses all nine (measured, above), so the requirement is that a leaf does not go *adding* them for a convenience.
+- **wasm3** has no feature switches; what it accepts is what it was compiled with. Its acceptance was measured instruction by instruction (ABI §4.3) rather than read off a list, and that measurement is the specification of what a wasm3 leaf accepts.
+
+**Neither engine can express the carve-out**, because a proposal is one switch and the accepted set is part of two of them. `eio_manifest::validate` is the second layer and runs on every host, leaf included — it is a ★ crate for exactly this reason. **A leaf MUST run it**, at firmware build time where a refusal costs a build rather than a field failure.
+
+## 4. Budgets
+
+ABI §10 requires every callback to run under a host-enforced budget. **WAMR cannot supply a fuel counter as built**: `wasm_runtime_set_instruction_count_limit` exists in its C API but is compiled out behind `WASM_ENABLE_INSTRUCTION_METERING`, confirmed by a linker error rather than by reading documentation. wasm3 has no counter at all.
+
+So a leaf's budget is a **watchdog**, not fuel: a hardware timer armed before entering a guest callback and disarmed on return, whose expiry kills the instance exactly as ABI §8 requires of a deadline violation. This is the leaf runtime's to add rather than the interpreter's to provide, which is why the conformance harness lets a host answer `enforces_budgets = false` and have `07_budget_exhausted` skipped by name — a binding without a watchdog is honest about it rather than hanging.
+
+**A leaf's own budgets sit near EXPR §9's floors** (`MAX_FUEL` 10 000, `MAX_DEPTH` 32, `MAX_RANGE` 1 000, `MAX_VALUE_BYTES` 4 096, `MAX_EXPR_BYTES` 1 024), which is what §9 already tells leaf hosts to do. They are *floors*, so a conforming expression may rely on that much and a leaf MUST NOT go below them. ABI §9.7's `max_payload` and `max_batch` remain **OPEN** in SCOPE §3 — a leaf supplies both explicitly and blocks may assume nothing about them.
+
+### 4.1 Decode depth is coupled to `MAX_DEPTH`
+
+A CBOR decoder needs a nesting bound or a hostile batch is a stack overflow, and a stack overflow on an MCU is not a caught error. **That bound MUST be at least the configured `MAX_DEPTH`.** Setting it lower makes a value the expression language is required to handle undecodable, which turns an EXPR §9 budget into a decode failure with a different error code, on one host only — the shape of divergence ABI §13 exists to prevent.
+
+## 5. State on flash
+
+`eio:state` (ABI §7.2) is backed by flash through `host-core`'s `StateStore` trait — the same three functions, `get`/`put`/`del`, the daemon implements against redb (DAEMON §10). The trait is the boundary, so the host functions that decode `(key, key_len, buf, cap)` and apply ABI §8's size convention are shared code and cannot diverge.
+
+**Wear is the difference, and `ERR_THROTTLED` is how it is spoken.** ABI §7.2 permits a leaf host to refuse a `state_put` for a wear budget; the daemon never does, and the variant is plumbed on both so a block's back-off branch is the same code either way. Two obligations follow:
+
+- A leaf MUST NOT silently drop a write. Refusing with `ERR_THROTTLED` is the contract; succeeding and not persisting is not.
+- ABI §7.2's "blocks MUST treat persistence as best-effort and not as a message queue" is what makes the refusal safe. A block that cannot tolerate a refused write is a block that cannot run on a leaf, and that is a property of the block.
+
+**Namespacing is `(service, instance)`**, as DAEMON §10 establishes and for the same reason: a node does not know its System. On a leaf there is exactly one service, so the service component is constant — it is kept anyway, because dropping it would make a leaf's key layout differ from a daemon's for no gain, and `eieio`'s whole conformance argument is that the two agree.
+
+The **wear budget policy** — how much writing is too much, over what window, and what a leaf does when a block ignores repeated refusals — is **OPEN** (SCOPE §3.7).
+
+## 6. What is baked, and what a build produces
+
+A daemon reads `node.toml` (DAEMON §2.1) and a service file (SERVICE-SPEC) at boot. A leaf has neither at runtime, so the firmware build resolves both and bakes the results:
+
+- **The service graph**: instances, their block AOT artifacts, their resolved property expressions, and the connection table `host-core`'s router consumes.
+- **The node's identity and limits**: what `node.toml` would have carried.
+- **The transport configuration** (§8): what `pubsub.toml` would have carried.
+
+**The service file is still the source, and stays the portable artifact.** The same file deploys to a daemon; SERVICE-SPEC parses it; the firmware build is one more consumer. It is not parsed *on* the leaf — `eio-service` is a `std` crate and deliberately so (CLAUDE.md: nothing parses a service file on a leaf tier) — it is parsed by the build host, which then emits Rust.
+
+**Property expressions are baked as source text, not as a compiled form.** ABI §11 makes every property an expression evaluated per signal, and EXPR-SPEC's parser is a ★ crate that runs on the leaf. Pre-parsing to an AST at build time is a plausible optimisation and is explicitly **not** specified here: it would put a second representation of an expression into the platform, and the first thing to measure is whether parse cost matters at all when properties are parsed once at configure time (ABI §5.1) rather than per signal.
+
+### 6.1 The AOT artifact
+
+`cargo eio aot --target <leaf>` produces a WAMR AOT artifact per block, and ABI §11.1's manifest carries an `aot` list naming the prebuilt targets published alongside the portable module. The portable `wasm32-unknown-unknown` module **MUST always ship** (ABI §11.1): an AOT artifact is an optimisation for one target, never a replacement for the thing every host can run.
+
+**AOT artifacts are version-sensitive, and the pairing is normative.** A WAMR AOT artifact is tied to the WAMR version that compiled it and to the LLVM that WAMR was built against — **WAMR 2.4.5 pins LLVM `release/18.x`**. A leaf image and the artifacts it loads MUST come from the same WAMR version. Recording the pair is not bookkeeping: a mismatched artifact is a load failure in the field, after flashing.
+
+This section is **PROPOSED and unimplemented**: `wamrc` has not been built on any developer machine here (six distinct blockers recorded on `eieio-7d8.21`), so the artifact layout is specified from WAMR's documentation rather than from something this repository has produced. **It ratifies when a leaf loads an artifact this pipeline built**, and not before. The interpreter path (§3) needs none of it and is what a first leaf bring-up should use.
+
+## 7. There is no management API
+
+A leaf serves no HTTP. DAEMON §9's entire surface is absent, and that is a design decision rather than a gap:
+
+- **It cannot be authenticated safely enough to be worth it.** SCOPE §3.11 leaves transport security OPEN, and an MCU is the tier least able to carry a TLS stack and a credential lifecycle.
+- **It would have nothing to serve.** Two thirds of §9 mutates a service file or a block cache, and a leaf has neither.
+
+**Consequences that other specs already encode**, restated here so a leaf implementer meets them in one place:
+
+- DESIGNER §3.1: the Designer's proxy and its node probe both **refuse a leaf by name** rather than dialling it. A leaf's address over HTTP would give a connection error indistinguishable from a node that is down, reporting a fault against a node working exactly as designed. (The `eio` CLI has no such guard today: `~/.config/eieio/nodes.toml` records no class, and every node it can name is one that answers. Adding a leaf to it is a mistake nothing currently catches — an §11 item, not a claim.)
+- DAEMON §7.1: only a daemon-class node is eligible to be the pub/sub broker. A leaf is never a candidate.
+- Observability is the wire protocol's (§8), not an endpoint's.
+
+## 8. Transport
+
+A leaf participates in the same pub/sub as a daemon: MQTT behind the same conceptual bridge boundary (SCOPE §3.9, DAEMON §7). The guarantees are the platform's own vocabulary — at-most-once, never-retained (SCOPE §3.4) — and are *mapped* onto QoS at the bridge, not stated in QoS terms.
+
+`publisher` and `subscriber` remain host-native system blocks (DAEMON §6): they need credentials and transport internals, which is the whole reason that precedent exists and the whole reason it does not extend to anything else.
+
+**The bus pre-shared key (SCOPE §3.11) applies unchanged.** It was chosen over mTLS with a System CA *because* of this tier — a CA lifecycle plus a TLS stack on every node is the weight that deletes the embedded north star. A leaf presenting the bus key is the case that decision was made for.
+
+Which MQTT client a leaf links, and how it behaves across reconnects on a constrained device, is an **§11 expansion item and is deliberately unnamed here**: `rumqttc` is the daemon's choice and is `std`, so a leaf needs a `no_std` client or an `embedded-nal` stack, and nothing has been measured. This section endorses no client.
+
+## 9. Conformance
+
+**A leaf MUST pass what a daemon passes, and divergence is a conformance bug by definition** (ABI §13). Not "as far as is practical on an MCU": the suites are the contract, and a leaf that cannot pass one has found either a bug in itself or a rule the platform should not have.
+
+Three suites, all of which already exist:
+
+1. **The ABI §13 scenario suite**, driven through `host-core`'s `Engine` trait exactly as the daemon and the reference harness drive it. A capability a leaf does not implement is reported **skipped by name**, never passed over.
+2. **`expr-tests/`** — the expression language, property types, and canonical CBOR. Run **at the leaf's own budget settings** (§4), not at the reference defaults: a budget floor that only holds on a generous host is not a floor.
+3. **The ABI §4.3 instruction checks**, against the engine as the leaf actually builds it (§3.1).
+
+### 9.1 Canonical CBOR: a stock encoder is wrong for this platform
+
+ABI §6.3.1 deviates from RFC 8949 §4.2.1 in **two** places, and both are easy to violate by reaching for a well-regarded CBOR library:
+
+- **Floats are `binary64` always.** Shortest-float encoding is forbidden. RFC 8949's preferred serialization would shrink some floats to `binary16`/`binary32`, making a value's encoded width depend on its magnitude.
+- **Map keys sort by UTF-8 *content*, not by encoded bytes.** RFC 8949 orders by the encoded key, which sorts `"z"` before `"aa"`. This platform orders by content, so that one ordering serves the encoding, EXPR §2's map iteration order, and `(keys m)`.
+
+A leaf uses `eio-signal`, which implements both, and MUST NOT substitute another encoder for size. The canonical-CBOR vectors in `expr-tests/cbor/` cover both deviations and are part of §9's obligation.
+
+## 10. The deploy contract with the Designer
+
+DESIGNER §7 gives the Designer's half: same canvas, same service file, the deploy button does the right thing per node class, and extra flash steps are surfaced as steps rather than as a different design flow. This is the other half.
+
+A leaf deploy is a **build**, and the contract is what the build promises the Designer:
+
+- **It is offered the same service file** a daemon would be `PUT`. If the file is valid for a daemon and every block it names has an AOT artifact for the target, the build is expected to succeed.
+- **Validation happens before the build, not during it.** SERVICE §7's stages and ABI §4.3's load-time check both run on the build host, so a rejection is a message about a service file rather than a compiler error. A block whose manifest requires a capability the target lacks is refused here — the same check DESIGNER §5 surfaces at design time, enforced where it is binding.
+- **It produces a flashable image and the steps to flash it.** Whether the Designer drives the flash tool directly is DESIGNER §7's business, not this document's.
+- **A failed build changes nothing on the device.** The running firmware is untouched until a flash succeeds, which is the one operational advantage this tier has over a hot-loading daemon.
+
+The build pipeline's own mechanics — how the toolchain is pinned, where AOT artifacts are cached, how a build is reproduced — are **§11 expansion items**, not settled here.
+
+## 11. Expansion list (for the in-depth pass)
+
+Needed before implementation, and deliberately not guessed at in this draft:
+
+- **The target list.** Which MCU families are v1: `riscv32imc` (ESP32-C3/C6) and `thumbv7em` are what `check-nostd` already compiles for, but classic ESP32 is Xtensa and needs the esp-rs toolchain fork. Bears on §6.1's `aot` list.
+- **Firmware build pipeline mechanics** — toolchain pinning, AOT artifact caching, reproducibility, and how `cargo eio aot` is invoked from a Designer deploy.
+- **The generated `main`**: what the baked graph looks like as Rust, and whether it is generated source or a const table.
+- **Memory budget**: heap sizing per target, and what a leaf does when a batch will not fit.
+- **The transport client** (§8), once one has been measured.
+- **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on.
+- **Observability without an API** (§7): what a leaf publishes about itself, and on which topic.
+- **A class-aware CLI** (§7): `nodes.toml` records no node class, so `eio` will happily try to reach a leaf. Either it learns the class or it stays a documented sharp edge.
+- **Flash layout**: where AOT artifacts, state and configuration sit, and how a firmware update treats existing state.

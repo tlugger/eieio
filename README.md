@@ -115,7 +115,8 @@ examples/
 schemas/        published JSON Schemas: manifest, service
 docs/
   SCOPE.md      settled decisions, OPEN items, vocabulary, sequencing — read first
-  specs/        ABI-SPEC · EXPR-SPEC · SDK-SPEC · SERVICE-SPEC · DAEMON-SPEC · DESIGNER-SPEC
+  specs/        ABI-SPEC · EXPR-SPEC · SDK-SPEC · SERVICE-SPEC · DAEMON-SPEC ·
+                DESIGNER-SPEC · LEAF-SPEC
 ```
 
 ★ crates are shared with the future leaf runtime and stay `no_std` (`alloc` allowed); `just check-nostd` enforces it against two bare-metal targets. It is why `expr-wasm` is a crate of its own rather than a feature of `expr`: a `wasm-bindgen` dependency added there would ship in every block. Blocks live in their own repositories and publish to an OCI registry independently.

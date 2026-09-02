@@ -34,6 +34,7 @@ If a spec turns out to be awkward to implement, that is a finding, not an obstac
 |`docs/specs/SERVICE-SPEC.md`|The service file: identity (a block instance is its **id**, never its name), block instances, properties, connections, the `[ui]` contract, validation classes.|
 |`docs/specs/DAEMON-SPEC.md`|Daemon-class node internals: crates, on-disk layout, executor, router, API. High-level; expects per-subsystem expansion.|
 |`docs/specs/DESIGNER-SPEC.md`|The visual management surface. High-level; expects expansion.|
+|`docs/specs/LEAF-SPEC.md`|The MCU tier: what a leaf is, its engine and budgets, state on flash, what is baked at build time, and the deploy contract. High-level; expects expansion.|
 
 Each spec has an **expansion list** as its final section — the in-depth work it knows it is missing. Consult it before deciding something is unspecified.
 
@@ -91,7 +92,7 @@ Bottom-up, most-specified first. Do not start a later item because an earlier on
 7. Pub/sub transport + cross-node signals (DAEMON §7). ✅
 8. **CLI + agent tooling (MCP)** — `eio` and `eio mcp` are built. ✅
 9. Designer UI — nothing built; DESIGNER-SPEC needs its §10 expansion first.
-10. Leaf runtime + firmware build pipeline — LEAF-SPEC is undrafted.
+10. Leaf runtime + firmware build pipeline — LEAF-SPEC is drafted; nothing is built.
 
 Items 1–4 are ✅ too. The authoritative list is SCOPE §7, with the epic-to-item mapping in §7.1; this is the same sequence, annotated.
 
