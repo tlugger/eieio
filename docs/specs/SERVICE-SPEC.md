@@ -209,6 +209,9 @@ Each of the following is a **distinct** error, carrying enough to point at the o
 Four rules an editor MUST follow, each of them a way the format can be violated by a well-meaning write:
 
 - **A top-level key stays above the first table header.** §5's rule is a fact about TOML, and an editor that appended `connections` to the end of a file would file it under the last block. An implementation MAY satisfy this by construction — a preserving parser that renders root key-values before sub-tables does — but it MUST NOT emit a file where a top-level key sits below a header.
+- **A name can be changed, and changing it changes nothing else.** §2 makes a block instance its `id` and calls `name` a label; §6's table says it has no meaning to a host. An editor MUST therefore be able to set and clear one, and doing so MUST NOT touch the block's `id`, its connections, its properties or its `[ui]` entry. This is stated because the obvious workaround — remove the block and add it back with a new label — silently changes its `id`, and an id is what a node's state store is keyed by (DAEMON §10): "rename" done that way discards the block's `eio:state`. A label change is a one-line edit and must be available as one.
+
+  Setting a name on a block that has none adds the key; clearing one removes the key rather than writing an empty string, because `name` is OPTIONAL (§6) and absent and empty are not the same thing to a reader.
 - **Removing a block removes the connections that name it.** A connection naming an instance the file does not define is §7's dangling-connection error, so the alternative to cascading is writing a file that will not load. What is removed is the block's business to report; that it happens is not optional.
 - **Removing a block does not touch `[ui]`.** §6 makes a stale annotation inert, and an editor that tidied it would be deciding that `[ui]`'s keys are block ids — a schema §6 says this format does not have.
 - **An edit that would make the file invalid MUST fail and change nothing.** The file on disk and the document in hand are both left as they were, and the caller is told which rule it broke. Writing a file that §7 rejects and calling it the caller's problem is how a service ends up errored by its own tooling.
@@ -233,6 +236,8 @@ eio service connect       <file> <id.port> <id.port>
 eio service disconnect    <file> <id.port> <id.port>
 eio service set-prop      <file> <id> <property> <expression>
 eio service unset-prop    <file> <id> <property>
+eio service set-name      <file> <id> <label>
+eio service unset-name    <file> <id>
 eio service set-autostart <file> <true|false>
 eio service show          <file>
 eio service validate      <file> [--manifest REF=PATH]…
