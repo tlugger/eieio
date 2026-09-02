@@ -32,6 +32,13 @@ pub enum Service {
     SetProp(SetProp),
     /// Remove a configured property, leaving the block to take its manifest default.
     UnsetProp(UnsetProp),
+    /// Change a block instance's label. Its id, connections, properties and `[ui]` are
+    /// untouched — SERVICE §9 requires that, because remove-and-re-add would change the id
+    /// and DAEMON §10 keys the state store by id.
+    SetName(SetName),
+    /// Clear a block instance's label. `name` is OPTIONAL (SERVICE §6), so this removes the
+    /// key rather than emptying it, and succeeds whether or not there was one.
+    UnsetName(UnsetName),
     /// Set whether the daemon starts this service at boot (DAEMON §3).
     SetAutostart(SetAutostart),
     /// Render the graph with names resolved.
@@ -112,6 +119,26 @@ pub struct SetProp {
     expression: String,
 }
 
+/// `eio service set-name`'s arguments.
+#[derive(Debug, Args)]
+pub struct SetName {
+    /// The service file.
+    file: PathBuf,
+    /// The instance.
+    id: String,
+    /// The label. A label only: nothing resolves by it (SERVICE §2).
+    label: String,
+}
+
+/// `eio service unset-name`'s arguments.
+#[derive(Debug, Args)]
+pub struct UnsetName {
+    /// The service file.
+    file: PathBuf,
+    /// The instance.
+    id: String,
+}
+
 /// `eio service unset-prop`'s arguments.
 #[derive(Debug, Args)]
 pub struct UnsetProp {
@@ -178,6 +205,14 @@ pub fn run(command: Service) -> Result<()> {
         Service::UnsetProp(args) => edit(&args.file, |doc| {
             doc.remove_prop(&args.id, &args.property)?;
             Ok(vec![format!("unset {}.{}", args.id, args.property)])
+        }),
+        Service::SetName(args) => edit(&args.file, |doc| {
+            doc.set_name(&args.id, &args.label)?;
+            Ok(vec![format!("{} named {:?}", args.id, args.label)])
+        }),
+        Service::UnsetName(args) => edit(&args.file, |doc| {
+            doc.remove_name(&args.id)?;
+            Ok(vec![format!("{} has no label", args.id)])
         }),
         Service::SetAutostart(args) => edit(&args.file, |doc| {
             doc.set_autostart(args.autostart);
