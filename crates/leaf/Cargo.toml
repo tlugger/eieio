@@ -1,0 +1,61 @@
+[package]
+name = "eio-leaf"
+description = "The leaf-class node runtime, built for the host (eieio-x7g.2 first milestone: does host-core compose into a second runtime at all)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A lib target beside the binary, for the same reason `eio-daemon`'s exists (root
+# `Cargo.toml`'s comment on it): `tests/` is a second crate that links a library, not a
+# binary, and both the end-to-end test and the conformance-harness probe need the engine
+# binding, the `eio:core` functions and the state store this binary itself builds against.
+[lib]
+name = "eio_leaf"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eio-leaf"
+path = "src/main.rs"
+
+[dependencies]
+# The engine-agnostic host half this milestone exists to prove composes: the lifecycle
+# driver, the property protocol, the router core, the `StateStore`/`Timers` traits (LEAF
+# §2). Linked unchanged — nothing in this crate patches it.
+eio-host-core.workspace = true
+
+# The manifest schema, parser and the ABI §4.3 load-time cross-check (`eio_manifest::validate`).
+# A leaf MUST run it at build time (LEAF §3.1); this bring-up runs it at process start, which
+# is the host-build stand-in for "at firmware build time".
+eio-manifest.workspace = true
+
+# Batches and values, for building the one signal this bring-up delivers and reading what
+# comes back out the other side.
+eio-signal.workspace = true
+
+# Not for evaluating properties — `eio-host-core` does that — but for `EvalLimits` itself,
+# which `PropContext::compile_with_limits` and `ExprBudgets::new` both take by name and which
+# `eio-host-core` does not re-export (the same reason `crates/daemon` names this dependency
+# directly rather than reaching for it through the host-agnostic crate).
+eio-expr.workspace = true
+
+# wasm3 (LEAF §3's bring-up/debugging engine): no AOT path, interpreted throughout, and
+# already the leaf-class interpreter `crates/conformance/tests/wasm3.rs` measures against
+# ABI §4.3's accepted set. WAMR's interpreter is the other option LEAF §3 names; wasm3 was
+# chosen here because its API needs no native-registration workaround — see
+# `crates/conformance/Cargo.toml`'s note on why `wamrx` cannot serve as a host binding at
+# all (its `Linker` closures have no access to the calling instance, which every ABI §7
+# function touching guest memory needs).
+wasm3x = "0.1.0"
+
+[dev-dependencies]
+# Whether the ABI §13 conformance harness can drive this binding at all is one of this
+# milestone's own questions (LEAF §9). Dev-only: a leaf image has no business linking
+# wasmtime, and this crate's binary never does — only `tests/conformance.rs` reaches for it,
+# the same way `crates/conformance/tests/wasm3.rs` reaches for `wasm3x` as a dev-dependency
+# of a crate that otherwise has nothing to do with it.
+eio-conformance.workspace = true
+
+[lints]
+workspace = true
