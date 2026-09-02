@@ -35,18 +35,27 @@ import type {
   BlockInstance,
   BlockManifest,
   Connection,
+  LogFilter,
+  LogStreamHandlers,
+  NodeInfo,
   NodeSummary,
   PutServiceResult,
   ServiceDefinition,
   ServiceEditOperation,
   ServiceEditResult,
+  ServiceErrorReport,
   ServiceState,
   ServiceSummary,
+  StreamHandle,
   SystemSummary,
+  TapStreamHandlers,
+  TapSummary,
 } from './types';
 import { ERROR_PORT } from './types';
 import { ensureLinterReady, lintExpression } from '../expr/lint';
 import { parseInlineNumberTable } from '../service/toml-values';
+import { IncrementalSseParser } from './sse';
+import { decodeLogFrame, decodeTapFrame } from './stream-events';
 
 function delay<T>(value: T, ms = 120): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms));
@@ -591,6 +600,353 @@ export async function putService(
   }
   svc.file = parsed;
   return delay({ ok: true, etag: etagFor(textFor(parsed)) });
+}
+
+// --- Live inspection (DESIGNER §6 / eieio-m9s.4) --------------------------
+//
+// No real node exists in this worktree to stream from, so everything below
+// simulates a node's SSE behaviour rather than a node's data — including
+// pushing hand-built `"event: ...\ndata: ...\n\n"` text through the exact
+// same `IncrementalSseParser` + `decode*Frame` pipeline the real transport
+// (`lib/api/sse.ts`, once `client.ts` grows a fetch-based body) will use.
+// That is deliberate: it is the parser and the decoder actually being
+// exercised end-to-end by the app, not a shortcut that only looks like one.
+//
+// What is NOT simulated is disconnection at the transport layer — that is
+// `sse.ts`'s own contract and is pinned by `sse.test.ts` against a fake
+// `fetch`, independent of this file. What this mock *does* simulate is a
+// tap's stream ending server-side mid-session (a node restart, say) and
+// resuming, so the panel's disconnect handling has something to react to
+// in the running app and not only in a unit test.
+
+function resolveManifestByRef(blockRef: string): BlockManifest | undefined {
+  return MANIFESTS.find((m) => m.block_ref === blockRef);
+}
+
+/** `"<id>.<port> -> <id>.<port>"` (SERVICE §5's own grammar, reused per
+ * `TapRequest`'s doc comment in `./types`). */
+function parseConnectionString(connection: string): { fromId: string; fromPort: string; toId: string; toPort: string } | null {
+  const [left, right] = connection.split('->').map((s) => s.trim());
+  if (!left || !right) return null;
+  const [fromId, fromPort] = splitPortRef(left);
+  const [toId, toPort] = splitPortRef(right);
+  if (!fromPort || !toPort) return null;
+  return { fromId, fromPort, toId, toPort };
+}
+
+function connectionToString(c: Connection): string {
+  return `${c.fromId}.${c.fromPort} -> ${c.toId}.${c.toPort}`;
+}
+
+// --- GET /node --------------------------------------------------------
+
+const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
+  NODES.map((n, i) => [
+    n.id,
+    {
+      id: n.id,
+      name: n.name,
+      limits: n.limits as { max_payload: number; max_batch: number },
+      budgets: {
+        fuel: 100_000_000,
+        deadline_ms: 1000,
+        expr: { max_fuel: 100_000, max_depth: 128, max_range: 65_536, max_value_bytes: 262_144 },
+      },
+      versions: { abi: { major: 1, minor: 0 }, daemon: `0.${i + 1}.0` },
+    },
+  ]),
+);
+
+export async function getNodeInfo(nodeId: string): Promise<NodeInfo> {
+  const info = NODE_INFO[nodeId];
+  if (!info) throw new Error(`no such node: ${nodeId}`);
+  return delay(info);
+}
+
+// --- GET /services/{s}/errors ------------------------------------------
+
+/** Per (node, service), a restart count that only ever goes up while the
+ * service is `errored` — enough to make the dashboard's "restart counts"
+ * column show something that isn't always zero, without pretending to
+ * model §7's actual backoff/circuit-breaker timing. */
+const RESTART_COUNTS: Record<string, number> = {};
+
+export async function getServiceErrors(nodeId: string, serviceName: string): Promise<ServiceErrorReport> {
+  const svc = findServiceRecord(nodeId, serviceName);
+  if (!svc) throw new Error(`no such service: ${nodeId}/${serviceName}`);
+  if (svc.state !== 'errored') return delay({ service: serviceName, errors: [] });
+  const key = `${nodeId}/${serviceName}`;
+  RESTART_COUNTS[key] = (RESTART_COUNTS[key] ?? 2) + 0; // stable across repeated reads
+  const firstInstance = Object.keys(svc.file.blocks)[0];
+  if (!firstInstance) return delay({ service: serviceName, errors: [] });
+  return delay({
+    service: serviceName,
+    errors: [
+      {
+        instance: firstInstance,
+        code: 'restart_limit',
+        message: `instance "${firstInstance}" exceeded its restart budget (DAEMON §7) and the service was stopped`,
+        restarts: RESTART_COUNTS[key]!,
+        last_error_at: new Date(Date.now() - 60_000).toISOString(),
+      },
+    ],
+  });
+}
+
+// --- Taps: POST /taps, GET /taps, DELETE /taps/{id}, GET /taps/{id}/stream
+
+const TAPS: Record<string, TapSummary & { nodeId: string }> = {};
+let tapCounter = 0;
+
+export async function createTap(nodeId: string, service: string, connection: string): Promise<TapSummary> {
+  const svc = findServiceRecord(nodeId, service);
+  if (!svc) throw new Error(`no such service: ${nodeId}/${service}`);
+  const parsed = parseConnectionString(connection);
+  if (!parsed) throw new Error(`malformed connection "${connection}"`);
+  const exists = svc.file.connections.some(
+    (c) => c.fromId === parsed.fromId && c.fromPort === parsed.fromPort && c.toId === parsed.toId && c.toPort === parsed.toPort,
+  );
+  if (!exists) throw new Error(`no such connection "${connection}" on service "${service}"`);
+  tapCounter += 1;
+  const tap_id = `tap-${tapCounter}`;
+  TAPS[tap_id] = { tap_id, service, connection, nodeId };
+  return delay({ tap_id, service, connection }, 60);
+}
+
+export async function listTaps(nodeId: string): Promise<TapSummary[]> {
+  return delay(
+    Object.values(TAPS)
+      .filter((t) => t.nodeId === nodeId)
+      .map(({ tap_id, service, connection }) => ({ tap_id, service, connection })),
+  );
+}
+
+export async function deleteTap(nodeId: string, tapId: string): Promise<void> {
+  const tap = TAPS[tapId];
+  if (tap && tap.nodeId === nodeId) delete TAPS[tapId];
+  return delay(undefined, 40);
+}
+
+/** One signal's worth of fake field data for `sourcePort`, shaped by the
+ * source block's manifest (its declared output `fields`, the same
+ * Designer-only extension `ConfigModal` reads to answer "what does `$temp`
+ * refer to here" — see `PortDescriptor.fields`'s doc comment in `./types`).
+ * `omitField`, when given, drops that key — how the mock manufactures the
+ * "missing data" case EXPR §6 exists for. */
+function sampleSignal(manifest: BlockManifest | undefined, sourcePort: string, tick: number, omitField?: string): Record<string, unknown> {
+  const fields = manifest?.outputs.find((p) => p.name === sourcePort)?.fields ?? [];
+  if (fields.length === 0) return { value: Math.round(Math.sin(tick / 3) * 100) / 10 };
+  const out: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (field === omitField) continue;
+    out[field] = field === 'temp' ? Math.round((18 + Math.sin(tick / 2) * 6) * 10) / 10 : tick % 7;
+  }
+  return out;
+}
+
+/** The downstream property (if any) whose expression reads `$<field>` for
+ * one of `sourceFields` — what makes an omitted field a realistic
+ * `expr_failure` rather than an arbitrary one. Returns the field, the
+ * property name, and the `$field`'s byte offset in that expression's
+ * source, for `expr_failure`'s `span` (EXPR §8). */
+function findFieldDependency(
+  toInstance: BlockInstance | undefined,
+  sourceFields: string[],
+): { field: string; property: string; start: number } | null {
+  if (!toInstance) return null;
+  for (const [property, expression] of Object.entries(toInstance.props)) {
+    for (const field of sourceFields) {
+      const needle = `$${field}`;
+      const start = expression.indexOf(needle);
+      if (start >= 0) return { field, property, start };
+    }
+  }
+  return null;
+}
+
+/** `GET /taps/{id}/stream` (DAEMON §9.6). Ticks roughly once a second;
+ * every 5th tick manufactures the "missing field" case above so the
+ * `expr_failure` annotation is something a reviewer will actually see
+ * within a few seconds of opening a tap, not something that might show up
+ * eventually. Around the 9th tick the "connection" ends and resumes once,
+ * unprompted, to exercise the panel's disconnect handling in the running
+ * app (see this section's header doc). */
+export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHandlers): StreamHandle {
+  const tap = TAPS[tapId];
+  if (!tap || tap.nodeId !== nodeId) {
+    const timer = setTimeout(() => handlers.onStatus('closed', { error: `no such tap: ${tapId}` }), 0);
+    return { close: () => clearTimeout(timer) };
+  }
+
+  const svc = findServiceRecord(nodeId, tap.service);
+  const parsed = parseConnectionString(tap.connection);
+  const sourceInstance = svc && parsed ? svc.file.blocks[parsed.fromId] : undefined;
+  const destInstance = svc && parsed ? svc.file.blocks[parsed.toId] : undefined;
+  const sourceManifest = sourceInstance ? resolveManifestByRef(sourceInstance.block) : undefined;
+  const sourceFields = parsed ? (sourceManifest?.outputs.find((p) => p.name === parsed.fromPort)?.fields ?? []) : [];
+  const dependency = findFieldDependency(destInstance, sourceFields);
+
+  const parser = new IncrementalSseParser();
+  let tick = 0;
+  let stopped = false;
+  let interval: ReturnType<typeof setInterval> | undefined;
+  let disconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function dispatch(sseText: string) {
+    for (const frame of parser.push(sseText)) {
+      const event = decodeTapFrame(frame);
+      if (event) handlers.onEvent(event);
+    }
+  }
+
+  function sseFrame(event: string, data: unknown): string {
+    return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  }
+
+  function tickOnce() {
+    tick += 1;
+    if (tick % 5 === 0 && dependency) {
+      dispatch(sseFrame('signals', { signals: [sampleSignal(sourceManifest, parsed!.fromPort, tick, dependency.field)] }));
+      dispatch(
+        sseFrame('expr_failure', {
+          code: 'MISSING',
+          span: { start: dependency.start, end: dependency.start + dependency.field.length + 1 },
+          message: `key "${dependency.field}" not present on this signal (EXPR §6: missing data is an error, not null)`,
+          instance: parsed!.toId,
+          property: dependency.property,
+        }),
+      );
+      return;
+    }
+    if (tick % 11 === 0) {
+      dispatch(sseFrame('lagged', { missed: 3 }));
+      return;
+    }
+    dispatch(sseFrame('signals', { signals: [sampleSignal(sourceManifest, parsed?.fromPort ?? 'out', tick)] }));
+  }
+
+  handlers.onStatus('connecting');
+  const openTimer = setTimeout(() => {
+    if (stopped) return;
+    handlers.onStatus('open');
+    interval = setInterval(tickOnce, 900);
+    // Simulate the node's side of a disconnect once, partway through a
+    // session that stays open - DAEMON §9.6's "a stream can end" made
+    // visible in the running app, not only asserted in a unit test.
+    disconnectTimer = setTimeout(() => {
+      if (stopped) return;
+      clearInterval(interval);
+      handlers.onStatus('reconnecting', { error: 'stream ended' });
+      resumeTimer = setTimeout(() => {
+        if (stopped) return;
+        handlers.onStatus('open');
+        interval = setInterval(tickOnce, 900);
+      }, 2500);
+    }, 8500);
+  }, 150);
+
+  return {
+    close() {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(openTimer);
+      clearTimeout(disconnectTimer);
+      clearTimeout(resumeTimer);
+      clearInterval(interval);
+      handlers.onStatus('closed');
+    },
+  };
+}
+
+// --- Logs: GET /logs/stream ----------------------------------------------
+
+const LOG_LEVELS = ['INFO', 'WARN', 'ERROR'] as const;
+
+function matchesFilter(line: { service?: string; instance?: string; level: string }, filter: LogFilter): boolean {
+  if (filter.service && line.service !== filter.service) return false;
+  if (filter.instance && line.instance !== filter.instance) return false;
+  if (filter.level && line.level !== filter.level) return false;
+  return true;
+}
+
+/** Every (service, instance) on this node, for the log stream to cycle
+ * through — one line per tick attributed to a different block, the way a
+ * multi-block service's log actually reads. */
+function instancesFor(nodeId: string): Array<{ service: string; instance: string }> {
+  const out: Array<{ service: string; instance: string }> = [];
+  for (const svc of SERVICES[nodeId] ?? []) {
+    for (const id of Object.keys(svc.file.blocks)) out.push({ service: svc.file.name, instance: id });
+  }
+  return out;
+}
+
+/** `GET /logs/stream` (DAEMON §9.6, §11): "historical lines loaded before
+ * the stream is joined" (DESIGNER §6, reconstructing nio's logger panel) is
+ * a server behaviour, not a client one — a real `/logs/stream` would send
+ * its backlog as ordinary `log` events before its first live one, so a
+ * client needs no separate history call and no way to tell which lines
+ * were which. This mock reproduces exactly that shape: five backdated
+ * lines land synchronously, then one live line arrives roughly every
+ * second, filtered the same way either way. */
+export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStreamHandlers): StreamHandle {
+  const instances = instancesFor(nodeId);
+  const parser = new IncrementalSseParser();
+  let stopped = false;
+  let tick = 0;
+  let interval: ReturnType<typeof setInterval> | undefined;
+
+  function dispatch(sseText: string) {
+    for (const frame of parser.push(sseText)) {
+      const event = decodeLogFrame(frame);
+      if (event && matchesFilter(event, filter)) handlers.onEvent(event);
+    }
+  }
+
+  function lineAt(offsetMs: number, tickIndex: number): string {
+    const target = instances[tickIndex % Math.max(instances.length, 1)];
+    const level = LOG_LEVELS[tickIndex % 3]!;
+    const message =
+      level === 'ERROR'
+        ? 'callback returned non-zero status (ABI §8): logged and counted, instance unaffected'
+        : level === 'WARN'
+          ? 'mailbox above 80% capacity'
+          : 'processed 1 signal';
+    return `event: log\ndata: ${JSON.stringify({
+      timestamp: new Date(Date.now() - offsetMs).toISOString(),
+      level,
+      service: target?.service,
+      instance: target?.instance,
+      message,
+    })}\n\n`;
+  }
+
+  if (instances.length === 0 && nodeId) {
+    // No services on this node: still a valid, empty stream - not an error.
+  }
+
+  handlers.onStatus('connecting');
+  const openTimer = setTimeout(() => {
+    if (stopped) return;
+    handlers.onStatus('open');
+    // "historical-then-streaming" (DESIGNER §6): backlog first, oldest to
+    // newest, all as ordinary `log` frames through the same parser path.
+    for (let i = 5; i >= 1; i--) dispatch(lineAt(i * 4000, 5 - i));
+    interval = setInterval(() => {
+      tick += 1;
+      dispatch(lineAt(0, tick));
+    }, 1100);
+  }, 100);
+
+  return {
+    close() {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(openTimer);
+      clearInterval(interval);
+      handlers.onStatus('closed');
+    },
+  };
 }
 
 export type { BlockInstance, Connection };

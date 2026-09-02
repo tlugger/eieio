@@ -2,11 +2,17 @@
   // DESIGNER §5: "A narrow icon rail." The spec settles the shell's
   // layout (rail + one navigator + canvas) but does not enumerate what
   // lives on the rail itself. GUESS: this shell puts only what it has a
-  // view for — the systems/navigator view (the only one this issue
-  // builds) and the theme toggle — rather than inventing placeholder
-  // destinations (a registries browser, node onboarding, etc.) that
-  // would-be later issues' to define.
+  // view for — the systems/navigator view, the node dashboard
+  // (DESIGNER §6, eieio-m9s.4) and the theme toggle — rather than
+  // inventing placeholder destinations (a registries browser, node
+  // onboarding, etc.) that would-be later issues' to define.
   import { cycleThemePreference, getThemePreference } from '../stores/theme.svelte';
+
+  interface Props {
+    onOpenDashboard: () => void;
+  }
+
+  let { onOpenDashboard }: Props = $props();
 
   const theme = $derived(getThemePreference());
 
@@ -26,6 +32,10 @@
 <div class="rail">
   <button class="rail__button rail__button--active" title="Systems" aria-label="Systems" aria-current="true">
     <span aria-hidden="true">⬡</span>
+  </button>
+
+  <button class="rail__button" title="Node dashboard" aria-label="Open node dashboard" onclick={onOpenDashboard}>
+    <span aria-hidden="true">▤</span>
   </button>
 
   <div class="rail__spacer"></div>

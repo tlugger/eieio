@@ -18,10 +18,27 @@
     onReload: () => void;
     onToggleAutostart: () => void;
     onAddBlock: () => void;
+    /** DESIGNER §6: the docked taps/logs panel — a click on a canvas
+     * connection opens it too, but an operator wanting only the log
+     * stream needs a way in that does not require tapping anything. */
+    inspectorOpen: boolean;
+    onToggleInspector: () => void;
   }
 
-  let { serviceName, nodeName, state, autostart, busy, onStart, onStop, onReload, onToggleAutostart, onAddBlock }: Props =
-    $props();
+  let {
+    serviceName,
+    nodeName,
+    state,
+    autostart,
+    busy,
+    onStart,
+    onStop,
+    onReload,
+    onToggleAutostart,
+    onAddBlock,
+    inspectorOpen,
+    onToggleInspector,
+  }: Props = $props();
 </script>
 
 <div class="toolbar">
@@ -76,6 +93,17 @@
       onclick={onAddBlock}
     >
       + Add block
+    </button>
+    <button
+      class="toolbar__button toolbar__button--wide"
+      class:toolbar__button--active={inspectorOpen}
+      title="Taps and log streams (DESIGNER §6)"
+      aria-label={inspectorOpen ? 'Close inspection panel' : 'Open inspection panel'}
+      aria-pressed={inspectorOpen}
+      disabled={!serviceName}
+      onclick={onToggleInspector}
+    >
+      Inspect
     </button>
   </div>
 </div>
@@ -133,6 +161,12 @@
   .toolbar__button--wide {
     font-size: 12px;
     padding: 0 10px;
+  }
+
+  .toolbar__button--active {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: var(--accent);
   }
 
   .toolbar__autostart {

@@ -21,6 +21,8 @@
   import BlockLibrary from './lib/components/BlockLibrary.svelte';
   import ConfigModal from './lib/components/ConfigModal.svelte';
   import ConflictBanner from './lib/components/ConflictBanner.svelte';
+  import InspectorPanel from './lib/components/InspectorPanel.svelte';
+  import NodeDashboard from './lib/components/NodeDashboard.svelte';
   import * as api from './lib/api/client';
   import { resolveManifest } from './lib/derive/capabilities';
   import {
@@ -38,6 +40,7 @@
     ServiceEditOperation,
     ServiceSummary,
     SystemSummary,
+    TappedConnection,
   } from './lib/api/client';
 
   let systems = $state<SystemSummary[]>([]);
@@ -61,6 +64,12 @@
   let conflict = $state<{ current: string } | null>(null);
 
   let configuringInstanceId = $state<string | null>(null);
+
+  // --- Live inspection (DESIGNER §6, eieio-m9s.4) --------------------------
+  let inspectorOpen = $state(false);
+  let tappedConnection = $state<TappedConnection | null>(null);
+  let selectedBlockId = $state<string | null>(null);
+  let dashboardOpen = $state(false);
 
   async function loadAll() {
     try {
@@ -103,6 +112,13 @@
     editErrorBlockId = null;
     conflict = null;
     configuringInstanceId = null;
+    // A tap is scoped to one service's connection (DAEMON §6.3 observes a
+    // specific `(service, connection)`) - switching services with one open
+    // would otherwise keep streaming a tap for a service no longer on
+    // screen, which is exactly the "silently keeps going" failure mode the
+    // sub-plan calls out.
+    tappedConnection = null;
+    selectedBlockId = null;
     currentService = await api.getService(nodeId, serviceName);
   }
 
@@ -270,9 +286,38 @@
     editErrorMessage = null;
     editErrorBlockId = null;
   }
+
+  // --- Live inspection (DESIGNER §6) ---------------------------------------
+
+  /** A connection click from the canvas, or `null` to release the tap
+   * (clicking the same edge again, or the panel's own "Release tap"). Taps
+   * observe a *running* service's signal flow (DAEMON §6.3) — a click
+   * while stopped is told why instead of opening a tap on nothing. */
+  function handleTapConnection(connection: TappedConnection | null) {
+    if (connection && selectedServiceSummary?.state !== 'running') {
+      editErrorMessage = 'Start this service to tap a connection on it.';
+      return;
+    }
+    tappedConnection = connection;
+    if (connection) inspectorOpen = true;
+  }
+
+  function handleReleaseTap() {
+    tappedConnection = null;
+  }
+
+  function handleToggleInspector() {
+    inspectorOpen = !inspectorOpen;
+    if (!inspectorOpen) tappedConnection = null;
+  }
+
+  function handleCloseInspector() {
+    inspectorOpen = false;
+    tappedConnection = null;
+  }
 </script>
 
-<IconRail />
+<IconRail onOpenDashboard={() => (dashboardOpen = true)} />
 
 <NavigatorTree {systems} {nodesBySystem} {selected} onSelectService={selectService} />
 
@@ -288,6 +333,8 @@
     onReload={handleReload}
     onToggleAutostart={handleToggleAutostart}
     onAddBlock={() => (libraryOpen = true)}
+    {inspectorOpen}
+    onToggleInspector={handleToggleInspector}
   />
 
   {#if loadError}
@@ -305,11 +352,28 @@
     {manifests}
     node={selectedNode}
     {editErrorBlockId}
+    {tappedConnection}
     onConfigure={handleConfigure}
     onConnect={handleConnect}
     onApplyOperations={applyEdit}
+    onTapConnection={handleTapConnection}
+    onSelectBlock={(id) => (selectedBlockId = id)}
+  />
+
+  <InspectorPanel
+    open={inspectorOpen}
+    nodeId={selected?.nodeId ?? null}
+    serviceName={selected?.serviceName ?? null}
+    {tappedConnection}
+    {selectedBlockId}
+    onClose={handleCloseInspector}
+    onReleaseTap={handleReleaseTap}
   />
 </main>
+
+{#if dashboardOpen}
+  <NodeDashboard {systems} {nodesBySystem} onClose={() => (dashboardOpen = false)} />
+{/if}
 
 {#if libraryOpen}
   <BlockLibrary {manifests} node={selectedNode} onSelect={handleAddBlock} onClose={() => (libraryOpen = false)} />

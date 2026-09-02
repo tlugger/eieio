@@ -21,7 +21,7 @@
   import BlockCard from './BlockCard.svelte';
   import { resolveManifest, missingCapabilities } from '../derive/capabilities';
   import { ERROR_PORT, type ServiceEditOperation } from '../api/types';
-  import type { BlockManifest, NodeSummary, ServiceDefinition } from '../api/types';
+  import type { BlockManifest, NodeSummary, ServiceDefinition, TappedConnection } from '../api/types';
   import {
     disconnectOperations,
     isValidConnectionTarget,
@@ -37,12 +37,36 @@
     /** DESIGNER §5: "validation errors... rendered inline on the offending
      * block" — the id the last failed edit named, if any. */
     editErrorBlockId?: string | null;
+    /** DESIGNER §6, item 2: "click a connection on a running service" opens
+     * a tap. Whichever connection is currently tapped, so its edge can be
+     * picked out on the canvas — a plain selection highlight, not a
+     * throughput badge (the sub-plan explicitly sequences that surface
+     * later, once its cost across many edges has been measured). */
+    tappedConnection?: TappedConnection | null;
     onConfigure: (id: string) => void;
     onConnect: (source: PortRef, target: PortRef) => void;
     onApplyOperations: (operations: ServiceEditOperation[]) => Promise<boolean>;
+    /** `null` when the service is not running — DESIGNER §6's taps observe
+     * a *running* service's signal flow, so a click while stopped reports
+     * why rather than opening an empty tap. */
+    onTapConnection?: (connection: TappedConnection | null) => void;
+    /** Single-click on a block (distinct from the double-click that opens
+     * `ConfigModal`): DESIGNER §6's "[logs] correlated to canvas selection". */
+    onSelectBlock?: (id: string) => void;
   }
 
-  let { service, manifests, node, editErrorBlockId = null, onConfigure, onConnect, onApplyOperations }: Props = $props();
+  let {
+    service,
+    manifests,
+    node,
+    editErrorBlockId = null,
+    tappedConnection = null,
+    onConfigure,
+    onConnect,
+    onApplyOperations,
+    onTapConnection,
+    onSelectBlock,
+  }: Props = $props();
 
   const nodeTypes = { block: BlockCard };
 
@@ -83,17 +107,28 @@
       } satisfies Node;
     });
 
-    flowEdges = service.connections.map((c, i) => ({
-      id: `${c.fromId}.${c.fromPort}->${c.toId}.${c.toPort}#${i}`,
-      source: c.fromId,
-      sourceHandle: c.fromPort,
-      target: c.toId,
-      targetHandle: c.toPort,
-      style:
-        c.fromPort === ERROR_PORT
-          ? 'stroke: var(--canvas-edge-error); stroke-dasharray: 4 3; stroke-width: 1.5px;'
-          : 'stroke: var(--canvas-edge); stroke-width: 1.5px;',
-    } satisfies Edge));
+    flowEdges = service.connections.map((c, i) => {
+      const isTapped =
+        !!tappedConnection &&
+        tappedConnection.fromId === c.fromId &&
+        tappedConnection.fromPort === c.fromPort &&
+        tappedConnection.toId === c.toId &&
+        tappedConnection.toPort === c.toPort;
+      const errorPort = c.fromPort === ERROR_PORT;
+      return {
+        id: `${c.fromId}.${c.fromPort}->${c.toId}.${c.toPort}#${i}`,
+        source: c.fromId,
+        sourceHandle: c.fromPort,
+        target: c.toId,
+        targetHandle: c.toPort,
+        interactionWidth: 20,
+        style: isTapped
+          ? 'stroke: var(--accent); stroke-width: 3px;'
+          : errorPort
+            ? 'stroke: var(--canvas-edge-error); stroke-dasharray: 4 3; stroke-width: 1.5px;'
+            : 'stroke: var(--canvas-edge); stroke-width: 1.5px;',
+      } satisfies Edge;
+    });
   });
 
   // `@xyflow/svelte` (this version) has no node-double-click event of its
@@ -114,7 +149,24 @@
       onConfigure(clickedNode.id);
     } else {
       lastNodeClick = { id: clickedNode.id, at: now };
+      onSelectBlock?.(clickedNode.id);
     }
+  }
+
+  /** DESIGNER §6, item 2: "click a connection on a running service -> POST
+   * /taps". A click on the already-tapped edge deselects it (toggles the
+   * tap off) rather than re-requesting the same tap, which is also how a
+   * reviewer releases one without hunting for the panel's own button. */
+  function handleEdgeClick({ edge }: { edge: Edge }) {
+    if (!onTapConnection || !edge.source || !edge.target || !edge.sourceHandle || !edge.targetHandle) return;
+    const clicked: TappedConnection = { fromId: edge.source, fromPort: edge.sourceHandle, toId: edge.target, toPort: edge.targetHandle };
+    const isSame =
+      !!tappedConnection &&
+      tappedConnection.fromId === clicked.fromId &&
+      tappedConnection.fromPort === clicked.fromPort &&
+      tappedConnection.toId === clicked.toId &&
+      tappedConnection.toPort === clicked.toPort;
+    onTapConnection(isSame ? null : clicked);
   }
 
   function isValidConnection(candidate: Edge | FlowConnection): boolean {
@@ -193,6 +245,7 @@
       onconnect={handleConnect}
       onbeforedelete={handleBeforeDelete}
       onnodeclick={handleNodeClick}
+      onedgeclick={handleEdgeClick}
       onnodedragstop={handleNodeDragStop}
       onmoveend={handleMoveEnd}
       fitView

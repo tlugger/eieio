@@ -245,3 +245,194 @@ export type PutServiceResult =
 /** ABI §6.4: the reserved error port name, addressable as a connection
  * source only. Shared here so every component agrees on the literal. */
 export const ERROR_PORT = 'err';
+
+// --- Live inspection: taps, log streams, node dashboard (DESIGNER §6) -----
+//
+// eieio-m9s.4. DAEMON §9's endpoint table gives names and one-line
+// descriptions for all of this (`/node`, `/taps`, `/taps/{id}/stream`,
+// `/logs/stream`, `/services/{s}/errors`) but no request/response JSON
+// shapes — that expansion hasn't happened yet (DAEMON §13's list). Every
+// shape below is therefore a GUESS in the same sense `ServiceState` above
+// already is, called out at the point it's made rather than left implicit.
+
+/** A connection identified by its four parts — what a canvas edge click
+ * hands up (`ServiceCanvas`) and what the inspection panel needs to mint a
+ * tap request from (`portRefToString` on each side gives `TapRequest`'s
+ * `connection` string). Kept separate from `Connection` (the parsed
+ * service-file shape, `./types` above) only in name, not in shape, so a
+ * caller does not have to care which one it is holding while wiring a
+ * click through to a tap. */
+export interface TappedConnection {
+  fromId: string;
+  fromPort: string;
+  toId: string;
+  toPort: string;
+}
+
+/** `POST /taps` (DAEMON §9, proxied): identifies one connection the way
+ * SERVICE §5 already spells one in a service file — `"<id>.<port>"` on each
+ * side — which is also the grammar `ServiceEditOperation`'s `connect`/
+ * `disconnect` already use for `from`/`to` (`lib/service/operations.ts`'s
+ * `portRefToString`). GUESS: DAEMON §9 says only `{service, connection}`;
+ * reusing SERVICE §5's own string grammar for `connection` (rather than
+ * inventing a `{from, to}` object) is the smallest shape that says the same
+ * thing SERVICE-SPEC already says elsewhere. */
+export interface TapRequest {
+  service: string;
+  connection: string;
+}
+
+/** `POST /taps`'s `-> tap_id` and `GET /taps`'s listing, per entry. */
+export interface TapSummary {
+  tap_id: string;
+  service: string;
+  connection: string;
+}
+
+/** `GET /node` (DAEMON §9): "identity, limits, budgets, versions" — §2.1's
+ * `node.toml` fields, echoed back as what the node is actually running on
+ * (not what a file says, since a file can omit a field and get a default).
+ * GUESS: the exact field names and the `versions` shape are not given;
+ * these mirror `node.toml`'s own tables (§2.1) plus one version pair (the
+ * ABI compatibility number every manifest already carries, and the
+ * daemon's own build version an operator would want on a dashboard). */
+export interface NodeInfo {
+  id: string;
+  name?: string;
+  limits: { max_payload: number; max_batch: number };
+  budgets: {
+    fuel: number;
+    deadline_ms: number;
+    expr: { max_fuel: number; max_depth: number; max_range: number; max_value_bytes: number };
+  };
+  versions: { abi: { major: number; minor: number }; daemon: string };
+}
+
+/** `GET /services/{s}/errors` (DAEMON §9): "why a service is errored,
+ * structured." GUESS: DAEMON §9 gives no field list. This shape follows
+ * §7's restart-policy paragraph directly — "per-instance restart with
+ * exponential backoff and a restart-count circuit breaker escalating to
+ * service-errored" is the mechanism this endpoint would be reporting on,
+ * so a report is per failing instance and carries the count that
+ * mechanism keeps. A service with nothing wrong answers an empty array,
+ * the same "no entries" shape §9's state-inspection endpoint already uses
+ * for "nothing to report" rather than 404ing a healthy service. */
+export interface ServiceErrorReport {
+  service: string;
+  errors: InstanceError[];
+}
+
+export interface InstanceError {
+  instance: string;
+  /** EXPR §8's codes when the failure was an expression's; a restart/trap
+   * reason otherwise (`"trap"`, `"restart_limit"`, …) — this shell does not
+   * invent a closed set for the non-expression case, since DAEMON-SPEC
+   * does not enumerate one either (§8 ABI status codes are the closest
+   * normative list, and even those are the guest's, not the supervisor's). */
+  code: string;
+  message: string;
+  /** §7's restart-count circuit breaker: how many times this instance has
+   * been re-instantiated since the service last started. */
+  restarts: number;
+  last_error_at: string;
+}
+
+/** DAEMON §9.6's event names — the contract a client dispatches on for
+ * `/taps/{id}/stream`. "A name not in that list is a name a client MAY
+ * ignore" — `decodeTapFrame` (`lib/api/stream-events.ts`) is where that
+ * tolerance lives. */
+export interface TapSignalsEvent {
+  type: 'signals';
+  /** GUESS: DAEMON §9.6 says a `signals` event carries "a batch that
+   * travelled the tapped connection" but not its JSON encoding. Batches are
+   * canonical CBOR on the wire (ABI §6.3.1) and an SSE `data:` field is
+   * text, so the daemon must render each value — this shell assumes EXPR
+   * §7.6's canonical rendering, the same one `dev run-block` already uses
+   * for emitted batches (DAEMON §12), since it is the one canonical
+   * text form this repository has for a signal value. */
+  signals: unknown[];
+}
+
+/** EXPR §8's own three fields, plus which instance/property the daemon
+ * says failed — DAEMON §6.3: "a property that failed for a signal is the
+ * most useful thing a tap can show." This is the annotation this whole
+ * panel exists to not bury. */
+export interface ExprFailureEvent {
+  type: 'expr_failure';
+  code: string;
+  span: { start: number; end: number };
+  message: string;
+  instance?: string;
+  property?: string;
+}
+
+/** A batch routed and not delivered (§6.2: drop-oldest, a full
+ * self-connection, an unrouted error emission, a gone receiver). GUESS:
+ * §6.2 names the causes; the field carrying which one is not spelled. */
+export interface DiscardedEvent {
+  type: 'discarded';
+  reason: string;
+}
+
+/** §9.6: "That count is the sampling report" — the exact number of
+ * observations a slow reader did not see, before the stream resumes. This
+ * is the one number that makes "sampled" precise rather than a vibe. */
+export interface LaggedEvent {
+  type: 'lagged';
+  missed: number;
+}
+
+export type TapStreamEvent = TapSignalsEvent | ExprFailureEvent | DiscardedEvent | LaggedEvent;
+
+/** `/logs/stream`'s `log` event (§9.6, §11): "tagged with (service,
+ * instance) from the span the lifecycle driver has entered." `instance` is
+ * absent for the daemon's own subsystem lines, which carry no instance. */
+export interface LogLineEvent {
+  type: 'log';
+  timestamp: string;
+  level: string;
+  service?: string;
+  instance?: string;
+  message: string;
+}
+
+/** `/logs/stream` is "filterable" (DAEMON §9) with no query shape given —
+ * GUESS: the three axes a `log` event itself carries. */
+export interface LogFilter {
+  service?: string;
+  instance?: string;
+  level?: string;
+}
+
+/** The state of a stream connection, surfaced rather than swallowed
+ * (DAEMON §9.6: "reconnection... is in the protocol"; the sub-plan: "a
+ * panel that silently stops updating when a node restarts is worse than
+ * one that says so"). `'connecting'` is the very first attempt;
+ * `'reconnecting'` is every attempt after a disconnect, so a client can
+ * tell "still arriving" from "was arriving, now is not" at a glance. */
+export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
+
+export interface StreamStatusDetail {
+  /** Set once, on the transition into `'closed'`, when it was caused by an
+   * error rather than an explicit release. */
+  error?: string;
+}
+
+/** What `streamTap`/`streamLogs` hand back: the one thing a caller can do
+ * is stop listening. Releasing DAEMON §9.6's tap (`DELETE /taps/{id}`) is
+ * a separate, explicit call — this handle only tears down the client side
+ * of the stream, the same asymmetry §9.6 itself draws ("teardown is either
+ * explicit or a disconnect"). */
+export interface StreamHandle {
+  close(): void;
+}
+
+export interface TapStreamHandlers {
+  onEvent: (event: TapStreamEvent) => void;
+  onStatus: (status: StreamStatus, detail?: StreamStatusDetail) => void;
+}
+
+export interface LogStreamHandlers {
+  onEvent: (event: LogLineEvent) => void;
+  onStatus: (status: StreamStatus, detail?: StreamStatusDetail) => void;
+}

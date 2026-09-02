@@ -26,6 +26,13 @@ export {
   reloadService,
   serviceEdit,
   putService,
+  getNodeInfo,
+  getServiceErrors,
+  createTap,
+  listTaps,
+  deleteTap,
+  streamTap,
+  streamLogs,
 } from './mock';
 
 export type * from './types';
