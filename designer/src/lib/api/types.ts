@@ -63,6 +63,18 @@ export interface PortDescriptor {
    * manifest cache would have no field to read it from until ABI-SPEC grows
    * one, which is the gap this comment reports rather than quietly fills.
    */
+  /** A best-effort hint at the attribute names a signal on this port carries.
+   *
+   *  **Not an ABI field.** DESIGNER §5 records the decision: ABI §11.1 describes ports by
+   *  name and says nothing about a signal's shape, deliberately — signals are dynamic and
+   *  EXPR §6 makes a missing attribute a loud per-signal error rather than a null. An
+   *  advisory manifest declaration was considered and declined, because every declaration is
+   *  a thing that can be wrong and a block whose output depends on its input cannot state one
+   *  honestly.
+   *
+   *  So this is a hint, it may be absent, and absent means "unknown" — never "this port
+   *  carries nothing". Rendering an empty hint as a fact would assert something nobody
+   *  declared. */
   fields?: string[];
 }
 
