@@ -93,6 +93,24 @@ ANY    /api/nodes/{id}/daemon/{*path}     proxied to that node, verbatim
 
 **The browser is the operator, so the proxy does not restrict which daemon operations it may reach.** The proxy exists to keep the token server-side and to solve mixed reachability (§3), not to be an authorization layer — v1 has one operator (SCOPE §6), and a second one is where this needs revisiting.
 
+### 3.2 Editing a service file is a stateless transform (normative)
+
+```
+POST   /api/service-edit    { toml, operations: [ … ] } -> { toml } | 422 { errors }
+```
+
+The Designer holds no service file. The browser `GET`s the text from a node through §3.1's proxy, sends it here with what the operator just did, receives new text, and `PUT`s that back to the node. Nothing is stored between the two, and this endpoint has no notion of *which* service it is editing — it takes text and returns text.
+
+**Why a round trip to the server at all**, when the canvas already has the text: SERVICE §9 requires a structural edit to preserve everything it did not change — comments, key order, alignment, blank lines, quoting — and a value-tree parser cannot do that, because a value tree has no trivia. `eio-service`'s `Document` is this repository's editor and it is a `std` Rust crate, so the backend calls it directly. Re-implementing it in TypeScript would be a second editor to keep in agreement with the CLI's, and SERVICE §9's one-editor rule exists to prevent exactly that. This is *not* the WASM route §1 takes for `expr`: `expr` is compiled for the browser because linting has to happen on every keystroke, which is a different requirement with a different answer.
+
+**Statelessness is what keeps SCOPE §3.8 true.** A Designer that held a service file between edits would be a second home for something the spec says lives on nodes, one crash away from disagreeing with the file it came from. Text in, text out, no session, no draft.
+
+The operations are `Document`'s own (SERVICE §9): `add_block`, `remove_block`, `set_prop`, `remove_prop`, `connect`, `disconnect`, `set_autostart`, `set_ui`, `remove_ui`. Several may be sent together, and they apply **in order and all-or-nothing**: SERVICE §9 says an edit that would make the file invalid MUST fail and change nothing, so a batch that fails at its third operation returns the original text unchanged along with what broke. A drag that adds a block and connects it is one edit, not two, and must not be able to leave a block wired to nothing.
+
+**The response is text, not a diff or a parse tree.** What the caller `PUT`s is what this returned, byte for byte, so there is no step between here and the node where formatting could be reconstructed differently.
+
+**Conflict detection is the daemon's, not this endpoint's** (§4, DAEMON §9.3): the browser carries the `ETag` its `GET` returned and the node refuses a stale `PUT`. This endpoint never sees a node and cannot know what is on one.
+
 ## 4. Service editing model
 
 - **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer. Not by the WASM route §1 uses for `expr`: `eio-service` is a `std` crate and the backend is Rust, so it is an ordinary dependency. `expr` is compiled to WASM because the *browser* needs it on every keystroke, which is a different requirement with a different answer. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.
