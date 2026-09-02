@@ -32,6 +32,7 @@
 // `lib/service/toml-values.ts`.
 
 import type {
+  ApiError,
   BlockInstance,
   BlockManifest,
   Connection,
@@ -225,6 +226,10 @@ type ServiceFile = Pick<ServiceDefinition, 'name' | 'autostart' | 'overflow' | '
 interface MockService {
   file: ServiceFile;
   state: ServiceState;
+  /** The structured reason, when `state` is `'errored'` — DAEMON §9's amendment (eieio-m9s.12):
+   *  the listing carries this rather than making a caller fetch `/services/{s}/errors`
+   *  separately. Mirrors {@link ApiError}, the same envelope shape a real daemon answers. */
+  error?: ApiError;
 }
 
 const SERVICES: Record<string, MockService[]> = {
@@ -276,6 +281,12 @@ const SERVICES: Record<string, MockService[]> = {
   'node-attic': [
     {
       state: 'errored',
+      // DAEMON §9's amendment: the listing carries the structured reason, not just the label.
+      error: {
+        error: 'unresolvable',
+        message: 'block `ghcr.io/tlugger/temp-sensor:1.0.0` of instance s1: exceeded its restart budget (DAEMON §7)',
+        detail: { instance: 's1', block: 'ghcr.io/tlugger/temp-sensor:1.0.0' },
+      },
       file: {
         name: 'attic-fan',
         autostart: true,
@@ -331,14 +342,16 @@ function findServiceRecord(nodeId: string, serviceName: string): MockService | u
 
 export async function listServices(nodeId: string): Promise<ServiceSummary[]> {
   const services = SERVICES[nodeId] ?? [];
-  return delay(services.map((s) => ({ name: s.file.name, state: s.state, autostart: s.file.autostart })));
+  return delay(
+    services.map((s) => ({ name: s.file.name, state: s.state, autostart: s.file.autostart, error: s.error })),
+  );
 }
 
 export async function getService(nodeId: string, serviceName: string): Promise<ServiceDefinition> {
   const svc = findServiceRecord(nodeId, serviceName);
   if (!svc) throw new Error(`no such service: ${nodeId}/${serviceName}`);
   const text = textFor(svc.file);
-  return delay({ ...svc.file, state: svc.state, text, etag: etagFor(text) });
+  return delay({ ...svc.file, state: svc.state, error: svc.error, text, etag: etagFor(text) });
 }
 
 function setState(nodeId: string, serviceName: string, state: ServiceState): void {

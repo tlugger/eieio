@@ -10,11 +10,52 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, beforeAll } from 'vitest';
 import { initSync } from '../../../../crates/expr-wasm/pkg/eio_expr_wasm.js';
-import { getService, putService, serviceEdit } from './mock';
+import { getService, listServices, putService, serviceEdit } from './mock';
 
 beforeAll(async () => {
   const wasmPath = path.resolve(process.cwd(), '../crates/expr-wasm/pkg/eio_expr_wasm_bg.wasm');
   initSync({ module: readFileSync(wasmPath) });
+});
+
+// eieio-m9s.12: `ServiceSummary`/`ServiceDefinition` match the daemon's shape byte for byte —
+// `autostart` sourced from the file (not fabricated), and `error` carried on the listing itself
+// rather than requiring a second `getServiceErrors` round trip.
+//
+// Placed before `describe('serviceEdit', ...)`/`describe('putService', ...)` below on purpose:
+// those mutate the shared `SERVICES` fixture in place (`putService` writes `svc.file` directly),
+// so reading `kitchen`/`greenhouse` here has to happen before that mutation, not after.
+describe('listServices / getService carry autostart and the structured error', () => {
+  it('a running service lists its real autostart flag and no error', async () => {
+    const listed = await listServices('node-porch');
+    const kitchen = listed.find((s) => s.name === 'kitchen');
+    expect(kitchen).toBeDefined();
+    expect(kitchen?.state).toBe('running');
+    expect(kitchen?.autostart).toBe(true); // sourced from the fixture's own file.autostart
+    expect(kitchen?.error).toBeUndefined();
+  });
+
+  it('a stopped, non-autostarting service reports autostart: false', async () => {
+    const listed = await listServices('node-porch');
+    const greenhouse = listed.find((s) => s.name === 'greenhouse');
+    expect(greenhouse?.state).toBe('stopped');
+    expect(greenhouse?.autostart).toBe(false);
+  });
+
+  it('an errored service carries its structured error on the listing itself', async () => {
+    const listed = await listServices('node-attic');
+    const atticFan = listed.find((s) => s.name === 'attic-fan');
+    expect(atticFan?.state).toBe('errored');
+    expect(atticFan?.error).toBeDefined();
+    expect(atticFan?.error?.error).toBe('unresolvable');
+    expect(atticFan?.error?.message).toMatch(/temp-sensor/);
+    expect(atticFan?.error?.detail).toMatchObject({ instance: 's1' });
+  });
+
+  it('GET /services/{s} carries the same autostart and error as the listing', async () => {
+    const detail = await getService('node-attic', 'attic-fan');
+    expect(detail.autostart).toBe(true);
+    expect(detail.error?.error).toBe('unresolvable');
+  });
 });
 
 describe('serviceEdit', () => {

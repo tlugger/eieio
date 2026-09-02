@@ -459,8 +459,9 @@ GET    /blocks                        cached blocks + manifests
 POST   /blocks/pull                   {reference} -> pull into the cache (§4.1)
 GET    /blocks/available              what a configured registry offers, uninstalled (§9.8)
 GET    /blocks/available/{reference}  one reference's manifest, without installing it (§9.8)
-GET    /services                      every service and its state: `running`,
-                                      `stopped` or `errored`, and no others (§3)
+GET    /services                      every service, its state (`running`, `stopped`
+                                      or `errored`, and no others, §3), whether it
+                                      autostarts, and why when it is errored
 GET    /services/{s}                  definition text + state
 PUT    /services/{s}                  write definition (validate first, §9.3)
 DELETE /services/{s}                  remove the definition file; 409 while running (§9.7)
@@ -477,6 +478,10 @@ GET    /taps/{id}/stream              SSE: signals and expr failures (§9.6)
 DELETE /taps/{id}                     stop tapping, release the ring
 GET    /logs/stream                   SSE: log lines, filterable (§9.6, §11)
 ```
+
+**`stopped` alone is ambiguous, so the listing carries `autostart`.** §3's three states answer what a service is doing, not what it will do next, and `stopped` covers two situations an operator must tell apart: a service that is valid and was never meant to run, and one that was running until somebody stopped it. Only the first comes back after a reboot. A client cannot recover the difference on its own — `autostart` lives in the service file, `GET /services/{s}` serves that file as text, and SERVICE §9 makes the daemon the one thing that parses it — so a node that reads the flag at boot and then forgets it is a node whose listing cannot be rendered truthfully. **The daemon therefore retains `autostart` per service and serves it on both the listing and the detail.** It is the file's flag, not a second setting: `POST /services/{s}/start` overrides it for this boot without changing it, and §9.4's reload re-reads it.
+
+**The listing carries the structured `error` too**, the same `ApiError` (§9.2) that `GET /services/{s}/errors` answers. A client that has to fetch a second endpoint to say *why* a service it just listed is errored is doing a round trip for something the first answer already knew, and the round trip is exactly where a Designer ends up showing a red service with no reason on it.
 
 **State inspection is service-scoped, and that is not cosmetic.** This section sketched the endpoint as `GET /state/{instance}` while §10 had no store behind it; the store made the path impossible. SERVICE §2: "ids are unique within a service file and mean nothing outside it. Two services on one node may both contain `b7k2`, and they are not related." A node's store is keyed `(service, instance)` for exactly that reason (§10), so the endpoint carries both — and it joins the service-scoped family the rest of the `/services/{s}/…` operations already form.
 

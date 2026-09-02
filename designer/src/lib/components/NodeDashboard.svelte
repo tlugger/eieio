@@ -1,15 +1,22 @@
 <script lang="ts">
   // DESIGNER §6 / eieio-m9s.4, item 4: "A node dashboard: per-System
   // health, service statuses, restart counts, error summaries." `GET
-  // /node`, `GET /services` (already in `nodesBySystem`, App.svelte's own
-  // load) and `GET /services/{s}/errors`.
+  // /node` and `GET /services` (already in `nodesBySystem`, App.svelte's
+  // own load).
+  //
+  // eieio-m9s.12: the structured error rides on `GET /services` itself
+  // (`ServiceSummary.error`, the same `ApiError` `GET /services/{s}/errors`
+  // answers) — so expanding a row no longer fetches anything; it only
+  // reveals what the listing already knew. `getServiceErrors` is kept in
+  // `mock.ts`/`client.ts` for whatever else names it; this component
+  // no longer calls it.
   //
   // An overlay like `BlockLibrary`, not a permanent column - DESIGNER §5's
   // "a rail, a navigator, and the canvas" shell has no fourth column to
   // spend on this, and a dashboard is something an operator opens to check
   // on, not something that needs to be visible while editing a service.
   import * as api from '../api/client';
-  import type { NodeInfo, NodeSummary, ServiceErrorReport, ServiceSummary, SystemSummary } from '../api/types';
+  import type { NodeInfo, NodeSummary, ServiceSummary, SystemSummary } from '../api/types';
 
   interface NodeWithServices {
     node: NodeSummary;
@@ -25,7 +32,6 @@
   let { systems, nodesBySystem, onClose }: Props = $props();
 
   let nodeInfo = $state<Record<string, NodeInfo | 'loading' | 'error'>>({});
-  let errorReports = $state<Record<string, ServiceErrorReport | 'loading' | 'error'>>({});
   let expanded = $state<Set<string>>(new Set());
 
   async function loadNodeInfo(nodeId: string) {
@@ -47,24 +53,17 @@
     }
   });
 
-  async function toggleErrors(nodeId: string, serviceName: string) {
+  // No fetch: `service.error` is already in hand from the listing that
+  // populated `nodesBySystem` (eieio-m9s.12). Toggling a row only reveals it.
+  function toggleErrors(nodeId: string, serviceName: string) {
     const key = `${nodeId}/${serviceName}`;
     const next = new Set(expanded);
     if (next.has(key)) {
       next.delete(key);
-      expanded = next;
-      return;
+    } else {
+      next.add(key);
     }
-    next.add(key);
     expanded = next;
-    if (errorReports[key]) return;
-    errorReports = { ...errorReports, [key]: 'loading' };
-    try {
-      const report = await api.getServiceErrors(nodeId, serviceName);
-      errorReports = { ...errorReports, [key]: report };
-    } catch {
-      errorReports = { ...errorReports, [key]: 'error' };
-    }
   }
 
   function handleKeydown(event: KeyboardEvent) {
@@ -118,7 +117,6 @@
               <ul class="dashboard__services">
                 {#each services as service (service.name)}
                   {@const key = `${node.id}/${service.name}`}
-                  {@const report = errorReports[key]}
                   <li class="dashboard__service">
                     <button
                       type="button"
@@ -135,21 +133,13 @@
                     </button>
                     {#if expanded.has(key)}
                       <div class="dashboard__errors" role="region" aria-label={`Errors for ${service.name}`}>
-                        {#if report === 'loading'}
-                          <span class="dashboard__muted">Loading…</span>
-                        {:else if report === 'error' || !report}
-                          <span class="dashboard__muted">Could not load errors for this service.</span>
-                        {:else if report.errors.length === 0}
-                          <span class="dashboard__muted">No structured errors reported.</span>
+                        {#if service.error}
+                          <div class="dashboard__error">
+                            <span class="dashboard__error-code">[{service.error.error}]</span>
+                            {service.error.message}
+                          </div>
                         {:else}
-                          {#each report.errors as err (err.instance)}
-                            <div class="dashboard__error">
-                              <strong>{err.instance}</strong>
-                              <span class="dashboard__error-code">[{err.code}]</span>
-                              {err.message}
-                              <span class="dashboard__restarts">restarts: {err.restarts}</span>
-                            </div>
-                          {/each}
+                          <span class="dashboard__muted">No structured error reported.</span>
                         {/if}
                       </div>
                     {/if}
@@ -344,11 +334,6 @@
 
   .dashboard__error-code {
     color: var(--state-errored);
-  }
-
-  .dashboard__restarts {
-    margin-left: 6px;
-    color: var(--chrome-text-muted);
   }
 
   .dashboard__muted {

@@ -40,22 +40,20 @@ export interface NodeSummary {
  * this union is inferred from the operations the API exposes. */
 export type ServiceState = 'running' | 'stopped' | 'errored';
 
-/** One entry of GET /services (proxied): every service and its state.
- *
- *  **Known drift (found by eieio-m9s.11's schema-parity check, not fixed here):** the daemon's
- *  actual `ServiceSummary` (`crates/daemon/src/api/services.rs`) is `{ name, state, error? }` —
- *  `error` carries {@link ApiError} when `state` is `"errored"`, and there is no `autostart`
- *  field on this response at all. `autostart` here is sourced only from `mock.ts`'s fabricated
- *  fixture (`file.autostart`), and `NavigatorTree.svelte`/`Toolbar.svelte`/`App.svelte` all read
- *  it. Reconciling this cleanly means either wiring a real `error` field through those
- *  consumers or finding `autostart` a home the daemon actually serves it from (`GET
- *  /services/{s}`'s `ServiceDetail` doesn't carry it either) — both outside the files this bead
- *  owns (`types.ts`, `mock.ts`, new tests only), so it is reported rather than silently patched
- *  or silently left unmentioned. */
+/** One entry of GET /services (proxied): every service and its state (DAEMON §9, amended by
+ *  eieio-m9s.12). The daemon's `ServiceSummary` (`crates/daemon/src/api/services.rs`) retains
+ *  `autostart` per service — the file's flag, verbatim — and reads independently of it: `state`
+ *  says what a service is doing, `autostart` says what it will do on the next reboot. The two
+ *  are orthogonal, which is the whole reason DAEMON §9 added `autostart` here rather than
+ *  folding it into `state` — a `"stopped"` service that was never marked `autostart` and one
+ *  that was running until `POST /services/{s}/stop` asked it to stop are indistinguishable by
+ *  `state` alone, and only the first restarts. `error` carries {@link ApiError} when `state` is
+ *  `"errored"`, and is absent otherwise. */
 export interface ServiceSummary {
   name: string;
   state: ServiceState;
   autostart: boolean;
+  error?: ApiError;
 }
 
 /** DAEMON §9.2's failure envelope — every non-2xx body, and (per `crates/daemon/src/api/
@@ -165,7 +163,10 @@ export interface UiLayout {
 
 export type OverflowPolicy = 'backpressure' | 'drop-oldest';
 
-/** GET /services/{s} (proxied): definition + state, parsed. */
+/** GET /services/{s} (proxied): definition + state, parsed. The daemon's `ServiceDetail`
+ *  (`crates/daemon/src/api/services.rs`) carries `autostart` and `error` the same way
+ *  {@link ServiceSummary} does — see its doc comment for why the two are orthogonal fields
+ *  rather than one folded into the other. */
 export interface ServiceDefinition {
   name: string;
   autostart: boolean;
@@ -174,6 +175,8 @@ export interface ServiceDefinition {
   connections: Connection[];
   ui: UiLayout;
   state: ServiceState;
+  /** Why, when `state` is `"errored"`. Absent otherwise. */
+  error?: ApiError;
   /** GET's ETag (DAEMON §9.3), opaque, needed to PUT back later. */
   etag: string;
   /**

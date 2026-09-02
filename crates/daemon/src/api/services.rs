@@ -48,6 +48,14 @@ pub struct ServiceSummary {
     pub name: String,
     /// `running`, `stopped` or `errored` — DAEMON §3's three states.
     pub state: String,
+    /// The file's `autostart` flag, verbatim (DAEMON §9's amendment).
+    ///
+    /// `stopped` alone cannot say whether a service comes back after a reboot: a service that
+    /// was never marked `autostart` and one that was running until somebody stopped it both
+    /// land on `stopped`, and only the first restarts. This is what tells them apart, so it is
+    /// never optional — `false` is the answer for a service whose file will not even parse
+    /// (`crate::boot::Loaded::autostart` states the rationale for that case).
+    pub autostart: bool,
     /// Why, when the state is `errored`. Absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<ApiError>,
@@ -60,6 +68,8 @@ pub struct ServiceDetail {
     pub name: String,
     /// `running`, `stopped` or `errored`.
     pub state: String,
+    /// The file's `autostart` flag, verbatim — see [`ServiceSummary::autostart`].
+    pub autostart: bool,
     /// The file's text, exactly as it is on disk.
     ///
     /// Not a re-rendering of a parse: SERVICE §2 makes the daemon a reader, and a definition
@@ -88,10 +98,11 @@ pub async fn list(State(shared): State<crate::api::State>) -> Json<Vec<ServiceSu
     Json(
         services
             .iter()
-            .map(|(name, state)| ServiceSummary {
+            .map(|(name, loaded)| ServiceSummary {
                 name: name.clone(),
-                state: String::from(state.label()),
-                error: failure_of(state).map(ApiError::from),
+                state: String::from(loaded.label()),
+                autostart: loaded.autostart,
+                error: failure_of(&loaded.state).map(ApiError::from),
             })
             .collect(),
     )
@@ -123,15 +134,23 @@ pub async fn get_service(
     let tag = etag(&definition);
 
     let services = shared.services.lock().await;
-    let state = services.get(&name);
+    let loaded = services.get(&name);
+    // A file that exists but is in no state is one this node has not loaded since it appeared
+    // — which is `stopped` from a caller's point of view, and becomes real on the next `reload`
+    // (§9.4). Its `autostart` is still knowable, though: the file is right there, so it is read
+    // the same way a boot that had not yet failed on it would (`boot::autostart_of`).
+    let autostart = loaded.map_or_else(
+        || boot::autostart_of(&definition),
+        |loaded| loaded.autostart,
+    );
     let detail = ServiceDetail {
         name,
-        // A file that exists but is in no state is one this node has not loaded since it
-        // appeared — which is `stopped` from a caller's point of view, and becomes real on the
-        // next `reload` (§9.4).
-        state: String::from(state.map_or("stopped", crate::boot::State::label)),
+        state: String::from(loaded.map_or("stopped", crate::boot::Loaded::label)),
+        autostart,
         definition,
-        error: state.and_then(failure_of).map(ApiError::from),
+        error: loaded
+            .and_then(|loaded| failure_of(&loaded.state))
+            .map(ApiError::from),
     };
     Ok(([(ETAG, tag)], Json(detail)).into_response())
 }
@@ -205,6 +224,8 @@ pub async fn put_service(
         )
     })?;
 
+    // Read before `apply` consumes `valid` below.
+    let autostart = valid.autostart();
     // Started from what was just validated, rather than by re-reading what was just written.
     // The two are the same bytes by construction — this handler is the only writer and it
     // wrote them a line ago — so re-reading would buy nothing and cost a second parse and a
@@ -213,9 +234,10 @@ pub async fn put_service(
     let summary = ServiceSummary {
         name: name.clone(),
         state: String::from(state.label()),
+        autostart,
         error: failure_of(&state).map(ApiError::from),
     };
-    services.set(&name, state).await;
+    services.set(&name, boot::Loaded { state, autostart }).await;
     // The version the client now holds, so an editor can make a second edit without a `GET`
     // between them. Computed over the same bytes that were written, a few lines above.
     Ok(([(ETAG, etag(&definition))], Json(summary)).into_response())
@@ -253,7 +275,13 @@ pub async fn delete_service(
     // The lock first: a concurrent `start` racing this `DELETE` must land on one side or the
     // other of the running check, not in between it and the removal below.
     let mut services = shared.services.lock().await;
-    if matches!(services.get(&name), Some(crate::boot::State::Running(_))) {
+    if matches!(
+        services.get(&name),
+        Some(crate::boot::Loaded {
+            state: crate::boot::State::Running(_),
+            ..
+        })
+    ) {
         return Err(ApiError::new(
             Kind::Running,
             format!("`{name}` is running; `POST /services/{name}/stop` it first"),
@@ -367,14 +395,14 @@ pub async fn errors(
     Path(name): Path<String>,
 ) -> Result<Json<ApiError>, ApiError> {
     let services = shared.services.lock().await;
-    let state = services
+    let loaded = services
         .get(&name)
         .ok_or_else(|| ApiError::no_such_service(&name))?;
-    match failure_of(state) {
+    match failure_of(&loaded.state) {
         Some(failure) => Ok(Json(ApiError::from(failure))),
         None => Err(ApiError::new(
             Kind::NotFound,
-            format!("`{name}` is {}, and has no errors", state.label()),
+            format!("`{name}` is {}, and has no errors", loaded.label()),
         )),
     }
 }
@@ -423,13 +451,26 @@ pub async fn stop(
     Path(name): Path<String>,
 ) -> Result<Json<ServiceSummary>, ApiError> {
     let mut services = shared.services.lock().await;
-    if services.get(&name).is_none() {
-        return Err(ApiError::no_such_service(&name));
-    }
-    services.set(&name, crate::boot::State::Stopped).await;
+    // `autostart` survives the stop untouched: this is what lets the listing tell "stopped and
+    // will come back" apart from "stopped and never meant to run" (DAEMON §9's amendment) —
+    // stopping a service is not the file speaking, so it must not change what the file says.
+    let autostart = match services.get(&name) {
+        Some(loaded) => loaded.autostart,
+        None => return Err(ApiError::no_such_service(&name)),
+    };
+    services
+        .set(
+            &name,
+            crate::boot::Loaded {
+                state: crate::boot::State::Stopped,
+                autostart,
+            },
+        )
+        .await;
     Ok(Json(ServiceSummary {
         name,
         state: String::from("stopped"),
+        autostart,
         error: None,
     }))
 }
@@ -481,11 +522,12 @@ async fn apply(
     .await
     .ok_or_else(|| ApiError::no_such_service(name))?;
 
-    let state = services.get(name).expect("just applied");
+    let loaded = services.get(name).expect("just applied");
     Ok(Json(ServiceSummary {
         name: String::from(name),
-        state: String::from(state.label()),
-        error: failure_of(state).map(ApiError::from),
+        state: String::from(loaded.label()),
+        autostart: loaded.autostart,
+        error: failure_of(&loaded.state).map(ApiError::from),
     }))
 }
 
@@ -504,4 +546,181 @@ fn failure_of(state: &crate::boot::State) -> Option<&crate::boot::Failure> {
 /// *shaped* like real ones.
 fn bad_name(name: &str) -> ApiError {
     ApiError::no_such_service(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::tests::Harness;
+
+    /// One transform service, with `autostart` as given (eieio-m9s.12).
+    fn definition(name: &str, autostart: bool) -> String {
+        format!(
+            "name = \"{name}\"\nautostart = {autostart}\n\n\
+             [blocks.t1]\nblock = \"transform:1.0.0\"\n\
+             [blocks.t1.props]\nval = \"(+ $n 1)\"\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn an_autostarting_service_lists_running_and_autostart_true() {
+        let harness = Harness::start("services-autostart-true").await;
+        harness
+            .put_definition("/services/kitchen", &definition("kitchen", true))
+            .await;
+
+        let listed = harness.get("/services").await.json();
+        assert_eq!(listed[0]["name"], "kitchen");
+        assert_eq!(listed[0]["state"], "running");
+        assert_eq!(listed[0]["autostart"], true);
+    }
+
+    #[tokio::test]
+    async fn a_non_autostarting_service_lists_stopped_and_autostart_false() {
+        let harness = Harness::start("services-autostart-false").await;
+        harness
+            .put_definition("/services/kitchen", &definition("kitchen", false))
+            .await;
+
+        let listed = harness.get("/services").await.json();
+        assert_eq!(listed[0]["name"], "kitchen");
+        assert_eq!(listed[0]["state"], "stopped");
+        assert_eq!(listed[0]["autostart"], false);
+    }
+
+    #[tokio::test]
+    async fn stopping_an_autostarting_service_keeps_autostart_true_while_the_state_changes() {
+        // The reason this bead exists: `stopped` alone cannot say whether a service comes back
+        // after a reboot. Two services land at `stopped` here through different doors — one was
+        // never marked to run, the other was running until this test stopped it — and the
+        // listing has to tell them apart. Both are on the same node so they can only differ in
+        // this one field.
+        let harness = Harness::start("services-autostart-stop").await;
+        harness
+            .put_definition(
+                "/services/never-autostart",
+                &definition("never-autostart", false),
+            )
+            .await;
+        harness
+            .put_definition("/services/was-running", &definition("was-running", true))
+            .await;
+
+        let stop_answer = harness.post("/services/was-running/stop").await;
+        assert_eq!(stop_answer.status, 200, "{}", stop_answer.body);
+        assert_eq!(stop_answer.json()["state"], "stopped");
+        assert_eq!(
+            stop_answer.json()["autostart"],
+            true,
+            "the stop response itself must not have flipped the flag"
+        );
+
+        let listed = harness.get("/services").await.json();
+        let by_name = |name: &str| {
+            listed
+                .as_array()
+                .expect("a list")
+                .iter()
+                .find(|s| s["name"] == name)
+                .unwrap_or_else(|| panic!("{name} not in {listed}"))
+        };
+
+        let never = by_name("never-autostart");
+        assert_eq!(never["state"], "stopped");
+        assert_eq!(never["autostart"], false);
+
+        let was_running = by_name("was-running");
+        assert_eq!(was_running["state"], "stopped");
+        assert_eq!(
+            was_running["autostart"], true,
+            "stopped by a caller, not by its file — it still comes back on reboot: {was_running}"
+        );
+    }
+
+    #[tokio::test]
+    async fn starting_a_non_autostarting_service_reports_the_files_flag_not_the_override() {
+        let harness = Harness::start("services-autostart-start-override").await;
+        harness
+            .put_definition("/services/kitchen", &definition("kitchen", false))
+            .await;
+
+        let started = harness.post("/services/kitchen/start").await;
+        assert_eq!(started.status, 200, "{}", started.body);
+        assert_eq!(started.json()["state"], "running");
+        assert_eq!(
+            started.json()["autostart"],
+            false,
+            "`start` overrides the flag for this boot without changing it (DAEMON §9)"
+        );
+
+        let listed = harness.get("/services").await.json();
+        assert_eq!(listed[0]["state"], "running");
+        assert_eq!(listed[0]["autostart"], false);
+    }
+
+    #[tokio::test]
+    async fn a_service_whose_file_will_not_parse_reports_errored_with_a_structured_error() {
+        let harness = Harness::start_with("services-autostart-unparseable", |root| {
+            let services = root.join("services");
+            std::fs::create_dir_all(&services).expect("services/");
+            std::fs::write(
+                services.join("kitchen.toml"),
+                "name = \"kitchen\"\nautostart = ",
+            )
+            .expect("a broken service file");
+        })
+        .await;
+
+        let listed = harness.get("/services").await.json();
+        assert_eq!(listed[0]["name"], "kitchen");
+        assert_eq!(listed[0]["state"], "errored");
+        assert_eq!(
+            listed[0]["autostart"], false,
+            "unknowable from a file that will not parse — false is the chosen answer, see \
+             `crate::boot::Loaded::autostart`'s doc comment"
+        );
+        assert!(
+            listed[0]["error"].is_object(),
+            "the structured error rides on the listing rather than requiring a second request: \
+             {listed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_detail_endpoint_carries_autostart_too() {
+        let harness = Harness::start("services-autostart-detail").await;
+        harness
+            .put_definition("/services/kitchen", &definition("kitchen", false))
+            .await;
+
+        let detail = harness.get("/services/kitchen").await.json();
+        assert_eq!(detail["autostart"], false);
+    }
+
+    #[tokio::test]
+    async fn reload_re_reads_the_autostart_flag_rather_than_caching_it() {
+        let harness = Harness::start("services-autostart-reload").await;
+        harness
+            .put_definition("/services/kitchen", &definition("kitchen", true))
+            .await;
+        assert_eq!(
+            harness.get("/services/kitchen").await.json()["autostart"],
+            true
+        );
+
+        // Rewrite the file directly (the GitOps path, DAEMON §2), flipping the flag.
+        std::fs::write(
+            harness.root.join("services").join("kitchen.toml"),
+            definition("kitchen", false),
+        )
+        .expect("rewriting the file");
+
+        let reloaded = harness.post("/services/kitchen/reload").await;
+        assert_eq!(reloaded.status, 200, "{}", reloaded.body);
+        assert_eq!(
+            reloaded.json()["autostart"],
+            false,
+            "reload re-read the file's flag rather than trusting what was loaded at boot"
+        );
+        assert_eq!(reloaded.json()["state"], "stopped");
+    }
 }

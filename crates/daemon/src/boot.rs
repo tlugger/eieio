@@ -153,7 +153,16 @@ fn joined(errors: &[impl std::fmt::Display]) -> String {
 pub enum State {
     /// Started, and running (ABI §5.1).
     Running(Service),
-    /// Valid, and not marked `autostart`.
+    /// Valid, and not currently running.
+    ///
+    /// Ambiguous on its own — this is only half of what an operator needs. A service that
+    /// parsed and validated but was never marked `autostart` lands here, and so does one that
+    /// *was* running until `POST /services/{s}/stop` asked it to stop; the two situations mean
+    /// opposite things for whether the service comes back after a reboot, and `State` alone
+    /// cannot say which is which. [`Loaded::autostart`] is what tells them apart (DAEMON §9's
+    /// amendment, eieio-m9s.12) — it is kept beside `State` rather than folded into this variant
+    /// so that "what is this service doing" and "will it start again" stay two questions with
+    /// two independent answers.
     Stopped,
     /// Not running, and why.
     Errored(Failure),
@@ -170,6 +179,35 @@ impl State {
     }
 }
 
+/// A service's [`State`], and whether it autostarts, together (DAEMON §9's amendment).
+///
+/// Kept beside `State` rather than inside one of its variants: an errored service has an
+/// `autostart` flag too (or would, if its file parsed), and a running one may have `autostart =
+/// false` after `POST /services/{s}/start` overrode it for this boot only. Threading the flag
+/// through three variants would mean three places to keep it right; here there is one, and it
+/// answers a question orthogonal to `state`.
+#[derive(Debug)]
+pub struct Loaded {
+    /// What the service is doing.
+    pub state: State,
+    /// The file's `autostart` flag, verbatim (DAEMON §9's amendment) — never a runtime
+    /// override: `start` changes what is running without changing this, and `reload` re-reads
+    /// it from the file rather than trusting whatever was here before.
+    ///
+    /// `false` for a file that will not even parse. A file the daemon cannot read is a file it
+    /// will not start, at this boot or the next one, so `false` is *true* rather than a
+    /// default — and it is a plain `bool`, never `Option<bool>`, because the listing must always
+    /// be able to answer this (DAEMON §9: "not optional... it is always knowable").
+    pub autostart: bool,
+}
+
+impl Loaded {
+    /// The one-word status an operator and the API see — forwards to [`State::label`].
+    pub fn label(&self) -> &'static str {
+        self.state.label()
+    }
+}
+
 /// Every service this node has, by name (DAEMON §3).
 ///
 /// Keyed by the file's stem, which SERVICE §1 makes equal to the service's `name` — so a
@@ -177,15 +215,15 @@ impl State {
 /// once it is fixed, and the filesystem has already made the key unique.
 #[derive(Debug, Default)]
 pub struct Services {
-    services: BTreeMap<String, State>,
+    services: BTreeMap<String, Loaded>,
 }
 
 impl Services {
     /// How many services are running, stopped and errored.
     pub fn counts(&self) -> Counts {
         let mut counts = Counts::default();
-        for state in self.services.values() {
-            match state {
+        for loaded in self.services.values() {
+            match loaded.state {
                 State::Running(_) => counts.running += 1,
                 State::Stopped => counts.stopped += 1,
                 State::Errored(_) => counts.errored += 1,
@@ -196,8 +234,8 @@ impl Services {
 
     /// Asks every running service to stop (ABI §5.1 step 5).
     pub async fn stop(&self) {
-        for state in self.services.values() {
-            if let State::Running(service) = state {
+        for loaded in self.services.values() {
+            if let State::Running(service) = &loaded.state {
                 service.stop().await;
             }
         }
@@ -205,34 +243,34 @@ impl Services {
 
     /// Waits for every instance of every service to finish.
     pub fn join(self) {
-        for state in self.services.into_values() {
-            if let State::Running(service) = state {
+        for loaded in self.services.into_values() {
+            if let State::Running(service) = loaded.state {
                 service.join();
             }
         }
     }
 
     /// The state of one service, by name.
-    pub fn get(&self, name: &str) -> Option<&State> {
+    pub fn get(&self, name: &str) -> Option<&Loaded> {
         self.services.get(name)
     }
 
-    /// Every service and its state, in name order (DAEMON §9).
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &State)> {
+    /// Every service, its state and its `autostart` flag, in name order (DAEMON §9).
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Loaded)> {
         self.services.iter()
     }
 
-    /// Puts `state` in `name`'s place, retiring whatever was there.
+    /// Puts `loaded` in `name`'s place, retiring whatever was there.
     ///
     /// Retiring and not dropping: a running service's instances are threads holding guests
     /// mid-life, and ABI §5.1 step 5 says they are told to stop rather than having their
     /// mailboxes closed underneath them. Every lifecycle operation goes through here, which
     /// is what makes "a service is replaced, never doubled" true by construction.
-    pub async fn set(&mut self, name: &str, state: State) {
+    pub async fn set(&mut self, name: &str, loaded: Loaded) {
         if let Some(previous) = self.services.remove(name) {
-            retire(previous).await;
+            retire(previous.state).await;
         }
-        self.services.insert(String::from(name), state);
+        self.services.insert(String::from(name), loaded);
     }
 
     /// Forgets `name` entirely, retiring whatever was there (DAEMON §9.7).
@@ -248,7 +286,7 @@ impl Services {
     /// caller checked.
     pub async fn remove(&mut self, name: &str) {
         if let Some(previous) = self.services.remove(name) {
-            retire(previous).await;
+            retire(previous.state).await;
         }
     }
 
@@ -260,7 +298,10 @@ impl Services {
         instance: &str,
     ) -> Option<&mut crate::executor::Events> {
         match self.services.get_mut(service) {
-            Some(State::Running(running)) => running.events(instance),
+            Some(Loaded {
+                state: State::Running(running),
+                ..
+            }) => running.events(instance),
             _ => None,
         }
     }
@@ -289,7 +330,7 @@ pub async fn boot(node: &Node, executor: &Executor) -> Services {
     let registry = Registry::new(node.signing.clone(), node.credentials.clone());
     let mut services = Services::default();
     for (stem, path) in service_files(&directory) {
-        let state = load(
+        let loaded = load(
             node,
             &registry,
             executor,
@@ -298,13 +339,13 @@ pub async fn boot(node: &Node, executor: &Executor) -> Services {
             Start::AsTheFileSays,
         )
         .await;
-        match &state {
+        match &loaded.state {
             State::Errored(failure) => {
                 tracing::error!(service = %stem, %failure, "this service is not running")
             }
             state => tracing::info!(service = %stem, status = state.label(), "service"),
         }
-        services.services.insert(stem, state);
+        services.services.insert(stem, loaded);
     }
     services
 }
@@ -383,8 +424,8 @@ pub async fn reload(
     if !path.exists() {
         return None;
     }
-    let state = load(node, registry, executor, &path, name, start).await;
-    services.set(name, state).await;
+    let loaded = load(node, registry, executor, &path, name, start).await;
+    services.set(name, loaded).await;
     Some(())
 }
 
@@ -401,7 +442,7 @@ pub enum Start {
     Always,
 }
 
-/// One service file, from bytes on disk to a [`State`] (DAEMON §3 step 2).
+/// One service file, from bytes on disk to a [`Loaded`] (DAEMON §3 step 2).
 pub async fn load(
     node: &Node,
     registry: &Registry,
@@ -409,15 +450,40 @@ pub async fn load(
     path: &Path,
     stem: &str,
     start: Start,
-) -> State {
+) -> Loaded {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) => return State::Errored(Failure::Unreadable(error.to_string())),
+        Err(error) => {
+            return Loaded {
+                state: State::Errored(Failure::Unreadable(error.to_string())),
+                // Unreadable, so there is no text to read a flag from — [`Loaded::autostart`]'s
+                // documented answer for a file the daemon cannot start either way.
+                autostart: false,
+            };
+        }
     };
-    match validate(node, registry, &text, stem) {
+    // Read independently of full validation, so the flag reported is the file's *own* answer
+    // even for a service that fails resolution or wiring (SERVICE §7 stage 2) after parsing
+    // cleanly — DAEMON §9's "the file's flag, verbatim" applies to every state, not only a
+    // running one.
+    let autostart = autostart_of(&text);
+    let state = match validate(node, registry, &text, stem) {
         Ok(valid) => apply(executor, valid, start).await,
         Err(failure) => State::Errored(failure),
-    }
+    };
+    Loaded { state, autostart }
+}
+
+/// The file's `autostart` flag, read independently of full validation.
+///
+/// `false` when the text does not even parse (SERVICE §7 stage 1): there is no flag to read,
+/// and a file the daemon cannot make sense of is a file it will not start, at this boot or the
+/// next one, so `false` is the true answer rather than a stand-in default (see
+/// [`Loaded::autostart`]'s doc comment, which states this rationale for the wire type too).
+pub(crate) fn autostart_of(text: &str) -> bool {
+    eio_service::parse(text)
+        .map(|parsed| parsed.service.autostart)
+        .unwrap_or(false)
 }
 
 /// A definition that has passed everything checkable without starting it (DAEMON §9.3).
@@ -430,6 +496,16 @@ pub struct Valid {
     /// The node's per-instance limits, captured here rather than passed to [`apply`] so that
     /// what a definition was validated against is what it runs under (ABI §5.2, §9.7).
     limits: Limits,
+}
+
+impl Valid {
+    /// The file's `autostart` flag, verbatim (DAEMON §9's amendment).
+    ///
+    /// Read before [`apply`] consumes this `Valid`, by a caller (`PUT`, DAEMON §9.3) that needs
+    /// to report the flag alongside the state `apply` reaches.
+    pub fn autostart(&self) -> bool {
+        self.parsed.service.autostart
+    }
 }
 
 /// Everything checkable about a definition's text (DAEMON §3 step 2, §9.3).
@@ -726,7 +802,10 @@ mod tests {
     /// The failure of a service that has one.
     fn failure<'a>(services: &'a Services, name: &str) -> &'a Failure {
         match services.get(name) {
-            Some(State::Errored(failure)) => failure,
+            Some(Loaded {
+                state: State::Errored(failure),
+                ..
+            }) => failure,
             other => panic!("expected {name} to be errored, got {other:?}"),
         }
     }
@@ -823,7 +902,13 @@ mod tests {
                 errored: 0
             }
         );
-        assert!(matches!(services.get("echo"), Some(State::Stopped)));
+        assert!(matches!(
+            services.get("echo"),
+            Some(Loaded {
+                state: State::Stopped,
+                ..
+            })
+        ));
 
         services.stop().await;
         services.join();
@@ -1339,7 +1424,10 @@ mod tests {
             batch: eio_signal::Batch::single(signal),
         };
         match services.get("tally") {
-            Some(State::Running(service)) => service
+            Some(Loaded {
+                state: State::Running(service),
+                ..
+            }) => service
                 .instance("c1")
                 .expect("the counter is running")
                 .mailbox()
