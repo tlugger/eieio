@@ -443,6 +443,8 @@ GET    /openapi.json                  this document (no auth)
 GET    /node                          identity, limits, budgets, versions
 GET    /blocks                        cached blocks + manifests
 POST   /blocks/pull                   {reference} -> pull into the cache (§4.1)
+GET    /blocks/available              what a configured registry offers, uninstalled (§9.8)
+GET    /blocks/available/{reference}  one reference's manifest, without installing it (§9.8)
 GET    /services                      every service and its state: `running`,
                                       `stopped` or `errored`, and no others (§3)
 GET    /services/{s}                  definition text + state
@@ -548,6 +550,18 @@ declared become orphans the moment the file is gone, reclaimable only through `D
 operation must *also* do is forget the service in §5's registry, because §9's listing is served
 from that map rather than from the directory — a `DELETE` that removed only the file would
 answer `204` while still advertising what it had deleted.
+
+### 9.8 Browsing a registry is the node's job, not a client's
+
+`GET /blocks` answers what this node has **installed**. `/blocks/available` answers what it *could* install: the manifests a configured registry offers, fetched on demand and **not** added to the block cache — installing is `POST /blocks/pull` and stays a separate, deliberate act.
+
+**Why a node does this rather than the client that wants to know.** The Designer needs a palette (DESIGNER §3, §5) and could fetch manifests itself, which would make it the third OCI client in this repository after §4.1's puller and `cargo eio publish`'s pusher. Two things decide against it. A client's view would be a *different* view: this node holds the registry credentials (§4.1's `auth/registries.toml`), so it can see private repositories a client cannot, and it enforces §4.2's signature policy, so a client browsing independently could offer a block this node would then refuse to pull — a palette that lies about what is installable. And a third implementation of the OCI wire format is a third place for it to drift, which `eieio-7d8.33` exists to remember.
+
+So the answer to "what blocks can I use here" comes from the node that would run them, and it is **per node by construction** rather than by accident. That is correct and not a limitation: two nodes with different registries configured genuinely offer different blocks.
+
+**Only a configured registry.** The reference MUST resolve to a host this node has an entry for, and a host it does not know is refused. This endpoint makes an authenticated caller able to direct the node's outbound fetches, and an unconstrained one would let a caller aim a node at any host that speaks OCI. The node's own configuration is the allow-list, and it already exists.
+
+**A manifest is returned, not a block.** No layer is downloaded beyond what ABI §11's manifest needs, nothing is written to the cache, and `GET /blocks` is unchanged by a browse. A caller that wants the block asks for it.
 
 ## 10. State store
 
