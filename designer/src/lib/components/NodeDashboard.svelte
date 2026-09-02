@@ -109,7 +109,7 @@
                   <span class="dashboard__node-version">loading…</span>
                 {:else if info && info !== 'error'}
                   <span class="dashboard__node-version">
-                    daemon {info.versions.daemon} · abi {info.versions.abi.major}.{info.versions.abi.minor} · budget
+                    daemon {info.version} · abi {info.abi} · budget
                     {info.budgets.deadline_ms}ms/{info.budgets.fuel.toLocaleString()} fuel
                   </span>
                 {/if}

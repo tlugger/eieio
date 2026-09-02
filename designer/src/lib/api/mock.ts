@@ -646,13 +646,15 @@ const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
     {
       id: n.id,
       name: n.name,
+      version: `0.${i + 1}.0`,
+      abi: '1.0',
+      // The shape `crates/daemon/src/api/node.rs` actually serves, not a guess:
+      // three flat budget numbers, and `capabilities` — which DESIGNER §5's
+      // design-time badge reads and which the earlier guessed shape omitted.
+      capabilities: n.class === 'leaf' ? ['core', 'state'] : ['core', 'state', 'timer', 'gpio', 'i2c'],
       limits: n.limits as { max_payload: number; max_batch: number },
-      budgets: {
-        fuel: 100_000_000,
-        deadline_ms: 1000,
-        expr: { max_fuel: 100_000, max_depth: 128, max_range: 65_536, max_value_bytes: 262_144 },
-      },
-      versions: { abi: { major: 1, minor: 0 }, daemon: `0.${i + 1}.0` },
+      budgets: { fuel: 100_000_000, deadline_ms: 1000, expr_max_fuel: 100_000 },
+      require_signed: false,
     },
   ]),
 );

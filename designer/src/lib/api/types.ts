@@ -299,13 +299,24 @@ export interface TapSummary {
 export interface NodeInfo {
   id: string;
   name?: string;
+  /** The daemon's version. A flat string, not a nested object — this shape is
+   *  `crates/daemon/src/api/node.rs`'s `NodeInfo`, read off the code rather than
+   *  guessed, after an earlier guess here invented `versions: { abi, daemon }`
+   *  and would have rendered blank against a real node. */
+  version: string;
+  /** The ABI version this daemon implements (ABI §12), also a flat string. */
+  abi: string;
+  /** The capability namespaces a block may use here (ABI §7, SCOPE §3.3).
+   *
+   *  What a service may be built from on this node, not a list of what exists —
+   *  a block declaring anything outside it is refused at load. This is the
+   *  source for DESIGNER §5's design-time capability badge. */
+  capabilities: string[];
   limits: { max_payload: number; max_batch: number };
-  budgets: {
-    fuel: number;
-    deadline_ms: number;
-    expr: { max_fuel: number; max_depth: number; max_range: number; max_value_bytes: number };
-  };
-  versions: { abi: { major: number; minor: number }; daemon: string };
+  budgets: { fuel: number; deadline_ms: number; expr_max_fuel: number };
+  /** Whether this node refuses a block whose signature it cannot verify
+   *  (DAEMON §4.2). */
+  require_signed: boolean;
 }
 
 /** `GET /services/{s}/errors` (DAEMON §9): "why a service is errored,
