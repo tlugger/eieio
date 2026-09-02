@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use eio_host_core::{
-    Configured, Configuring, Delivering, Descriptor, Limits, Outcome, PropContext, Running,
+    Configured, Configuring, Delivering, Descriptor, Level, Limits, Outcome, PropContext, Running,
     Starting, Status, Trap, exports::optional, resolve,
 };
 use eio_manifest::{Abi, Capability, Manifest};
@@ -558,7 +558,13 @@ impl Live {
         // read the version through an unwired `eio:core` would be answering `ERR_UNSUPPORTED`
         // to a guest that had done nothing wrong.
         let descriptor = prepared.descriptor;
-        let core = Core::new(descriptor.limits, budgets, descriptor.outputs.len() as u32);
+        let core = Core::new(
+            descriptor.limits,
+            budgets,
+            descriptor.outputs.len() as u32,
+            crate::core_fns::SystemClock::new(),
+            crate::core_fns::OsEntropy,
+        );
         core.register(&mut guest, &properties)
             .map_err(|error| anyhow::anyhow!("wiring eio:core: {error}"))?;
 
@@ -771,9 +777,13 @@ impl Live {
     /// Drains everything the callback produced, logs it, and reports it (ABI §7.0, §7.1,
     /// §6.2).
     ///
-    /// Three separate obligations, met in one place because they all become visible at
+    /// Four separate obligations, met in one place because they all become visible at
     /// exactly the same moment — when the callback returns:
     ///
+    /// - **`log` lines** (§7.0) are buffered by `eio_host_core::Core`, which has no `tracing`
+    ///   subscriber of its own to hand them to, and drained here onto this instance's span so
+    ///   a block's line and the daemon's own carry the same `(service, instance)` identity
+    ///   (DAEMON §11).
     /// - **`error` details** (§7.0) accompany the callback's return, so they cannot be
     ///   logged while the guest is still running.
     /// - **Expression failures** (§7.1) the host MUST log; `eio_host_core` records them
@@ -782,6 +792,20 @@ impl Live {
     ///   what makes reentrancy unconstructible. Draining them here — after the guest has
     ///   returned, never during — is that rule.
     fn collect(&mut self, callback: &'static str) {
+        for line in self.core.take_logs() {
+            // ABI §7.0's table is `eio_abi::Level`, not a `match` on literals: the guest SDK
+            // chooses the number from that same type, and two hand-written tables could
+            // disagree silently — turning a block's errors into this host's warnings with
+            // nothing failing to say so.
+            let message = &line.message;
+            match line.level {
+                Level::Trace => tracing::trace!(target: "eio::guest", "{message}"),
+                Level::Debug => tracing::debug!(target: "eio::guest", "{message}"),
+                Level::Info => tracing::info!(target: "eio::guest", "{message}"),
+                Level::Warn => tracing::warn!(target: "eio::guest", "{message}"),
+                Level::Error => tracing::error!(target: "eio::guest", "{message}"),
+            }
+        }
         for detail in self.core.take_details() {
             tracing::warn!(callback, status = %detail.status, "{}", detail.message);
             self.send(Event::Detail { callback, detail });

@@ -19,9 +19,11 @@
 //!
 //! - [`engine`] binds wasm3 (LEAF §3's bring-up/debugging engine — AOT and WAMR are both out
 //!   of scope for this milestone).
-//! - [`core_fns`] implements `eio:core` — six host functions with no engine and no service
-//!   graph in them, so a small `std` implementation costs this milestone nothing a shared one
-//!   would save, and `crates/daemon` is out of scope to edit into one.
+//! - [`core_fns`] supplies `eio:core`'s clock and entropy (DAEMON §1.1): the six host
+//!   functions themselves are `eio_host_core::Core`'s, shared with the daemon and the
+//!   reference conformance harness since eieio-35h.15 — this crate's own copy of them was
+//!   exactly the divergence ABI §13 calls a conformance bug by definition, and LEAF §2's MUST
+//!   NOT list now says so directly.
 //! - [`state`] backs `eio:state` with a flat file — LEAF §5's stand-in for flash, named as
 //!   one, with a placeholder wear-budget policy that exists only to make `ERR_THROTTLED`
 //!   reachable (see that module's docs for why the policy itself is not a proposal).
@@ -121,7 +123,13 @@ pub fn spawn(
         .map_err(|error| error.to_string())?;
 
     let budgets = leaf_budgets();
-    let core = core_fns::Core::new(limits, budgets, descriptor.outputs.len() as u32);
+    let core = core_fns::Core::new(
+        limits,
+        budgets,
+        descriptor.outputs.len() as u32,
+        core_fns::SystemClock::new(),
+        core_fns::BringUpEntropy::new(instance_id),
+    );
 
     let mut guest = engine::instantiate(wasm)
         .map_err(|error| format!("instantiating {instance_id:?}: {error}"))?;

@@ -122,6 +122,7 @@
 extern crate alloc;
 
 mod budget;
+mod core_fns;
 mod descriptor;
 mod engine;
 mod instance;
@@ -132,6 +133,12 @@ mod router;
 pub mod exports;
 pub mod state;
 pub mod timer;
+
+// `eio:core`'s host side (DAEMON §1.1): the six functions every block may use
+// unconditionally, minus `prop` (`crate::prop`'s) and minus the clock and entropy a host
+// alone can answer. Re-exported flat like `eio:state` and `eio:timer`'s traits, so a host
+// has one import for the capability rather than one per submodule.
+pub use core_fns::{Clock, ClockSource, Core, Detail, Emission, Entropy, EntropyError, LogLine};
 
 pub use budget::ExprBudgets;
 pub use descriptor::{Descriptor, Limits};

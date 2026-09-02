@@ -26,7 +26,7 @@ use eio_manifest::Manifest;
 use eio_signal::Batch;
 
 use crate::capability::{Answer, Capabilities};
-use crate::core_fns::{Clock, Core, Emission};
+use crate::core_fns::{Clock, Core, DeterministicEntropy, Emission};
 use crate::host::{Budget, Host, HostError};
 use crate::record::{Ledger, Recording};
 use crate::report::{Outcome, Report, Violation};
@@ -191,7 +191,7 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
             unix_ms: scenario.clock.unix_ms.unwrap_or(Clock::default().unix_ms),
             mono_ms: scenario.clock.mono_ms.unwrap_or(Clock::default().mono_ms),
         },
-        scenario.rand_seed,
+        DeterministicEntropy::new(scenario.rand_seed),
     );
     if let Err(error) = core.register(&mut guest, &properties) {
         // Not skippable: ABI §7.0 is "always available, requires no manifest capability", so
