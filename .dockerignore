@@ -1,0 +1,20 @@
+# Keeps the Docker build context to source only (Dockerfile's own header comment explains
+# why the whole cargo workspace still has to be copied in). Everything here is either a build
+# artifact the image rebuilds from scratch (so shipping the host's copy in would risk masking
+# a real build-order failure) or plainly irrelevant to the image.
+
+/target/
+examples/blocks/target/
+
+designer/node_modules/
+designer/dist/
+designer/.svelte-kit/
+designer/build/
+
+/dist/
+
+.git/
+.beads/
+.dolt/
+*.eio-plan.md
+.DS_Store

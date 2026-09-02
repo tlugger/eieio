@@ -381,3 +381,50 @@ release-daemon target:
     ( cd "{{ dist }}" && shasum --algorithm 256 "eio-daemon-{{ target }}.tar.gz" \
         > "eio-daemon-{{ target }}.tar.gz.sha256" )
     ls -l "{{ dist }}"
+
+# The Designer's bare binary (DESIGNER-SPEC §1's other half, beside the container image
+# below). Same two Linux targets as `release-daemon` — the server and the Pi-class node of
+# SCOPE §3.7 — dynamically linked against glibc, same as the daemon's. This is deliberately
+# NOT the musl build: that one exists only inside `Dockerfile`, for the container image
+# alone, and the reasoning for why the two builds differ lives in that file's header
+# comment, not here.
+#
+# The SPA must exist first (`designer-build`) or the binary embeds nothing to serve — see
+# `Dockerfile`'s header comment for the failure this ordering exists to prevent.
+
+# Build and package the Designer bare binary for one target.
+release-designer target: designer-build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustup target add "{{ target }}"
+    cargo build --release --package eio-designer --target "{{ target }}"
+
+    mkdir -p "{{ dist }}"
+    staging="$(mktemp -d)"
+    install -m 0755 "target/{{ target }}/release/eio-designer" "$staging/eio-designer"
+    install -m 0644 LICENSE "$staging/LICENSE"
+    tar --create --gzip \
+        --file "{{ dist }}/eio-designer-{{ target }}.tar.gz" \
+        --directory "$staging" eio-designer LICENSE
+    rm -rf "$staging"
+
+    ( cd "{{ dist }}" && shasum --algorithm 256 "eio-designer-{{ target }}.tar.gz" \
+        > "eio-designer-{{ target }}.tar.gz.sha256" )
+    ls -l "{{ dist }}"
+
+# The tag `docker build` without arguments below produces, for local use only — the release
+# workflow tags its own build for ghcr.io instead (`docker/metadata-action`), so nothing here
+# needs to match that scheme.
+designer_image_tag := "eio-designer:local"
+
+# See `Dockerfile`'s header comment for what the image contains and why it is musl where the
+# bare binary above is not. `--platform linux/amd64` is passed here too, not left to each
+# `FROM`'s own pin: without it, a build on an arm64 host still produces a working image
+# (BuildKit still resolves every `FROM` to the pinned platform, and the emulated binary
+# runs), but the image's own declared platform metadata defaults to the host's — arm64
+# metadata wrapped around an amd64 binary. Passing it here makes the image tell the truth
+# about itself on every host, including this one.
+
+# Build the Designer's container image. Requires Docker.
+designer-image:
+    docker build --platform linux/amd64 --file Dockerfile --tag {{ designer_image_tag }} .

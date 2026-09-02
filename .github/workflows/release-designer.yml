@@ -1,0 +1,383 @@
+# The Designer's release pipeline (SCOPE §7.2, DESIGNER-SPEC §1: "ships as a container image
+# and a bare binary; localhost-first"). Follows `release-daemon.yml` closely — same shape,
+# same reasoning — with two differences this component's own build forces:
+#
+#   - **A container image is the point of this pipeline, not an afterthought.** `Dockerfile`
+#     (repository root) carries its own musl decision and reasoning in its header comment;
+#     this workflow's `docker` job builds it, smoke-tests the running container the same way
+#     the `smoke` job below tests the bare binary, and only then pushes to ghcr.io.
+#   - **The bare binary needs Node before it needs Rust.** `crates/designer` embeds
+#     `designer/dist` at compile time (`crates/designer/src/assets.rs`), and that directory
+#     is gitignored — `just release-designer` depends on `designer-build`, so `build` below
+#     installs Node for the same reason `ci.yml` does.
+#
+# Everything else repeats `release-daemon.yml`'s own design notes rather than re-explaining
+# them: CI as a reused prerequisite job (not restated), the build living in `just` so a
+# contributor can run the same command that failed at 2 a.m., and write permission scoped to
+# only the jobs that publish.
+name: release-designer
+
+on:
+  push:
+    tags: ["designer-v*"]
+  # For a rehearsal against a branch: everything runs, including the image build and its
+  # smoke test, except the two steps with nothing to attach to — the GHCR push and the
+  # GitHub Release — which are skipped.
+  workflow_dispatch:
+
+# Not cancel-in-progress, for the same reason as the daemon's pipeline: a superseded release
+# is a half-published one, not a stale answer about code nobody is looking at.
+concurrency:
+  group: release-designer-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # SCOPE §7.2: "all require CI as a prerequisite job". The tag is not released if the
+  # commit it names does not pass the gate.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  # The bare binary (DESIGNER §1's other half, beside the image). Same two Linux targets as
+  # the daemon's own pipeline — the server and the Pi-class node of SCOPE §3.7 — dynamically
+  # linked against glibc. This is deliberately not the musl build: that one exists only
+  # inside `Dockerfile`, for the container image alone (see that file's header comment).
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+            toolchain_prefix: ""
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            toolchain_prefix: aarch64-linux-gnu-
+    steps:
+      - name: Check out the repository
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install just
+        # Same version and recorded checksum as `ci.yml` and `release-daemon.yml`.
+        env:
+          JUST_VERSION: 1.50.0
+          JUST_SHA256: 27e011cd6328fadd632e59233d2cf5f18460b8a8c4269acd324c1a8669f34db0
+        run: |
+          set -euo pipefail
+          archive="just-${JUST_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/casey/just/releases/download/${JUST_VERSION}/${archive}"
+          echo "${JUST_SHA256}  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" just
+          install -m 0755 just /usr/local/bin/just
+          rm -f just "$archive"
+
+      - name: Install Node
+        # `just release-designer` depends on `designer-build` (justfile) — the SPA must
+        # exist before `cargo build` embeds it. Pinned the same way `ci.yml` pins it:
+        # actions/setup-node v4.4.0.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: designer/package-lock.json
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install
+          rustup show
+
+      - name: Install the cross-linker
+        if: matrix.packages != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ${{ matrix.packages }}
+
+      - name: Build and package
+        env:
+          # Two tools need telling for the aarch64 leg, same trap `release-daemon.yml`
+          # documents: cargo links Rust objects and reads its linker per target from here;
+          # the `cc` crate compiles `rusqlite`'s bundled SQLite C source and defaults to the
+          # *host* compiler unless told otherwise. All empty for the native build.
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.toolchain_prefix && format('{0}gcc', matrix.toolchain_prefix) }}
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.toolchain_prefix && format('{0}gcc', matrix.toolchain_prefix) }}
+          CXX_aarch64_unknown_linux_gnu: ${{ matrix.toolchain_prefix && format('{0}g++', matrix.toolchain_prefix) }}
+          AR_aarch64_unknown_linux_gnu: ${{ matrix.toolchain_prefix && format('{0}ar', matrix.toolchain_prefix) }}
+        run: just release-designer ${{ matrix.target }}
+
+      - name: Upload the artifact
+        # actions/upload-artifact v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: eio-designer-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  # A binary that builds and does not serve its UI is a release nobody can use — and
+  # `designer/dist` being gitignored is exactly the condition that lets that happen silently
+  # (`assets.rs`'s own header comment). This job takes the native artifact onto a runner that
+  # has never seen this repository and asks it for real HTML, not merely a 200.
+  smoke:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the artifacts
+        # actions/download-artifact v8.0.1
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Run the native binary
+        run: |
+          set -euo pipefail
+          ( cd dist && sha256sum --check --strict ./*.sha256 )
+
+          tar --extract --gzip --file dist/eio-designer-x86_64-unknown-linux-gnu.tar.gz
+          ./eio-designer --version
+          ./eio-designer --help > /dev/null
+          echo "the native binary runs on a machine that only downloaded it"
+
+      # `--version` and `--help` prove the binary runs; they say nothing about whether
+      # `designer/dist` was actually populated before this binary was compiled. This step
+      # boots it with a scratch data directory and no `--assets-dir` at all — so the only
+      # thing that can answer `/` is the compile-time embedded copy — and demands real SPA
+      # HTML back, exactly the assertion this whole bead exists to make credible.
+      - name: Boot the Designer and check it serves its SPA
+        run: |
+          set -euo pipefail
+          data_dir="$(mktemp -d)"
+
+          ./eio-designer --data-dir "$data_dir" --listen 127.0.0.1:7474 > designer.log 2>&1 &
+          designer_pid=$!
+
+          cleanup() {
+              kill "$designer_pid" 2>/dev/null || true
+              wait "$designer_pid" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          # No fixed sleep, matching `release-daemon.yml`'s own reasoning: poll, and name
+          # exactly what never came up if the timeout is what ends the loop.
+          url="http://127.0.0.1:7474/"
+          up=""
+          for _ in $(seq 1 50); do
+              if ! kill -0 "$designer_pid" 2>/dev/null; then
+                  echo "eio-designer exited before ever serving ${url}" >&2
+                  cat designer.log >&2
+                  exit 1
+              fi
+              # `--fail` alone already catches the empty-dist failure: `assets.rs`'s
+              # `embedded_or_index` answers that case with a `404`, and `--fail` turns any
+              # non-2xx into a non-zero curl exit rather than a "successfully downloaded a
+              # 404 page" false positive.
+              if curl --fail --silent --output index.html "$url"; then
+                  up=1
+                  break
+              fi
+              sleep 0.2
+          done
+          if [ -z "$up" ]; then
+              echo "timed out after 10s waiting for ${url} to answer" >&2
+              cat designer.log >&2
+              exit 1
+          fi
+
+          # Content, not just a 200: a `curl --fail` that happened to succeed against some
+          # other empty-but-200 response would still pass the check above. Grep for the
+          # SPA's own title (`designer/index.html`'s `<title>eieio Designer</title>`) so a
+          # response that is real HTML but not *this* HTML still fails.
+          if ! grep -q "<title>eieio Designer</title>" index.html; then
+              echo "${url} answered but did not look like the Designer's SPA:" >&2
+              cat index.html >&2
+              cat designer.log >&2
+              exit 1
+          fi
+          echo "the Designer boots with no --assets-dir and serves its embedded SPA"
+
+          if ! kill -0 "$designer_pid" 2>/dev/null; then
+              echo "eio-designer died while / was being checked" >&2
+              cat designer.log >&2
+              exit 1
+          fi
+
+          # Unlike `eio-daemon`, `eio-designer`'s `main.rs` does not wire up
+          # `axum::serve(..).with_graceful_shutdown(..)` (it calls `axum::serve` directly),
+          # so there is no documented clean-shutdown contract to assert here yet. This step
+          # proves the process is killable, not that it exits 0 doing so.
+          kill "$designer_pid"
+          wait "$designer_pid" 2>/dev/null || true
+          trap - EXIT
+          echo "the Designer stops on request"
+
+      - name: Check the cross artifact is cross
+        # Native target only, for the same reason `release-daemon.yml` gives: an aarch64
+        # binary cannot execute on an x86_64 runner without an emulator, and standing one up
+        # to run it would be testing the emulator instead of this build.
+        run: |
+          set -euo pipefail
+          rm -f eio-designer
+          tar --extract --gzip --file dist/eio-designer-aarch64-unknown-linux-gnu.tar.gz
+          file ./eio-designer | tee /dev/stderr | grep --quiet "ARM aarch64"
+          echo "the cross binary is genuinely aarch64"
+
+  # The container image half of DESIGNER §1. Independent of `build`/`smoke` above — a
+  # `Dockerfile` failure and a bare-binary failure are different bugs, and `publish` below
+  # waits on both regardless.
+  docker:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # The only job that pushes to ghcr.io, so the only one that needs this.
+      packages: write
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Buildx
+        # docker/setup-buildx-action v4.3.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e
+
+      - name: Compute the ghcr.io tag(s)
+        # docker/metadata-action v6.2.0. Only meaningful on a `designer-v*` tag push — the
+        # `push` step below is skipped otherwise, so an empty tag list on a rehearsal run
+        # costs nothing.
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/eio-designer
+          tags: |
+            type=match,pattern=designer-v(.*),group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/designer-v') }}
+
+      - name: Build the image
+        # docker/build-push-action v7.3.0. `push: false, load: true`: the image lands in
+        # this runner's local Docker so the smoke step below can boot the exact bytes that
+        # would otherwise have been pushed — publish never happens on unverified output.
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: eio-designer:smoke-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The equivalent of the bare-binary `smoke` job's own SPA check, for the image: boot
+      # the container, and demand real SPA HTML back from `/` — not merely that a port
+      # answers, and not merely that `docker build` exited zero. `Dockerfile`'s own header
+      # comment names the exact failure this exists to catch: the `COPY --from=spa-builder`
+      # line can be wrong (or missing) and the image still builds.
+      - name: Boot the image and check it serves its SPA
+        run: |
+          set -euo pipefail
+          container="$(docker run --rm --detach --publish 7474:7474 eio-designer:smoke-test)"
+          cleanup() {
+              docker logs "$container" > designer-container.log 2>&1 || true
+              docker stop "$container" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          url="http://127.0.0.1:7474/"
+          up=""
+          for _ in $(seq 1 50); do
+              if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep --quiet true; then
+                  echo "the container exited before ever serving ${url}" >&2
+                  docker logs "$container" >&2 || true
+                  exit 1
+              fi
+              if curl --fail --silent --output index.html "$url"; then
+                  up=1
+                  break
+              fi
+              sleep 0.2
+          done
+          if [ -z "$up" ]; then
+              echo "timed out after 10s waiting for ${url} to answer" >&2
+              docker logs "$container" >&2 || true
+              exit 1
+          fi
+
+          if ! grep -q "<title>eieio Designer</title>" index.html; then
+              echo "${url} answered but did not look like the Designer's SPA:" >&2
+              cat index.html >&2
+              docker logs "$container" >&2 || true
+              exit 1
+          fi
+          echo "the Designer image boots and serves its embedded SPA"
+
+      - name: Log in to ghcr.io
+        # Only reached on a tag push (below) — never on a rehearsal `workflow_dispatch`.
+        if: startsWith(github.ref, 'refs/tags/designer-v')
+        # docker/login-action v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the verified image
+        # Only a tag is a release, matching every other publish step in this workflow. This
+        # re-runs the build rather than re-tagging the already-loaded image: `cache-from:
+        # type=gha` makes the rebuild a cache hit for every layer already produced above, so
+        # this is "attach the tags and push", not "build again from scratch".
+        if: startsWith(github.ref, 'refs/tags/designer-v')
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    needs: [build, smoke, docker]
+    runs-on: ubuntu-latest
+    # Only a tag is a release. A `workflow_dispatch` rehearsal builds, smoke-tests the
+    # binaries and the image, and stops here — which is what makes it safe to run against a
+    # branch.
+    if: startsWith(github.ref, 'refs/tags/designer-v')
+    permissions:
+      # The one job that writes, and the only reason this workflow needs to (the image push
+      # already happened, scoped to the `docker` job alone, above).
+      contents: write
+    steps:
+      - name: Collect every target's artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Every target must have produced both files, or the release is partial and
+          # silently so — checked explicitly rather than trusted, the same guard
+          # `release-daemon.yml` runs before it will create a release at all.
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+              for suffix in .tar.gz .tar.gz.sha256; do
+                  test -f "dist/eio-designer-${target}${suffix}" \
+                      || { echo "missing dist/eio-designer-${target}${suffix}" >&2; exit 1; }
+              done
+          done
+          gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "The container image for this release is at ghcr.io/${GITHUB_REPOSITORY_OWNER}/eio-designer." \
+              dist/*.tar.gz dist/*.tar.gz.sha256
