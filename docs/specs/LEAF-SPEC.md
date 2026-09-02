@@ -24,7 +24,7 @@ Every one of those follows from a single physical fact: an MCU has no room to co
 
 ## 2. Architecture
 
-The leaf runtime is a Rust binary crate — `crates/leaf` **PROPOSED** — that links the ★ crates unchanged:
+The leaf runtime is a Rust binary crate — `crates/leaf`, which exists and is built for the host — that links the ★ crates unchanged:
 
 ```
   eio-abi        status codes, sentinels, alignment (ABI §8, §3, §9.6)

@@ -11,7 +11,7 @@ The Designer is the optional visual management surface: create Systems, attach n
 
 ## 1. Stack
 
-**PROPOSED** — the choice below is settled; the marker comes off when `eieio-m9s.1` builds it.
+Settled and built (`eieio-m9s.1`); §1.1 records why it changed from SvelteKit.
 
 - **Frontend: Vite + Svelte 5, as a single-page app.** Not SvelteKit, and not Next.js.
 - **Backend: `crates/designer` — an `axum` binary in this workspace** (package `eio-designer`), serving the built SPA out of the binary via `rust-embed` behind `tower-http`'s `ServeDir`.
@@ -48,10 +48,10 @@ Notably absent: services, blocks-in-services, connections, layout — all of tha
 
 ## 3. Backend responsibilities
 
-- **Proxy, not peer-to-daemon-from-browser** (PROPOSED): all daemon API calls route browser → Designer backend → daemon. Rationale: node tokens never reach the browser, CORS/TLS mess stays server-side, and mixed-reachability networks (Designer can reach nodes the operator's laptop can't) work. Streams (taps, logs) are re-streamed over the same hop.
+- **Proxy, not peer-to-daemon-from-browser**: all daemon API calls route browser → Designer backend → daemon. Rationale: node tokens never reach the browser, CORS/TLS mess stays server-side, and mixed-reachability networks (Designer can reach nodes the operator's laptop can't) work. Streams (taps, logs) are re-streamed over the same hop.
 - Node registration: address + token (+ CA material when SCOPE §3.11 resolves), health polling → `last_seen`, capability/limit discovery via `GET /node` cached for deploy-time validation.
 - Registry browsing: query block registries, cache manifests (the palette's data source).
-- **Designer auth itself is v1-minimal** (PROPOSED): single-operator assumption (SCOPE §6 — no multi-tenancy); a single login/token gate on the app. Nothing fancier until someone needs it.
+- **Designer auth itself is v1-minimal**: single-operator assumption (SCOPE §6 — no multi-tenancy); a single login/token gate on the app. Nothing fancier until someone needs it.
 
 ### 3.1 The Designer's own HTTP surface (normative)
 
