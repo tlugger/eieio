@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# eieio-m9s.11: written by `cargo test -p eio-cli --test response_shapes`, read by
+# `src/lib/api/schema-parity.test.ts`. An artifact, not a maintained list — see that Rust
+# test's module doc for why it must be regenerated rather than trusted, and is therefore never
+# committed.
+src/lib/api/__generated__/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

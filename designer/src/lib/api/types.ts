@@ -40,11 +40,42 @@ export interface NodeSummary {
  * this union is inferred from the operations the API exposes. */
 export type ServiceState = 'running' | 'stopped' | 'errored';
 
-/** One entry of GET /services (proxied): every service and its state. */
+/** One entry of GET /services (proxied): every service and its state.
+ *
+ *  **Known drift (found by eieio-m9s.11's schema-parity check, not fixed here):** the daemon's
+ *  actual `ServiceSummary` (`crates/daemon/src/api/services.rs`) is `{ name, state, error? }` —
+ *  `error` carries {@link ApiError} when `state` is `"errored"`, and there is no `autostart`
+ *  field on this response at all. `autostart` here is sourced only from `mock.ts`'s fabricated
+ *  fixture (`file.autostart`), and `NavigatorTree.svelte`/`Toolbar.svelte`/`App.svelte` all read
+ *  it. Reconciling this cleanly means either wiring a real `error` field through those
+ *  consumers or finding `autostart` a home the daemon actually serves it from (`GET
+ *  /services/{s}`'s `ServiceDetail` doesn't carry it either) — both outside the files this bead
+ *  owns (`types.ts`, `mock.ts`, new tests only), so it is reported rather than silently patched
+ *  or silently left unmentioned. */
 export interface ServiceSummary {
   name: string;
   state: ServiceState;
   autostart: boolean;
+}
+
+/** DAEMON §9.2's failure envelope — every non-2xx body, and (per `crates/daemon/src/api/
+ *  services.rs`'s `errors` handler) the literal 200 body of `GET /services/{s}/errors` too:
+ *  that endpoint answers one `ApiError`, not a list of anything. Added by eieio-m9s.11 as the
+ *  shape a real fetch of that endpoint should use; nothing in `designer/src/` reads it yet
+ *  (the existing {@link ServiceErrorReport}/{@link InstanceError} pair below is a different,
+ *  unrelated guess that predates this check and does not match what the daemon serves — see
+ *  their own doc comment). */
+export interface ApiError {
+  /** DAEMON §9.2's stable slug, `snake_case` (`crates/daemon/src/api/error.rs`'s `Kind`):
+   *  `unauthorized`, `not_found`, `bad_request`, `invalid`, `unresolvable`, `unstartable`,
+   *  `precondition_required`, `conflict`, `running`, `internal`. Not modelled as a union here
+   *  because DAEMON-SPEC does not close this list as of writing — the same reasoning
+   *  {@link ServiceState} above already gives for its own GUESS. */
+  error: string;
+  /** One sentence for a person. Not to be parsed (DAEMON §9.2). */
+  message: string;
+  /** Per-slug structure, absent when the slug carries none. */
+  detail?: unknown;
 }
 
 export interface PortDescriptor {
@@ -284,7 +315,13 @@ export interface TapRequest {
   connection: string;
 }
 
-/** `POST /taps`'s `-> tap_id` and `GET /taps`'s listing, per entry. */
+/** `POST /taps`'s `-> tap_id` and `GET /taps`'s listing, per entry.
+ *
+ *  **Known drift (found by eieio-m9s.11's schema-parity check, not fixed here):** the daemon's
+ *  actual `Tap` (`crates/daemon/src/observe.rs`) is `{ id, service, connection, instance, port
+ *  }` — the id field is `id`, not `tap_id`, and the source instance/port are not modelled here
+ *  at all. `tap_id` is read by `InspectorPanel.svelte` and `mock-taps.test.ts`, neither of
+ *  which this bead owns, so it is reported rather than renamed out from under them. */
 export interface TapSummary {
   tap_id: string;
   service: string;
@@ -329,7 +366,14 @@ export interface NodeInfo {
  * so a report is per failing instance and carries the count that
  * mechanism keeps. A service with nothing wrong answers an empty array,
  * the same "no entries" shape §9's state-inspection endpoint already uses
- * for "nothing to report" rather than 404ing a healthy service. */
+ * for "nothing to report" rather than 404ing a healthy service.
+ *
+ * **Known drift (found by eieio-m9s.11's schema-parity check, not fixed here):** the daemon's
+ * actual `GET /services/{s}/errors` (`crates/daemon/src/api/services.rs`'s `errors` handler)
+ * answers a single {@link ApiError} on 200 — `{ error, message, detail? }` — not `{ service,
+ * errors: [...] }`. This guess predates that discovery and is read by `NodeDashboard.svelte`
+ * (`.errors`, `.instance`, `.code`, `.restarts`, `.last_error_at`), which this bead does not
+ * own, so it is reported rather than replaced out from under that component. */
 export interface ServiceErrorReport {
   service: string;
   errors: InstanceError[];
@@ -353,7 +397,20 @@ export interface InstanceError {
 /** DAEMON §9.6's event names — the contract a client dispatches on for
  * `/taps/{id}/stream`. "A name not in that list is a name a client MAY
  * ignore" — `decodeTapFrame` (`lib/api/stream-events.ts`) is where that
- * tolerance lives. */
+ * tolerance lives.
+ *
+ * **Not comparable to the wire shape field-for-field, and this is expected rather than a bug
+ * in this check** (found while scoping eieio-m9s.11, reported here rather than fixed since it
+ * lives in `stream-events.ts`, outside this bead's owned files): the daemon's actual SSE
+ * payload for every one of these events is `crates/daemon/src/observe.rs`'s `Observation`,
+ * flattened with whichever `What` variant applied — `#[serde(untagged)]`, so **no JSON field
+ * ever carries the variant name**; the SSE frame's own `event:` line does that, which is why
+ * `type` below is a `decodeTapFrame`-computed literal and never a wire field to diff against.
+ * Two real, live mismatches this surfaced: `ExprFailureEvent.span` below is decoded as `{start,
+ * end}`, but the wire's `span` is a rendered `"12..34"` string (`isSpan`'s check in
+ * `stream-events.ts` never matches real data, so `span` silently renders as `{0,0}` against a
+ * real node); and `ExprFailureEvent.property` has no wire source at all — `What::ExprFailure`
+ * carries `prop`, a numeric property index, never a name. */
 export interface TapSignalsEvent {
   type: 'signals';
   /** GUESS: DAEMON §9.6 says a `signals` event carries "a batch that
@@ -399,7 +456,15 @@ export type TapStreamEvent = TapSignalsEvent | ExprFailureEvent | DiscardedEvent
 
 /** `/logs/stream`'s `log` event (§9.6, §11): "tagged with (service,
  * instance) from the span the lifecycle driver has entered." `instance` is
- * absent for the daemon's own subsystem lines, which carry no instance. */
+ * absent for the daemon's own subsystem lines, which carry no instance.
+ *
+ * **Live bug, found while scoping eieio-m9s.11 (not fixed here — `stream-events.ts` is outside
+ * this bead's owned files):** neither `Observation` nor `What::Log` (`crates/daemon/src/
+ * observe.rs`) carries a `timestamp` field at all. `decodeLogFrame` requires
+ * `typeof payload.timestamp === 'string'` and returns `null` otherwise — so against a real
+ * daemon, **every log line fails to decode** and nothing streams into the log panel. Filed as
+ * follow-up; the fix belongs either in the daemon (add a `timestamp`) or in the decoder
+ * (stamp receipt time client-side), a call this bead does not make. */
 export interface LogLineEvent {
   type: 'log';
   timestamp: string;
