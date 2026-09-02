@@ -14,6 +14,7 @@ pub mod config;
 pub mod logs;
 pub mod mcp;
 pub mod node;
+pub mod nodes;
 pub mod service;
 pub mod services;
 mod show;

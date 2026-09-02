@@ -23,7 +23,7 @@
 //! and every other command in it talks to whichever node `--node` names.
 
 use clap::{Parser, Subcommand};
-use eio_cli::{blocks, logs, mcp, node, service, services, state, taps};
+use eio_cli::{blocks, logs, mcp, node, nodes, service, services, state, taps};
 
 /// The `eio` entry point.
 #[derive(Debug, Parser)]
@@ -47,6 +47,10 @@ enum Command {
     /// Multi-node context (`~/.config/eieio/nodes.toml`), and `GET /node`.
     #[command(subcommand)]
     Node(node::Node),
+    /// Moving a set of configured nodes to or from the Designer's own registry
+    /// (DESIGNER §2, §3.1): `eio nodes export` / `eio nodes import`.
+    #[command(subcommand)]
+    Nodes(nodes::Nodes),
     /// The block cache, over the management API (DAEMON §4, §9).
     #[command(subcommand)]
     Blocks(blocks::Blocks),
@@ -82,6 +86,7 @@ fn main() -> std::process::ExitCode {
     let result = match cli.command {
         Command::Service(command) => service::run(command),
         Command::Node(command) => node::run(command, node),
+        Command::Nodes(command) => nodes::run(command),
         Command::Blocks(command) => blocks::run(command, node),
         Command::Services(command) => services::run(command, node),
         Command::State(command) => state::run(command, node),
