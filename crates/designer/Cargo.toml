@@ -53,6 +53,11 @@ tower-http.workspace = true
 # which is what keeps a tap or a log stream unbuffered end to end (§3.1's own requirement).
 reqwest.workspace = true
 
+# `POST /api/service-edit` (§3.2): `Document` is this repository's one preserving editor for a
+# service file (SERVICE §9), so this backend calls it directly rather than growing a second
+# one in this crate or in the SPA.
+eio-service.workspace = true
+
 # `last_seen`, rendered once as RFC 3339 so every client parses the same thing.
 time.workspace = true
 

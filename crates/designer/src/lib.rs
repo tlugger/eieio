@@ -88,6 +88,7 @@ pub fn router(shared: State, assets_dir: std::path::PathBuf) -> Router {
             get(api::registries::list).post(api::registries::create),
         )
         .route("/blocks", get(api::blocks::list))
+        .route("/service-edit", post(api::service_edit::edit))
         .route(
             "/nodes/{id}/daemon/{*path}",
             axum::routing::any(api::proxy::forward),
