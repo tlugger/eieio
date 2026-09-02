@@ -75,6 +75,40 @@ async fn main() -> anyhow::Result<()> {
         "Designer listening"
     );
 
-    axum::serve(listener, eio_designer::router(shared, assets_dir)).await?;
+    // Through `serve` rather than `axum::serve`, so a signal is a clean exit rather than a
+    // killed process. `lib.rs` has always had the graceful path; this binary was not using it,
+    // which the release pipeline noticed: the daemon's smoke job asserts exit 0 on SIGTERM and
+    // the Designer's could not, because there was nothing to assert.
+    eio_designer::serve(listener, shared, assets_dir, shutdown()).await?;
+    tracing::info!("Designer stopped");
     Ok(())
+}
+
+/// Waits for the signal that means "stop".
+///
+/// `SIGTERM` because that is what an init system and `docker stop` send, and `SIGINT` because
+/// that is what a terminal sends. The same two the daemon waits on (`eio-daemon`'s `lib.rs`),
+/// deliberately: an operator should not have to remember which of this platform's two servers
+/// stops cleanly on which signal.
+async fn shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(terminate) => terminate,
+            Err(error) => {
+                tracing::warn!(%error, "SIGTERM cannot be handled; waiting for SIGINT only");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }

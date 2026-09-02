@@ -77,6 +77,9 @@ POST   /api/registries                    { url, auth? }
 GET    /api/blocks                        the manifest cache (the palette's data source),
                                           each entry carrying the `block_ref` it
                                           was fetched for (§2)
+PUT    /api/blocks/{reference}             cache one manifest the browser fetched
+                                          through the proxy (§3.3)
+DELETE /api/blocks/{reference}             forget one
 
 ANY    /api/nodes/{id}/daemon/{*path}     proxied to that node, verbatim
 ```
@@ -86,6 +89,14 @@ ANY    /api/nodes/{id}/daemon/{*path}     proxied to that node, verbatim
 **The proxy is one catch-all, not a re-modelling of DAEMON §9.** `/api/nodes/{id}/daemon/{*path}` forwards method, path, query and body to that node's address, attaches its bearer token, and streams the response back — `text/event-stream` included, unbuffered, so §6's taps and logs are the same hop. A per-endpoint proxy would be DAEMON §9's table written a third time (after the daemon and the CLI), free to drift from both; a catch-all cannot drift, because it knows nothing about what it is forwarding. This is also what keeps §8's parity rule true by construction: the browser reaches exactly the operations a node serves, no more and no fewer.
 
 **A node's `class` is stated, not discovered, and it is the only field that could not be.** Everything else about a node comes back from a probe; a **leaf** answers no probe, because it serves no management API at all — its services are compiled into firmware (SCOPE §3.7, §7). So the class has to be told to the registry, and having been told, two things follow: `POST /api/nodes/{id}/probe` and the proxy both **refuse a leaf by name** rather than dialling it. A leaf's address reached over HTTP produces a connection error indistinguishable from a node that is down, which would report a fault against a node working exactly as designed — and would make `last_seen` mean two different things depending on class.
+
+### 3.3 The cache is written by the browser, not by a second proxy
+
+`manifest_cache` is filled by the browser: it fetches a manifest from a node through the catch-all proxy (`…/daemon/blocks/available/{reference}`, DAEMON §9.8) and `PUT`s what it got here. The Designer stores it and does not go and check.
+
+**Why not a server-side `POST /api/nodes/{id}/blocks/browse`**, which is the obvious shape and was written and then reverted during implementation: it is a *per-endpoint proxy*, the thing §3.1 rejects by name. One of them is not DAEMON §9's table written a third time — but it is the first row of it, and the second is always easier to justify than the first. **The rule that keeps this honest is absolute rather than proportionate: the Designer backend reaches a node through the catch-all and through nothing else.** A rule with one exception has no edge anyone can check.
+
+**What the browser sends is therefore trusted, and that is acceptable here for a stated reason.** §3.1 already establishes that the browser is the operator — the proxy is not an authorization layer, it exists to keep the token server-side and to solve mixed reachability. An operator who poisons their own palette cache sees wrong blocks in their own palette; nothing downstream believes it, because installing is `POST /blocks/pull` on the node, which re-fetches and re-verifies (DAEMON §4.1, §4.2) and has never heard of this cache. **This holds only while there is one operator** (SCOPE §6). A second one makes a poisoned cache someone else's problem, and this endpoint is where that would first bite.
 
 **The Designer never speaks OCI.** `manifest_cache` is filled from a node, through the proxy: DAEMON §9.8's `/blocks/available` answers what a node could install, and this cache is a cache of *that* answer. The Designer holding its own registry client would be a third implementation of the OCI wire format, and worse, a *different view* — a node holds the registry credentials and enforces the signature policy, so a Designer browsing independently could offer a block that node would refuse to pull. The palette is therefore per node by construction, which is what it always was: two nodes with different registries configured offer different blocks.
 

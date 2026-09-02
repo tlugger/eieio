@@ -88,6 +88,12 @@ pub fn router(shared: State, assets_dir: std::path::PathBuf) -> Router {
             get(api::registries::list).post(api::registries::create),
         )
         .route("/blocks", get(api::blocks::list))
+        // `{*reference}` and not `{reference}`: a block reference contains slashes
+        // (`ghcr.io/tlugger/temp-sensor:1.0.0`), and §2 keys the cache by the whole of it.
+        .route(
+            "/blocks/{*reference}",
+            axum::routing::put(api::blocks::put).delete(api::blocks::delete),
+        )
         .route("/service-edit", post(api::service_edit::edit))
         .route(
             "/nodes/{id}/daemon/{*path}",

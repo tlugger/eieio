@@ -428,3 +428,71 @@ designer_image_tag := "eio-designer:local"
 # Build the Designer's container image. Requires Docker.
 designer-image:
     docker build --platform linux/amd64 --file Dockerfile --tag {{ designer_image_tag }} .
+
+# ── housekeeping ─────────────────────────────────────────────────────────────
+
+# Reclaim disk from build artifacts no build needs any more.
+#
+# `target/` grows without bound: cargo never garbage-collects the artifacts of
+# commits you have moved past, so every rebuild leaves the last one behind. This
+# workspace reached **66G**, of which 41G was reclaimable — enough to fill a disk
+# and wedge the machine, which it has done here once.
+#
+# Two kinds of waste, and only one of them is safe to delete by hand:
+#
+#   - `tmp/` is cargo's scratch. Deleting it costs nothing.
+#   - `debug/deps/` is where the weight is, and it CANNOT be pruned by mtime with
+#     `find`: cargo pairs every artifact with a fingerprint, and deleting a
+#     `.rlib` while its `.fingerprint` survives leaves cargo believing a crate is
+#     fresh when its output is gone — a confusing link error, not a clean rebuild.
+#     `cargo-sweep` understands that pairing, which is why this shells out to it
+#     rather than hand-rolling the walk.
+#
+# Deliberately NOT wired into `ci`: cleaning before a gate forces a full rebuild,
+# which on macOS also re-pays first-exec scanning of every test binary
+# (eieio-p0k.9). Run it when the disk is tight, not on a schedule.
+#
+# Deliberately does NOT touch sibling worktrees (`../eieio-wt-*`). Each has its
+# own `target/`, and deleting one out from under a build in progress is how you
+# get a failure nobody can reproduce. Clean those by removing the worktree.
+clean-stale days="14":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -d target ]; then echo "clean-stale: no target/ here, nothing to do"; exit 0; fi
+    before="$(du -sk target | cut -f1)"
+
+    rm -rf target/tmp
+
+    if command -v cargo-sweep >/dev/null 2>&1; then
+        # `--time` keeps anything touched in the last N days, so a tree you are
+        # actively working in survives; `--installed` additionally drops output
+        # from toolchains rustup no longer has, which a toolchain bump orphans.
+        cargo sweep --time {{ days }} .
+        cargo sweep --installed .
+    else
+        echo "clean-stale: cargo-sweep is not installed, so only cargo's scratch was" >&2
+        echo "  removed — the artifacts in target/debug/deps are the bulk of the weight" >&2
+        echo "  and pruning them safely needs it. Install: cargo install cargo-sweep" >&2
+    fi
+
+    after="$(du -sk target | cut -f1)"
+    # awk rather than `numfmt`, which is GNU coreutils and absent on macOS —
+    # the platform this is most likely to be run on.
+    human() { awk -v k="$1" 'BEGIN {
+        split("K M G T", u, " "); i = 1
+        while (k >= 1024 && i < 4) { k /= 1024; i++ }
+        printf "%.1f%s", k, u[i]
+    }'; }
+    printf 'clean-stale: %s -> %s (freed %s)\n' \
+        "$(human "$before")" "$(human "$after")" "$(human "$((before - after))")"
+
+# Show what `clean-stale` would remove, without removing it.
+clean-stale-dry days="14":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cargo-sweep >/dev/null 2>&1; then
+        echo "clean-stale-dry: needs cargo-sweep (cargo install cargo-sweep)" >&2
+        exit 1
+    fi
+    du -sh target 2>/dev/null || true
+    cargo sweep --dry-run --time {{ days }} .
