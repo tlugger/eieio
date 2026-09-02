@@ -31,6 +31,10 @@ pub fn stream_of(
                     yield Ok(sse_event(
                         event::LAGGED,
                         &Observation {
+                            // The one observation the daemon did not observe: it is this
+                            // reader's own lag, noticed here, so now is genuinely when it
+                            // happened.
+                            at: crate::observe::now_rfc3339(),
                             service: String::new(),
                             instance: String::new(),
                             event: event::LAGGED,

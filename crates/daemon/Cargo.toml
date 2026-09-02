@@ -56,6 +56,10 @@ base64.workspace = true
 # because SCOPE §4 makes it an agent's tool surface and not a by-product.
 axum.workspace = true
 utoipa.workspace = true
+
+# The RFC 3339 stamp every observation carries (§9.6). `formatting` only — nothing here parses
+# a timestamp, it only writes one, and the parse half is a reader's problem.
+time.workspace = true
 async-stream.workspace = true
 futures-core.workspace = true
 

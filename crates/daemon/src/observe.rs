@@ -57,6 +57,15 @@ pub struct Observation {
     pub instance: String,
     /// The SSE event name this is published as (§9.6).
     pub event: &'static str,
+    /// When this was observed, RFC 3339 with milliseconds.
+    ///
+    /// **The daemon's clock, not the reader's.** DESIGNER §6 renders a line as
+    /// `[timestamp][LEVEL][service.block]`, and a client stamping arrival time would be wrong
+    /// in the two cases that matter: a reader behind enough to be told it `Lagged` is reading
+    /// events later than they happened, and a backlog replayed before the live stream is
+    /// joined (§6's nio-logger virtue) would be stamped as if it had just occurred. Only the
+    /// daemon knows when the thing happened.
+    pub at: String,
     /// The output port, when the observation has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<String>,
@@ -228,6 +237,7 @@ impl Bus {
     /// Publishes a log line (DAEMON §11).
     pub fn log(&self, service: &str, instance: &str, level: &str, message: &str) {
         self.publish(|| Observation {
+            at: now_rfc3339(),
             service: String::from(service),
             instance: String::from(instance),
             event: event::LOG,
@@ -238,6 +248,24 @@ impl Bus {
             },
         });
     }
+}
+
+/// Now, RFC 3339 with milliseconds — the stamp every [`Observation`] carries.
+///
+/// Milliseconds and not nanoseconds because DESIGNER §6 renders this for a person and a log
+/// panel showing nine fractional digits is noise; and formatted rather than an epoch integer
+/// because every reader of it so far is a UI, and a UI that has to know the epoch is a UI that
+/// will get it wrong once.
+pub(crate) fn now_rfc3339() -> String {
+    use time::format_description::well_known::Rfc3339;
+
+    let now = time::OffsetDateTime::now_utc();
+    // Truncate to whole milliseconds. `replace_nanosecond` only fails out of range, and this
+    // value came from a nanosecond that was already in range, so it cannot.
+    now.replace_nanosecond(now.millisecond() as u32 * 1_000_000)
+        .unwrap_or(now)
+        .format(&Rfc3339)
+        .unwrap_or_default()
 }
 
 /// See [`Bus::counts`].
@@ -308,6 +336,7 @@ fn observe(bus: &Bus, service: &str, instance: &str, outputs: &[String], event: 
             // Everything expensive — resolving the port's name, rendering the batch — happens
             // *inside* the closure, so an untapped node does none of it (DAEMON §6.3).
             bus.publish(|| Observation {
+                at: now_rfc3339(),
                 service: String::from(service),
                 instance: String::from(instance),
                 event: event::SIGNALS,
@@ -324,6 +353,7 @@ fn observe(bus: &Bus, service: &str, instance: &str, outputs: &[String], event: 
             });
         }
         Event::Failure(failure) => bus.publish(|| Observation {
+            at: now_rfc3339(),
             service: String::from(service),
             instance: String::from(instance),
             event: event::EXPR_FAILURE,
@@ -338,6 +368,7 @@ fn observe(bus: &Bus, service: &str, instance: &str, outputs: &[String], event: 
         }),
         Event::Discarded(discard) => {
             bus.publish(|| Observation {
+                at: now_rfc3339(),
                 service: String::from(service),
                 instance: String::from(instance),
                 event: event::DISCARDED,

@@ -28,7 +28,7 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
       return {
         type: 'expr_failure',
         code: payload.code,
-        span: isSpan(payload.span) ? payload.span : { start: 0, end: 0 },
+        span: parseSpan(payload.span),
         message: payload.message,
         instance: typeof payload.instance === 'string' ? payload.instance : undefined,
         property: typeof payload.property === 'string' ? payload.property : undefined,
@@ -50,12 +50,15 @@ export function decodeLogFrame(frame: SseFrame): LogLineEvent | null {
   } catch {
     return null;
   }
-  if (typeof payload.timestamp !== 'string' || typeof payload.level !== 'string' || typeof payload.message !== 'string') {
+  // `at`, not `timestamp` — the daemon's own field name (DAEMON §9.6). This required
+  // `timestamp` and so rejected every real log line, which the schema-parity check
+  // (eieio-m9s.11) is what surfaced.
+  if (typeof payload.at !== 'string' || typeof payload.level !== 'string' || typeof payload.message !== 'string') {
     return null;
   }
   return {
     type: 'log',
-    timestamp: payload.timestamp,
+    timestamp: payload.at,
     level: payload.level,
     service: typeof payload.service === 'string' ? payload.service : undefined,
     instance: typeof payload.instance === 'string' ? payload.instance : undefined,
@@ -63,11 +66,23 @@ export function decodeLogFrame(frame: SseFrame): LogLineEvent | null {
   };
 }
 
-function isSpan(value: unknown): value is { start: number; end: number } {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof (value as { start?: unknown }).start === 'number' &&
-    typeof (value as { end?: unknown }).end === 'number'
-  );
+/** EXPR §8's span, as the daemon puts it on the wire.
+ *
+ *  A **string**, `"12..34"` — `observe.rs` formats it with
+ *  `format!("{}..{}", span.start, span.end)`. This used to test for an object with `start` and
+ *  `end` and fall back to `{0,0}`, so every expression-failure span in the panel was silently
+ *  zero: the fallback made a wrong answer look like a real one. Found by the schema-parity
+ *  check (eieio-m9s.11).
+ *
+ *  An unparsable span yields `undefined` rather than `{0,0}`, so a caller can render nothing
+ *  instead of pointing confidently at the first character. */
+function parseSpan(value: unknown): { start: number; end: number } | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = /^(\d+)\.\.(\d+)$/.exec(value.trim());
+  if (!match) return undefined;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  return Number.isSafeInteger(start) && Number.isSafeInteger(end) && end >= start
+    ? { start, end }
+    : undefined;
 }

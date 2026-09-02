@@ -430,7 +430,9 @@ export interface TapSignalsEvent {
 export interface ExprFailureEvent {
   type: 'expr_failure';
   code: string;
-  span: { start: number; end: number };
+  /** `undefined` when the daemon's `"start..end"` string did not parse — a caller
+   *  renders no span rather than pointing confidently at the first character. */
+  span?: { start: number; end: number };
   message: string;
   instance?: string;
   property?: string;

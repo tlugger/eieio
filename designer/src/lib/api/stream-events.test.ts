@@ -19,7 +19,9 @@ describe('decodeTapFrame', () => {
       decodeTapFrame(
         frame('expr_failure', {
           code: 'MISSING',
-          span: { start: 3, end: 8 },
+          // A string, as observe.rs formats it — this fixture used to be an object,
+          // which is how the decoder came to accept a shape nothing sends.
+          span: '3..8',
           message: 'key "temp" not present on this signal',
           instance: 'f3m9',
           property: 'predicate',
@@ -64,7 +66,9 @@ describe('decodeLogFrame', () => {
     expect(
       decodeLogFrame(
         frame('log', {
-          timestamp: '2026-09-02T00:00:00Z',
+          // `at`, the daemon's own field name — this fixture said `timestamp`, which is
+          // how the decoder came to require a field nothing sends.
+          at: '2026-09-02T00:00:00Z',
           level: 'INFO',
           service: 'kitchen',
           instance: 'b7k2',
@@ -88,5 +92,65 @@ describe('decodeLogFrame', () => {
   it('omits instance for a daemon subsystem line that carries none', () => {
     const decoded = decodeLogFrame(frame('log', { timestamp: 't', level: 'INFO', message: 'booted' }));
     expect(decoded?.instance).toBeUndefined();
+  });
+});
+
+describe('the shapes the daemon actually puts on the wire', () => {
+  // Both of these were live bugs, found by the schema-parity check (eieio-m9s.11) rather
+  // than by any test here — which is why they are pinned against the daemon's own field
+  // names now instead of against what a reader might assume they are.
+
+  it('decodes a log line, whose time field is `at` and not `timestamp`', () => {
+    // crates/daemon/src/observe.rs: an Observation carries `at`, and a Log's What flattens
+    // into it as `level` and `message`. Requiring `timestamp` rejected every real line, so
+    // the Logs tab showed nothing at all against a real node.
+    const decoded = decodeLogFrame({
+      event: 'log',
+      data: JSON.stringify({
+        at: '2026-09-02T17:16:00.570Z',
+        service: 'kitchen',
+        instance: 'b7k2',
+        event: 'log',
+        level: 'info',
+        message: 'reading 17.2',
+      }),
+    });
+    expect(decoded).not.toBeNull();
+    expect(decoded?.timestamp).toBe('2026-09-02T17:16:00.570Z');
+    expect(decoded?.level).toBe('info');
+    expect(decoded?.message).toBe('reading 17.2');
+  });
+
+  it('parses a span from the "start..end" string the daemon formats', () => {
+    // observe.rs: `span: format!("{}..{}", failure.error.span.start, failure.error.span.end)`.
+    // Testing for an object and falling back to {0,0} made a wrong answer look like a real
+    // one — every expression-failure span in the panel pointed at the first character.
+    const decoded = decodeTapFrame({
+      event: 'expr_failure',
+      data: JSON.stringify({
+        at: '2026-09-02T17:16:00.570Z',
+        service: 'kitchen',
+        instance: 'f3m9',
+        event: 'expr_failure',
+        code: 'MISSING',
+        span: '12..34',
+        message: 'key "temp" not present on this signal',
+        prop: 0,
+      }),
+    });
+    expect(decoded).toEqual(
+      expect.objectContaining({ type: 'expr_failure', span: { start: 12, end: 34 } }),
+    );
+  });
+
+  it('reports no span rather than a zero one when the string does not parse', () => {
+    for (const span of ['', 'nonsense', '34..12', undefined, { start: 1, end: 2 }]) {
+      const decoded = decodeTapFrame({
+        event: 'expr_failure',
+        data: JSON.stringify({ code: 'MISSING', span, message: 'x', prop: 0 }),
+      });
+      expect(decoded).toEqual(expect.objectContaining({ type: 'expr_failure' }));
+      expect((decoded as { span?: unknown }).span).toBeUndefined();
+    }
   });
 });

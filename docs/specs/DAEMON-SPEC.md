@@ -536,6 +536,10 @@ A conforming implementation MUST test that every route it serves is described in
 
 ### 9.6 Streaming: SSE, and what a stream promises
 
+**Every observation carries `at`, the daemon's own RFC 3339 stamp.** Not the reader's arrival time, which differs from when the thing happened in the two cases that matter: a reader behind enough to be told it `Lagged` is reading events later than they occurred, and a backlog replayed before the live stream is joined would be stamped as if it had just happened. Only the daemon knows. DESIGNER §6 renders a line as `[timestamp][LEVEL][service.block]`, and that timestamp is this field.
+
+**A tap's `span` is a string, `"start..end"`.** EXPR §8's byte offsets, formatted — not an object with two numbers. Stated because a reader that guessed the object shape and fell back to zeroes made a wrong answer look like a real one: every failure pointed at the first character of the expression.
+
 **Server-sent events, not WebSocket.** A tap and a log stream are one-way, which is the whole of what SSE does; it is curl-able, it is `EventSource` in a browser with no library, and reconnection with an event id is in the protocol rather than in every client. A bidirectional socket would buy adjusting a live tap's filter without re-creating it, which is not worth a protocol the Designer has to hand-roll reconnection for. Streams answer `text/event-stream` and are authenticated like every other endpoint (§9.1).
 
 **Event names are the contract**, and a client dispatches on them: `signals` for a batch that travelled the tapped connection, `expr_failure` for a property expression that failed for a signal (EXPR §8: code, span and message), `discarded` for a batch that was routed and not delivered (§6.2), `lagged` for the paragraph below, and `log` on `/logs/stream`. A name not in that list is a name a client MAY ignore; adding one is not a breaking change, and changing what one means is.
