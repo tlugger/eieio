@@ -77,6 +77,19 @@ let daemonShapes: Record<string, string[]>;
 /** `daemonShapes.sse`, typed for what it actually is: one field-name array per SSE event name,
  * rather than the flat `string[]` every other entry in `daemonShapes` holds. */
 let daemonSse: Record<string, string[]>;
+/** `daemonShapes.required` (eieio-m9s.15): per-schema required field names, top-level only —
+ * see `crates/cli/tests/response_shapes.rs`'s `required_fields` for why top-level is enough for
+ * every schema this file asserts on. */
+let daemonRequired: Record<string, string[]>;
+/** `daemonShapes.sseRequired` (eieio-m9s.15): the same, per SSE event name. */
+let daemonSseRequired: Record<string, string[]>;
+/** `daemonShapes.types` (eieio-m9s.16): per-schema field kind, keyed the same dotted way
+ * `daemonShapes` itself is — see `response_shapes.rs`'s `types_of`/`schema_kind` for the five-
+ * family vocabulary and what is left out rather than guessed at. */
+let daemonTypes: Record<string, Record<string, string>>;
+/** `daemonShapes.sseTypes` (eieio-m9s.16): the same, per SSE event name, flat (no dotted paths —
+ * DAEMON §9.6's SSE payloads are flat). */
+let daemonSseTypes: Record<string, Record<string, string>>;
 
 beforeAll(() => {
   execSync('cargo test -p eio-cli --test response_shapes', {
@@ -86,6 +99,10 @@ beforeAll(() => {
   const parsed = JSON.parse(readFileSync(GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
   daemonShapes = parsed as Record<string, string[]>;
   daemonSse = (parsed.sse as Record<string, string[]> | undefined) ?? {};
+  daemonRequired = (parsed.required as Record<string, string[]> | undefined) ?? {};
+  daemonSseRequired = (parsed.sseRequired as Record<string, string[]> | undefined) ?? {};
+  daemonTypes = (parsed.types as Record<string, Record<string, string>> | undefined) ?? {};
+  daemonSseTypes = (parsed.sseTypes as Record<string, Record<string, string>> | undefined) ?? {};
 }, 120_000);
 
 /** Parses `types.ts` once and indexes every top-level `interface` by name, so a property whose
@@ -178,6 +195,83 @@ function fieldsOfInterface(name: string, interfaces: Map<string, ts.InterfaceDec
   return out;
 }
 
+/** Looks up `name` in `interfaces`, throwing the same way [`fieldsOfInterface`] does rather than
+ * letting a missing interface surface as a confusing `undefined` deref somewhere downstream. */
+function interfaceNode(name: string, interfaces: Map<string, ts.InterfaceDeclaration>): ts.InterfaceDeclaration {
+  const node = interfaces.get(name);
+  if (!node) {
+    throw new Error(`types.ts declares no interface named \`${name}\``);
+  }
+  return node;
+}
+
+// --- eieio-m9s.16: required fields --------------------------------------------------------
+
+/** A property is required in TypeScript's own sense whenever it has no `?` — this is exactly
+ * `Schema::Object.required`'s TypeScript mirror: a field this file's writer chose to make
+ * *possibly absent*, which is the same design choice `required`/`sseRequired`
+ * (`response_shapes.rs`) record on the daemon side. Top-level only for the `PAIRS` interfaces,
+ * mirroring `required_of`'s own "top-level only" scope (see that function's doc for why nothing
+ * here needs a nested-object's own required set). */
+function requiredFieldsOfInterface(node: ts.InterfaceDeclaration): Set<string> {
+  const out = new Set<string>();
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    if (!member.questionToken) out.add(member.name.text);
+  }
+  return out;
+}
+
+/** [`requiredFieldsOfInterface`]'s SSE counterpart: flat, and named by [`wireNameOf`] rather than
+ * the property's own name, the same rule [`fieldsOfSseInterface`] already applies. */
+function requiredFieldsOfSseInterface(node: ts.InterfaceDeclaration): Set<string> {
+  const out = new Set<string>();
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    if (!member.questionToken) out.add(wireNameOf(member));
+  }
+  return out;
+}
+
+/**
+ * `(event, field)` pairs where the daemon always sends `field` but `types.ts` deliberately
+ * leaves it optional — found by the required-field check this bead adds, and **not fixable from
+ * this worktree**: `designer/src/lib/api/stream-events.ts` (owned by another agent) extracts
+ * every one of these fields with `typeof payload.x === '<kind>' ? payload.x : undefined`, which
+ * types the local exactly `T | undefined` regardless of what DAEMON §9.6 guarantees, and
+ * `decodeTapFrame`/`decodeLogFrame` assign that local straight into the returned event object.
+ * Removing the `?` in `types.ts` makes that assignment a compile error — verified directly for
+ * every entry below (`npm run check` reports the assignment as invalid in `stream-events.ts`,
+ * not in a file this bead owns); see the bead's final report for the transcripts.
+ *
+ * `expr_failure`'s `span` and `prop` are the same shape for a different reason: `span` is
+ * `parseSpan`'s own `{start, end} | undefined` return (an unparsable wire string yields
+ * `undefined` on purpose — see `stream-events.ts`'s doc on `parseSpan`), and `prop` uses the
+ * same `typeof ... ? ... : undefined` pattern as `service`/`instance`/`at`.
+ *
+ * This is not a quiet allowlist: the `it()` right after the main SSE-required loop below re-
+ * derives, from the live daemon schema and `types.ts`'s own AST, whether each entry here is
+ * still actually necessary — an entry that stops being true (the daemon started omitting the
+ * field, or `types.ts` started requiring it) fails that check loudly, rather than sitting here
+ * unnoticed. The right fix is in `stream-events.ts`: guard these fields the same way `code`/
+ * `message`/`level`/`at` (for `timestamp`) already are — an early `return null` on a malformed
+ * frame — rather than silently widening to `undefined`. That file is not owned by this bead.
+ */
+const REQUIRED_BUT_OPTIONAL_EXCEPTIONS: ReadonlyArray<readonly [event: string, field: string]> = [
+  // `expr_failure.span` is the only one left, and it is not a widening — it is a deliberate
+  // transform. The wire sends the string `"12..34"`; `parseSpan` turns it into `{start, end}`
+  // and answers `undefined` when it does not parse, so a caller renders no span rather than
+  // pointing confidently at the first character (`a36f7a7`). Optional here is therefore the
+  // honest declaration of what the decoder produces, not a field the wire might omit.
+  //
+  // The other fourteen exceptions this list carried are gone. They existed because
+  // `stream-events.ts` widened `service`/`instance`/`at`/`prop` to `T | undefined` even
+  // though `Observation`'s fields are plain `String`/`u32`, which forced `types.ts` to mark
+  // them optional and this check to look away. The decoder now rejects a frame missing one,
+  // the same answer it already gave for `code` and `message`, so the types are exact.
+  ['expr_failure', 'span'],
+];
+
 // --- eieio-m9s.13: the SSE payloads ---------------------------------------------------------
 
 /** A property's real wire field name — the argument of a `@wire <name>` JSDoc tag, when present,
@@ -256,6 +350,167 @@ function sseInterfacesByEvent(
   });
   const log = interfaces.get('LogLineEvent');
   if (log) out.set(eventNameOf(log), log);
+  return out;
+}
+
+// --- eieio-m9s.16: field types -------------------------------------------------------------
+//
+// `fields_of`/`sse_shapes` (and this file's own `fieldsOfInterface`/`fieldsOfSseInterface`)
+// answer "does this field exist" with a name-only diff — exactly the shape that would have kept
+// passing if `span` had been reintroduced as `{start, end}` where the wire sends `"12..34"`:
+// `span` is a real field name on both sides, so a name set alone sees nothing wrong. This section
+// adds a second, narrower comparison — a field's *kind* — scoped to the same five-family
+// vocabulary `response_shapes.rs`'s module doc settles on: `string`, `number` (folding
+// `integer`), `boolean`, `array` (never its item type), `object` (never compared past "has
+// properties" — dotted recursion, not structural equivalence, handles the rest). Anything that
+// is not honestly one of those five is left unmapped rather than guessed at, exactly the way the
+// daemon side leaves `ApiError.detail` (untyped) out of `types`/`sseTypes` altogether.
+
+type Kind = 'string' | 'number' | 'boolean' | 'array' | 'object';
+
+/**
+ * The one trap this check has to dodge: `field?: T` does not appear in the AST as `T |
+ * undefined` — TypeScript records the `?` on `questionToken` and leaves `type` as plain `T` — but
+ * a property can also be written `field: T | undefined` (or `| null`) directly, and a naive kind
+ * mapper would see that union, find more than one member, and call the whole field an
+ * unmappable union. Stripping `undefined`/`null` first and mapping what remains is what keeps an
+ * *optional* field from being reported as an *unmappable* one — a real union of two or more
+ * substantive members (not counting `undefined`/`null`) is still correctly unmappable, and
+ * returns `undefined` here so the caller can skip it loudly rather than guess.
+ */
+function stripOptionality(type: ts.TypeNode): ts.TypeNode | undefined {
+  if (!ts.isUnionTypeNode(type)) return type;
+  const substantive = type.types.filter((member) => {
+    if (member.kind === ts.SyntaxKind.UndefinedKeyword) return false;
+    if (ts.isLiteralTypeNode(member) && member.literal.kind === ts.SyntaxKind.NullKeyword) return false;
+    return true;
+  });
+  return substantive.length === 1 ? substantive[0] : undefined;
+}
+
+/**
+ * Maps one type node to this check's five-kind vocabulary, or `undefined` when it is honestly
+ * unmappable: a real union (2+ substantive members after [`stripOptionality`]), a type alias
+ * (`ServiceState`, `Capability`, ...), or a reference to another interface declared in this file
+ * (`ApiError`, ...) — the three forms the sub-plan names explicitly. `Record<K, V>` is the one
+ * `TypeReferenceNode` this maps rather than skips: it is a map, not an interface, and the wire's
+ * counterpart (`NodeInfo.limits`'s Rust `HashMap`-shaped fields, if any existed here — none do
+ * today, but `NodeSummary.limits`/`BlockInstance.props` are this shape) is itself an object
+ * schema, so `object` is the honest answer rather than an invented sixth kind.
+ */
+function kindOfTypeNode(type: ts.TypeNode | undefined): Kind | undefined {
+  if (!type) return undefined;
+  const stripped = stripOptionality(type);
+  if (!stripped) return undefined;
+  switch (stripped.kind) {
+    case ts.SyntaxKind.StringKeyword:
+      return 'string';
+    case ts.SyntaxKind.NumberKeyword:
+      return 'number';
+    case ts.SyntaxKind.BooleanKeyword:
+      return 'boolean';
+    default:
+      break;
+  }
+  if (ts.isArrayTypeNode(stripped)) return 'array';
+  if (ts.isTypeLiteralNode(stripped)) return 'object';
+  if (ts.isLiteralTypeNode(stripped)) {
+    if (ts.isStringLiteral(stripped.literal)) return 'string';
+    if (ts.isNumericLiteral(stripped.literal)) return 'number';
+    if (stripped.literal.kind === ts.SyntaxKind.TrueKeyword || stripped.literal.kind === ts.SyntaxKind.FalseKeyword) {
+      return 'boolean';
+    }
+    return undefined;
+  }
+  if (ts.isTypeReferenceNode(stripped) && ts.isIdentifier(stripped.typeName) && stripped.typeName.text === 'Record') {
+    return 'object';
+  }
+  // Any other `TypeReferenceNode` (an interface declared in this file, or a type alias) is
+  // exactly the "type alias"/"interface reference" case the sub-plan calls unmappable —
+  // deliberately not resolved further here, unlike `flattenInterface`'s field-*name* recursion.
+  return undefined;
+}
+
+/**
+ * `(event, field)` pairs excluded from the SSE type-kind comparison — today, exactly one:
+ * `ExprFailureEvent.span`. The wire sends `span` as a string (`"12..34"`); `stream-events.ts`'s
+ * `parseSpan` (owned by another agent) deliberately decodes it into `{start, end}` for the panel
+ * to render, and `decodeTapFrame` assigns that decoded value straight into `ExprFailureEvent`.
+ * Declaring `span` as `string` here to match the wire makes that assignment a compile error
+ * (`{start,end} | undefined` is not assignable to `string | undefined`) — verified directly; see
+ * the bead's final report. This is the one field [`REQUIRED_BUT_OPTIONAL_EXCEPTIONS`]'s doc
+ * already names for the same underlying reason; it needs a *type* exception too, not just a
+ * required-ness one, because the transform changes its shape, not only its presence.
+ *
+ * Watched the same way: the `it()` after the SSE type-kind loop below re-derives whether this is
+ * still true from the live schema and `types.ts`'s own AST, so a fix elsewhere that makes this
+ * safe to compare again is caught as a stale exception, not silently forgotten.
+ */
+const TYPE_KIND_EXCEPTIONS: ReadonlyArray<readonly [event: string, field: string]> = [['expr_failure', 'span']];
+
+/** [`flattenInterface`]'s counterpart for kinds: the same dotted-path recursion through an inline
+ * type literal or a same-file interface reference, but recording [`kindOfTypeNode`] at each path
+ * instead of just the path's existence. A path [`flattenInterface`] would include that this
+ * leaves `out` without an entry for is not a bug — it means the field's declared type was not
+ * honestly one of the five kinds (or, per [`kindOfTypeNode`]'s doc, a reference this check
+ * deliberately does not resolve), and the comparison below simply has nothing to check it
+ * against, symmetric with how the daemon side leaves unguessable fields out of `types`/
+ * `sseTypes` entirely. */
+function collectKinds(
+  node: ts.InterfaceDeclaration,
+  prefix: string,
+  interfaces: Map<string, ts.InterfaceDeclaration>,
+  depth: number,
+  out: Map<string, Kind>,
+): void {
+  if (depth === 0) return;
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    const path = prefix ? `${prefix}.${member.name.text}` : member.name.text;
+    const type = member.type;
+    const stripped = type ? stripOptionality(type) : undefined;
+    if (stripped && ts.isTypeLiteralNode(stripped)) {
+      out.set(path, 'object');
+      collectKindsFromMembers(stripped.members, path, interfaces, depth - 1, out);
+      continue;
+    }
+    const kind = kindOfTypeNode(type);
+    if (kind) out.set(path, kind);
+  }
+}
+
+function collectKindsFromMembers(
+  members: ts.NodeArray<ts.TypeElement>,
+  prefix: string,
+  interfaces: Map<string, ts.InterfaceDeclaration>,
+  depth: number,
+  out: Map<string, Kind>,
+): void {
+  if (depth === 0) return;
+  for (const member of members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    const path = `${prefix}.${member.name.text}`;
+    const type = member.type;
+    const stripped = type ? stripOptionality(type) : undefined;
+    if (stripped && ts.isTypeLiteralNode(stripped)) {
+      out.set(path, 'object');
+      collectKindsFromMembers(stripped.members, path, interfaces, depth - 1, out);
+      continue;
+    }
+    const kind = kindOfTypeNode(type);
+    if (kind) out.set(path, kind);
+  }
+}
+
+/** [`fieldsOfSseInterface`]'s counterpart for kinds: flat, wire-named via [`wireNameOf`], one
+ * entry per property whose declared type maps to the five-kind vocabulary at all. */
+function typeKindsOfSseInterface(node: ts.InterfaceDeclaration): Map<string, Kind> {
+  const out = new Map<string, Kind>();
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    const kind = kindOfTypeNode(member.type);
+    if (kind) out.set(wireNameOf(member), kind);
+  }
   return out;
 }
 
@@ -340,4 +595,161 @@ describe('SSE payloads (Observation + What) vs. designer/src/lib/api/types.ts (e
       expect(onlyOnTheDaemon.length === 0 && onlyInTheDesigner.length === 0, message).toBe(true);
     });
   }
+});
+
+
+describe("daemon required fields vs. designer/src/lib/api/types.ts's optional fields (eieio-m9s.16)", () => {
+  for (const [daemonSchema, tsInterface] of PAIRS) {
+    it(`\`${tsInterface}\` marks optional exactly the fields the daemon's \`${daemonSchema}\` sometimes omits`, () => {
+      const interfaces = parseInterfaces();
+      const node = interfaceNode(tsInterface, interfaces);
+      const wireRequired = new Set(daemonRequired[daemonSchema] ?? []);
+      const designerRequired = requiredFieldsOfInterface(node);
+
+      const wireRequiresDesignerDoesNot = [...wireRequired].filter((field) => !designerRequired.has(field)).sort();
+      const designerRequiresWireDoesNot = [...designerRequired].filter((field) => !wireRequired.has(field)).sort();
+
+      const message = [
+        `\`${tsInterface}\` (designer/src/lib/api/types.ts) disagrees with the daemon's live \`${daemonSchema}\` required set.`,
+        wireRequiresDesignerDoesNot.length > 0
+          ? `The daemon always sends these, but \`${tsInterface}\` marks them optional: ${JSON.stringify(wireRequiresDesignerDoesNot)}`
+          : null,
+        designerRequiresWireDoesNot.length > 0
+          ? `\`${tsInterface}\` requires these, but the daemon does not always send them: ${JSON.stringify(designerRequiresWireDoesNot)}`
+          : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join('\n');
+
+      expect(wireRequiresDesignerDoesNot.length === 0 && designerRequiresWireDoesNot.length === 0, message).toBe(true);
+    });
+  }
+});
+
+describe('SSE payload required fields vs. designer/src/lib/api/types.ts (eieio-m9s.16)', () => {
+  const source = ts.createSourceFile(TYPES_PATH, readFileSync(TYPES_PATH, 'utf-8'), ts.ScriptTarget.Latest, true);
+  const interfaces = parseInterfaces();
+  const designerByEvent = sseInterfacesByEvent(interfaces, source);
+
+  for (const [event, iface] of designerByEvent) {
+    it(`\`${iface.name.text}\` (event \`${event}\`) marks optional exactly the fields the daemon sometimes omits`, () => {
+      const wireRequired = new Set(daemonSseRequired[event] ?? []);
+      const designerRequired = requiredFieldsOfSseInterface(iface);
+      const exceptions = new Set(
+        REQUIRED_BUT_OPTIONAL_EXCEPTIONS.filter(([exceptionEvent]) => exceptionEvent === event).map(([, field]) => field),
+      );
+
+      const wireRequiresDesignerDoesNot = [...wireRequired]
+        .filter((field) => !designerRequired.has(field) && !exceptions.has(field))
+        .sort();
+      const designerRequiresWireDoesNot = [...designerRequired].filter((field) => !wireRequired.has(field)).sort();
+
+      const message = [
+        `\`${iface.name.text}\` (designer/src/lib/api/types.ts) disagrees with the daemon's live \`${event}\` required set.`,
+        wireRequiresDesignerDoesNot.length > 0
+          ? `The daemon always sends these for \`${event}\`, but \`${iface.name.text}\` marks them optional: ${JSON.stringify(wireRequiresDesignerDoesNot)}`
+          : null,
+        designerRequiresWireDoesNot.length > 0
+          ? `\`${iface.name.text}\` requires these for \`${event}\`, but the daemon does not always send them: ${JSON.stringify(designerRequiresWireDoesNot)}`
+          : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join('\n');
+
+      expect(wireRequiresDesignerDoesNot.length === 0 && designerRequiresWireDoesNot.length === 0, message).toBe(true);
+    });
+  }
+
+  it('every required-but-optional exception is still necessary', () => {
+    const stale: string[] = [];
+    for (const [event, field] of REQUIRED_BUT_OPTIONAL_EXCEPTIONS) {
+      const iface = designerByEvent.get(event);
+      if (!iface) {
+        throw new Error(
+          `REQUIRED_BUT_OPTIONAL_EXCEPTIONS names event \`${event}\`, which no TapStreamEvent/LogLineEvent member decodes`,
+        );
+      }
+      const wireRequires = (daemonSseRequired[event] ?? []).includes(field);
+      const designerRequires = requiredFieldsOfSseInterface(iface).has(field);
+      if (!wireRequires) {
+        stale.push(`(\`${event}\`, \`${field}\`): the daemon no longer always sends \`${field}\` — drop this exception`);
+      } else if (designerRequires) {
+        stale.push(
+          `(\`${event}\`, \`${field}\`): \`${iface.name.text}\` now requires \`${field}\` too — drop this exception`,
+        );
+      }
+    }
+    expect(stale, stale.join('\n')).toEqual([]);
+  });
+});
+
+describe("daemon field types vs. designer/src/lib/api/types.ts's declared types (eieio-m9s.16)", () => {
+  for (const [daemonSchema, tsInterface] of PAIRS) {
+    it(`\`${tsInterface}\`'s field types agree with the daemon's live \`${daemonSchema}\` schema`, () => {
+      const interfaces = parseInterfaces();
+      const node = interfaceNode(tsInterface, interfaces);
+      const wireKinds = daemonTypes[daemonSchema] ?? {};
+      const designerKinds = new Map<string, Kind>();
+      collectKinds(node, '', interfaces, MAX_DEPTH, designerKinds);
+
+      const mismatches = Object.entries(wireKinds)
+        .map(([path, wireKind]): string | null => {
+          const designerKind = designerKinds.get(path);
+          if (designerKind === undefined || designerKind === wireKind) return null;
+          return `\`${path}\`: the daemon sends \`${wireKind}\`, \`${tsInterface}\` declares \`${designerKind}\``;
+        })
+        .filter((line): line is string => line !== null)
+        .sort();
+
+      expect(mismatches, mismatches.join('\n')).toEqual([]);
+    });
+  }
+});
+
+describe('SSE payload field types vs. designer/src/lib/api/types.ts (eieio-m9s.16)', () => {
+  const source = ts.createSourceFile(TYPES_PATH, readFileSync(TYPES_PATH, 'utf-8'), ts.ScriptTarget.Latest, true);
+  const interfaces = parseInterfaces();
+  const designerByEvent = sseInterfacesByEvent(interfaces, source);
+
+  for (const [event, iface] of designerByEvent) {
+    it(`\`${iface.name.text}\` (event \`${event}\`)'s field types agree with the daemon's wire fields`, () => {
+      const wireKinds = daemonSseTypes[event] ?? {};
+      const designerKinds = typeKindsOfSseInterface(iface);
+      const exceptions = new Set(
+        TYPE_KIND_EXCEPTIONS.filter(([exceptionEvent]) => exceptionEvent === event).map(([, field]) => field),
+      );
+
+      const mismatches = Object.entries(wireKinds)
+        .map(([field, wireKind]): string | null => {
+          if (exceptions.has(field)) return null;
+          const designerKind = designerKinds.get(field);
+          if (designerKind === undefined || designerKind === wireKind) return null;
+          return `\`${field}\`: the daemon sends \`${wireKind}\` for \`${event}\`, \`${iface.name.text}\` declares \`${designerKind}\``;
+        })
+        .filter((line): line is string => line !== null)
+        .sort();
+
+      expect(mismatches, mismatches.join('\n')).toEqual([]);
+    });
+  }
+
+  it('every type-kind exception is still necessary', () => {
+    const stale: string[] = [];
+    for (const [event, field] of TYPE_KIND_EXCEPTIONS) {
+      const iface = designerByEvent.get(event);
+      if (!iface) {
+        throw new Error(`TYPE_KIND_EXCEPTIONS names event \`${event}\`, which no TapStreamEvent/LogLineEvent member decodes`);
+      }
+      const wireKind = (daemonSseTypes[event] ?? {})[field];
+      const designerKind = typeKindsOfSseInterface(iface).get(field);
+      if (wireKind === undefined) {
+        stale.push(`(\`${event}\`, \`${field}\`): the daemon no longer types \`${field}\` at all — drop this exception`);
+      } else if (designerKind === wireKind) {
+        stale.push(
+          `(\`${event}\`, \`${field}\`): \`${iface.name.text}\` now declares \`${field}\` as \`${wireKind}\` too — drop this exception`,
+        );
+      }
+    }
+    expect(stale, stale.join('\n')).toEqual([]);
+  });
 });

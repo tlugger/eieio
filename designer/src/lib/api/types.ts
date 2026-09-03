@@ -435,9 +435,9 @@ export interface InstanceError {
 export interface TapSignalsEvent {
   /** @wire event */
   type: 'signals';
-  service?: string;
-  instance?: string;
-  at?: string;
+  service: string;
+  instance: string;
+  at: string;
   port?: string;
   /** DAEMON §9.6: "a batch that travelled the tapped connection", rendered — batches are
    * canonical CBOR on the wire (ABI §6.3.1) and an SSE `data:` field is text, so the daemon
@@ -452,9 +452,9 @@ export interface TapSignalsEvent {
 export interface ExprFailureEvent {
   /** @wire event */
   type: 'expr_failure';
-  service?: string;
-  instance?: string;
-  at?: string;
+  service: string;
+  instance: string;
+  at: string;
   port?: string;
   code: string;
   /** `undefined` when the daemon's `"start..end"` string did not parse — a caller
@@ -466,7 +466,7 @@ export interface ExprFailureEvent {
   signal?: number;
   /** `What::ExprFailure`'s own field (DAEMON §9.6): the descriptor's numeric property index —
    * the same index `manifest.schema.json`'s property list already numbers by, never a name. */
-  prop?: number;
+  prop: number;
 }
 
 /** A batch routed and not delivered (§6.2: drop-oldest, a full
@@ -475,9 +475,9 @@ export interface ExprFailureEvent {
 export interface DiscardedEvent {
   /** @wire event */
   type: 'discarded';
-  service?: string;
-  instance?: string;
-  at?: string;
+  service: string;
+  instance: string;
+  at: string;
   port?: string;
   reason: string;
 }
@@ -488,9 +488,9 @@ export interface DiscardedEvent {
 export interface LaggedEvent {
   /** @wire event */
   type: 'lagged';
-  service?: string;
-  instance?: string;
-  at?: string;
+  service: string;
+  instance: string;
+  at: string;
   port?: string;
   missed: number;
 }
@@ -510,8 +510,8 @@ export interface LogLineEvent {
   type: 'log';
   /** @wire at */
   timestamp: string;
-  service?: string;
-  instance?: string;
+  service: string;
+  instance: string;
   port?: string;
   level: string;
   message: string;

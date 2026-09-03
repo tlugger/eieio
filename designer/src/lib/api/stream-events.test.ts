@@ -6,10 +6,23 @@ function frame(event: string, data: unknown): SseFrame {
   return { event, data: JSON.stringify(data) };
 }
 
+/** DAEMON §9.6's always-present envelope. `Observation`'s `service`, `instance` and `at` are
+ * plain `String`s with no `skip_serializing_if`, so the daemon serializes all three on every
+ * frame — empty for a line no instance owns, never absent. These fixtures used to omit them,
+ * which made them frames no daemon has ever sent; `decodeTapFrame` now rejects such a frame
+ * rather than widening the fields to `undefined` (eieio-m9s.16), and that is what caught it. */
+const ENVELOPE = { service: 'kitchen', instance: 'b7k2', at: '2026-09-02T00:00:00Z' };
+
+/** A frame carrying the envelope plus this event's own fields. */
+function wire(event: string, own: Record<string, unknown>): SseFrame {
+  return frame(event, { ...ENVELOPE, event, ...own });
+}
+
 describe('decodeTapFrame', () => {
   it('decodes a signals event', () => {
-    expect(decodeTapFrame(frame('signals', { signals: [{ temp: 21.5 }] }))).toEqual({
+    expect(decodeTapFrame(wire('signals', { signals: [{ temp: 21.5 }] }))).toEqual({
       type: 'signals',
+      ...ENVELOPE,
       signals: [{ temp: 21.5 }],
     });
   });
@@ -17,13 +30,12 @@ describe('decodeTapFrame', () => {
   it('decodes an expr_failure event with EXPR §8 fields', () => {
     expect(
       decodeTapFrame(
-        frame('expr_failure', {
+        wire('expr_failure', {
           code: 'MISSING',
           // A string, as observe.rs formats it — this fixture used to be an object,
           // which is how the decoder came to accept a shape nothing sends.
           span: '3..8',
           message: 'key "temp" not present on this signal',
-          instance: 'f3m9',
           // The descriptor's numeric property index. A name was never on the wire —
           // `What::ExprFailure` has none to send.
           prop: 1,
@@ -31,10 +43,10 @@ describe('decodeTapFrame', () => {
       ),
     ).toEqual({
       type: 'expr_failure',
+      ...ENVELOPE,
       code: 'MISSING',
       span: { start: 3, end: 8 },
       message: 'key "temp" not present on this signal',
-      instance: 'f3m9',
       prop: 1,
     });
   });
@@ -45,19 +57,24 @@ describe('decodeTapFrame', () => {
     // line with it, which is why that line silently never said which property failed. The
     // wire's answer is `prop`, an index into the descriptor's property list.
     const decoded = decodeTapFrame(
-      frame('expr_failure', { code: 'MISSING', message: 'x', prop: 2, property: 'predicate' }),
+      wire('expr_failure', { code: 'MISSING', message: 'x', prop: 2, property: 'predicate' }),
     );
     expect(decoded).toEqual(expect.objectContaining({ type: 'expr_failure', prop: 2 }));
     expect(decoded).not.toHaveProperty('property');
   });
 
   it('decodes a lagged event, the exact-count sampling report', () => {
-    expect(decodeTapFrame(frame('lagged', { missed: 7 }))).toEqual({ type: 'lagged', missed: 7 });
+    expect(decodeTapFrame(wire('lagged', { missed: 7 }))).toEqual({
+      type: 'lagged',
+      ...ENVELOPE,
+      missed: 7,
+    });
   });
 
   it('decodes a discarded event', () => {
-    expect(decodeTapFrame(frame('discarded', { reason: 'drop-oldest' }))).toEqual({
+    expect(decodeTapFrame(wire('discarded', { reason: 'drop-oldest' }))).toEqual({
       type: 'discarded',
+      ...ENVELOPE,
       reason: 'drop-oldest',
     });
   });
@@ -71,7 +88,9 @@ describe('decodeTapFrame', () => {
   });
 
   it('rejects an expr_failure missing required fields rather than guessing', () => {
-    expect(decodeTapFrame(frame('expr_failure', { message: 'no code' }))).toBeNull();
+    expect(decodeTapFrame(wire('expr_failure', { message: 'no code' }))).toBeNull();
+    // And a frame missing the §9.6 envelope the daemon always sends is malformed too.
+    expect(decodeTapFrame(frame('signals', { signals: [] }))).toBeNull();
   });
 
   it('decodes the common Observation fields (service, instance, at, port) alongside a signals event', () => {
@@ -99,7 +118,7 @@ describe('decodeTapFrame', () => {
   });
 
   it('decodes the per-signal `signal` index on an expr_failure event', () => {
-    const decoded = decodeTapFrame(frame('expr_failure', { code: 'MISSING', message: 'x', prop: 1, signal: 4 }));
+    const decoded = decodeTapFrame(wire('expr_failure', { code: 'MISSING', message: 'x', prop: 1, signal: 4 }));
     expect(decoded).toEqual(expect.objectContaining({ type: 'expr_failure', signal: 4 }));
   });
 });
@@ -132,13 +151,20 @@ describe('decodeLogFrame', () => {
     expect(decodeLogFrame(frame('signals', {}))).toBeNull();
   });
 
-  it('omits instance for a daemon subsystem line that carries none', () => {
-    // `at`, not `timestamp` — the wire's own field name (see the describe block below). A
-    // fixture that says `timestamp` here would fail to decode at all and this assertion would
-    // pass vacuously against `undefined`, which is what happened before eieio-m9s.13.
-    const decoded = decodeLogFrame(frame('log', { at: 't', level: 'INFO', message: 'booted' }));
+  it('reports a daemon subsystem line as empty-attributed, not as missing a field', () => {
+    // This used to assert `instance` came back `undefined` for a line no instance owns, and
+    // that is not what the daemon does: `LogLayer::on_event` builds an `Identity::default()`
+    // and hands it to `Bus::log`, whose parameters are `&str`, so `Observation.service` and
+    // `.instance` are plain `String`s always serialized — empty, never absent. The old
+    // fixture was a frame no daemon has ever sent (eieio-m9s.16).
+    const decoded = decodeLogFrame(frame('log', { at: 't', level: 'INFO', message: 'booted', service: '', instance: '' }));
     expect(decoded).not.toBeNull();
-    expect(decoded?.instance).toBeUndefined();
+    expect(decoded?.instance).toBe('');
+    expect(decoded?.service).toBe('');
+  });
+
+  it('rejects a log frame missing the envelope the daemon always sends', () => {
+    expect(decodeLogFrame(frame('log', { at: 't', level: 'INFO', message: 'booted' }))).toBeNull();
   });
 });
 
@@ -192,10 +218,7 @@ describe('the shapes the daemon actually puts on the wire', () => {
 
   it('reports no span rather than a zero one when the string does not parse', () => {
     for (const span of ['', 'nonsense', '34..12', undefined, { start: 1, end: 2 }]) {
-      const decoded = decodeTapFrame({
-        event: 'expr_failure',
-        data: JSON.stringify({ code: 'MISSING', span, message: 'x', prop: 0 }),
-      });
+      const decoded = decodeTapFrame(wire('expr_failure', { code: 'MISSING', span, message: 'x', prop: 0 }));
       expect(decoded).toEqual(expect.objectContaining({ type: 'expr_failure' }));
       expect((decoded as { span?: unknown }).span).toBeUndefined();
     }

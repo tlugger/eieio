@@ -33,11 +33,27 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
     return null;
   }
 
-  // DAEMON §9.6: every payload carries these, regardless of which event it is — read once here
-  // rather than at each `case` below.
-  const service = typeof payload.service === 'string' ? payload.service : undefined;
-  const instance = typeof payload.instance === 'string' ? payload.instance : undefined;
-  const at = typeof payload.at === 'string' ? payload.at : undefined;
+  // DAEMON §9.6: every payload carries `service`, `instance` and `at`, regardless of which
+  // event it is — `Observation`'s fields are plain `String`, not `Option`, so the daemon
+  // always serializes them (empty for a line no instance owns, never absent). A frame without
+  // one is malformed, and this file's contract for a malformed frame is `null`, the same
+  // answer `code`/`message` already give.
+  //
+  // eieio-m9s.16: widening them to `T | undefined` instead is what forced `types.ts` to mark
+  // fields optional that the wire always sends, which the schema-parity check then had to
+  // carry as fourteen exceptions. A guard here is the fix for all of them at once — and it
+  // is the honest one, because a caller handed `service: undefined` cannot tell a malformed
+  // frame from a line the daemon attributed to nothing.
+  if (
+    typeof payload.service !== 'string' ||
+    typeof payload.instance !== 'string' ||
+    typeof payload.at !== 'string'
+  ) {
+    return null;
+  }
+  const { service, instance, at } = payload as { service: string; instance: string; at: string };
+  // `port` genuinely is optional: `Observation::port` is an `Option<String>` carrying
+  // `skip_serializing_if`, and an `expr_failure` never has one at all.
   const port = typeof payload.port === 'string' ? payload.port : undefined;
 
   switch (frame.event) {
@@ -51,7 +67,16 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
         signals: Array.isArray(payload.signals) ? (payload.signals as string[]) : [],
       };
     case 'expr_failure':
-      if (typeof payload.code !== 'string' || typeof payload.message !== 'string') return null;
+      // `prop` joins the guard: `What::ExprFailure::prop` is a `u32` with no
+      // `skip_serializing_if`, so the daemon always sends it. `signal` does carry one and is
+      // genuinely absent for a failure that is not per-signal.
+      if (
+        typeof payload.code !== 'string' ||
+        typeof payload.message !== 'string' ||
+        typeof payload.prop !== 'number'
+      ) {
+        return null;
+      }
       return {
         type: 'expr_failure',
         service,
@@ -62,7 +87,7 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
         span: parseSpan(payload.span),
         message: payload.message,
         signal: typeof payload.signal === 'number' ? payload.signal : undefined,
-        prop: typeof payload.prop === 'number' ? payload.prop : undefined,
+        prop: payload.prop,
       };
     case 'discarded':
       return {
@@ -98,15 +123,25 @@ export function decodeLogFrame(frame: SseFrame): LogLineEvent | null {
   // `at`, not `timestamp` — the daemon's own field name (DAEMON §9.6). This required
   // `timestamp` and so rejected every real log line, which the schema-parity check
   // (eieio-m9s.11) is what surfaced.
-  if (typeof payload.at !== 'string' || typeof payload.level !== 'string' || typeof payload.message !== 'string') {
+  // `service` and `instance` are guarded for the same reason as `decodeTapFrame`'s: a log
+  // line the daemon could not attribute to an instance carries `""`, never an absent field
+  // (`LogLayer::on_event` builds an `Identity::default()` and passes it through `Bus::log`,
+  // whose parameters are `&str`). So an absent one is a malformed frame, not a subsystem line.
+  if (
+    typeof payload.at !== 'string' ||
+    typeof payload.level !== 'string' ||
+    typeof payload.message !== 'string' ||
+    typeof payload.service !== 'string' ||
+    typeof payload.instance !== 'string'
+  ) {
     return null;
   }
   return {
     type: 'log',
     timestamp: payload.at,
     level: payload.level,
-    service: typeof payload.service === 'string' ? payload.service : undefined,
-    instance: typeof payload.instance === 'string' ? payload.instance : undefined,
+    service: payload.service,
+    instance: payload.instance,
     port: typeof payload.port === 'string' ? payload.port : undefined,
     message: payload.message,
   };

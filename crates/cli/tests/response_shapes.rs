@@ -135,7 +135,8 @@ use std::path::PathBuf;
 
 use eio_daemon::api::openapi::Document;
 use eio_daemon::observe::{Observation, What};
-use utoipa::openapi::{RefOr, Schema};
+use utoipa::openapi::schema::SchemaType;
+use utoipa::openapi::{RefOr, Schema, Type};
 use utoipa::{OpenApi as _, PartialSchema};
 
 /// How many nested-object hops [`flatten`] follows before it stops recursing.
@@ -342,6 +343,246 @@ fn required_of(name: &str, components: &BTreeMap<String, RefOr<Schema>>) -> BTre
     required_fields(schema, components)
 }
 
+// --- `"types"` / `"sseTypes"` (eieio-m9s.16) --------------------------------------------------
+//
+// `fields_of`/`sse_shapes` answer "does this field exist"; `required_of`/`sse_required` answer
+// "is it ever absent"; neither answers "is it the same *kind* of thing" — which is exactly how
+// the historical `span` bug (a batch's failed-expression span rendered as the string `"12..34"`
+// on the wire, decoded as `{start, end}` in `mock.ts`) would have kept passing a name-only diff:
+// `span` is a real field name on both sides, so nothing about a name-set ever saw the object-vs-
+// string drift. `types_of`/`sse_types` add a field's **kind** to the generated JSON, from the
+// same live `utoipa` schemas the rest of this file already reads.
+//
+// Scoped deliberately, not maximally: the five JSON Schema primitive families this repo's wire
+// shapes actually use — `string`, `number` (folding `integer` in with it; nothing here compares
+// `Vec<u8>` against `Vec<i32>`), `boolean`, `array` (never its item type), `object` (a nested
+// schema with properties, never further compared structurally here — `fields_of`'s own
+// dotted-path recursion already does that at the name level). Anything a schema resolves to that
+// isn't cleanly one of those five — `AnyValue` (`ApiError.detail`, deliberately untyped: DAEMON
+// §9.2 says its shape is per-slug), a real multi-branch `oneOf`/`anyOf` union, `AllOf` at a leaf
+// (none of this file's targets has one below the top level) — is left out of the emitted map
+// rather than guessed at. `designer/src/lib/api/schema-parity.test.ts`'s TypeScript side applies
+// the identical scope: a union of more than one substantive member, a type alias, or a reference
+// to another interface is "honestly unmappable" there too, and the comparison only ever runs over
+// paths *both* sides managed to give a kind for — see that file's own doc for the reasoning and
+// for the one field (`ExprFailureEvent.span`) and one field's required-ness
+// (`service`/`instance`/`at`/`prop`/`span` across the SSE payloads) this scope boundary and a
+// file outside this bead's ownership combine to make permanently, verifiably unfixable from here.
+fn primitive_kind(kind: &Type) -> Option<&'static str> {
+    match kind {
+        Type::String => Some("string"),
+        Type::Integer | Type::Number => Some("number"),
+        Type::Boolean => Some("boolean"),
+        Type::Array => Some("array"),
+        Type::Object => Some("object"),
+        // `Null` alone (never paired with a real type — that case is `SchemaType::Array` below)
+        // describes nothing comparable.
+        Type::Null => None,
+    }
+}
+
+/// Whether `schema` is JSON Schema's `{"type": "null"}` with nothing else — the shape utoipa
+/// renders for the `null` half of an `Option<SomeRef>` (a $ref can't fold `null` into its own
+/// `type` array the way a primitive can, so it becomes a two-branch `oneOf` instead;
+/// `ServiceSummary.error: Option<ApiError>` is this file's one live example).
+fn is_null_schema(schema: &RefOr<Schema>, components: &BTreeMap<String, RefOr<Schema>>) -> bool {
+    match schema {
+        RefOr::T(Schema::Object(object)) => {
+            object.schema_type == SchemaType::Type(Type::Null) && object.properties.is_empty()
+        }
+        RefOr::Ref(reference) => {
+            let name = reference
+                .ref_location
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            components
+                .get(name)
+                .is_some_and(|resolved| is_null_schema(resolved, components))
+        }
+        _ => false,
+    }
+}
+
+/// One schema's kind, in the five-family vocabulary this module's doc scopes to — `None` when it
+/// is not honestly one of them.
+fn schema_kind(
+    schema: &RefOr<Schema>,
+    components: &BTreeMap<String, RefOr<Schema>>,
+) -> Option<&'static str> {
+    match schema {
+        RefOr::Ref(reference) => {
+            let name = reference
+                .ref_location
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            components
+                .get(name)
+                .and_then(|resolved| schema_kind(resolved, components))
+        }
+        RefOr::T(Schema::Array(_)) => Some("array"),
+        RefOr::T(Schema::Object(object)) => match &object.schema_type {
+            SchemaType::Type(kind) => primitive_kind(kind),
+            // `Option<String>` etc. renders as `"type": ["string", "null"]` rather than folding
+            // the field into `required`'s absence alone — this is the nullable-primitive shape
+            // [`stripOptionality`]'s TypeScript counterpart handles for `T | undefined`, mirrored
+            // here for the wire side: exactly one non-`null` entry gives that entry's kind, two
+            // or more substantive entries is a real union this scope does not compare.
+            SchemaType::Array(kinds) => {
+                let mut concrete = kinds.iter().filter(|kind| **kind != Type::Null);
+                match (concrete.next(), concrete.next()) {
+                    (Some(only), None) => primitive_kind(only),
+                    _ => None,
+                }
+            }
+            SchemaType::AnyValue => None,
+        },
+        // The `Option<$ref>` shape [`is_null_schema`] documents: exactly one non-null branch
+        // recurses into that branch's own kind, the same "strip the null, map what remains" rule
+        // as the nullable-primitive case just above.
+        RefOr::T(Schema::OneOf(one_of)) => {
+            let mut concrete = one_of
+                .items
+                .iter()
+                .filter(|item| !is_null_schema(item, components));
+            match (concrete.next(), concrete.next()) {
+                (Some(only), None) => schema_kind(only, components),
+                _ => None,
+            }
+        }
+        // A real `oneOf`/`anyOf` union (more than one substantive branch) and `AllOf` at a leaf:
+        // no single kind to report, and none of this file's targeted schemas has one below the
+        // top level today — left absent rather than guessed at.
+        RefOr::T(_) => None,
+    }
+}
+
+/// [`flatten`]'s counterpart for kinds rather than names: the same dotted-path recursion through
+/// `Object` properties (a `$ref`/`Option<$ref>` costs no depth, stepping into a named property
+/// does — identical to `flatten`'s own rule), but recording [`schema_kind`] at each path instead
+/// of just the path's existence. A path [`flatten`] would include but this leaves out of `out`
+/// is not a bug: it means the field's kind was not honestly one of the five families, and the
+/// generated JSON simply carries no entry for it, which is this module's doc's "left out rather
+/// than guessed at" applied to the actual emission.
+fn flatten_types(
+    schema: &RefOr<Schema>,
+    prefix: &str,
+    components: &BTreeMap<String, RefOr<Schema>>,
+    depth: u8,
+    out: &mut BTreeMap<String, String>,
+) {
+    if !prefix.is_empty()
+        && let Some(kind) = schema_kind(schema, components)
+    {
+        out.insert(prefix.to_string(), String::from(kind));
+    }
+    if depth == 0 {
+        return;
+    }
+    match schema {
+        RefOr::Ref(reference) => {
+            let name = reference
+                .ref_location
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            if let Some(resolved) = components.get(name) {
+                flatten_types(resolved, prefix, components, depth, out);
+            }
+        }
+        RefOr::T(Schema::Object(object)) => {
+            for (name, property) in object.properties.iter() {
+                let path = dotted(prefix, name);
+                flatten_types(property, &path, components, depth - 1, out);
+            }
+        }
+        RefOr::T(Schema::OneOf(one_of)) => {
+            let mut concrete = one_of
+                .items
+                .iter()
+                .filter(|item| !is_null_schema(item, components));
+            if let (Some(only), None) = (concrete.next(), concrete.next()) {
+                flatten_types(only, prefix, components, depth, out);
+            }
+        }
+        RefOr::T(_) => {}
+    }
+}
+
+/// [`flatten_types`]'s entry point for one named schema, mirroring [`fields_of`]/[`required_of`].
+fn types_of(name: &str, components: &BTreeMap<String, RefOr<Schema>>) -> BTreeMap<String, String> {
+    let schema = components
+        .get(name)
+        .unwrap_or_else(|| panic!("no schema named `{name}` in the live document"));
+    let mut out = BTreeMap::new();
+    flatten_types(schema, "", components, MAX_DEPTH, &mut out);
+    out
+}
+
+/// [`common_observation_fields`]'s counterpart for kinds — flat, since DAEMON §9.6's SSE
+/// payloads are (`port`'s own kind is folded out of its `Option` the same way [`schema_kind`]
+/// does for any nullable primitive).
+fn common_observation_types(
+    components: &BTreeMap<String, RefOr<Schema>>,
+) -> BTreeMap<String, String> {
+    let RefOr::T(Schema::AllOf(all_of)) = Observation::schema() else {
+        panic!(
+            "`Observation::schema()` is no longer an `allOf` of `[What, {{common fields}}]` — \
+             see `common_observation_fields`'s identical panic message for why this assumption \
+             matters; find another route or STOP and report"
+        );
+    };
+    let mut out = BTreeMap::new();
+    for item in &all_of.items {
+        if matches!(item, RefOr::Ref(_)) {
+            continue;
+        }
+        flatten_types(item, "", components, MAX_DEPTH, &mut out);
+    }
+    out
+}
+
+/// [`sse_shapes`]'s counterpart for kinds, keyed the same way (by [`What::event`]'s name).
+fn sse_types(
+    components: &BTreeMap<String, RefOr<Schema>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let common = common_observation_types(components);
+
+    let RefOr::T(Schema::OneOf(one_of)) = What::schema() else {
+        panic!(
+            "`What::schema()` is no longer a `oneOf` — see `sse_shapes`'s identical panic \
+             message; find another route or STOP and report"
+        );
+    };
+    let examples = what_examples();
+    assert_eq!(
+        examples.len(),
+        one_of.items.len(),
+        "`What::schema()` has {} `oneOf` branches but `what_examples()` only names {} — \
+         `sse_shapes` already asserts this with the fuller message; find another route or STOP \
+         and report",
+        one_of.items.len(),
+        examples.len(),
+    );
+
+    let mut out = serde_json::Map::new();
+    for (branch, example) in one_of.items.iter().zip(examples.iter()) {
+        let mut types = common.clone();
+        flatten_types(branch, "", components, MAX_DEPTH, &mut types);
+        out.insert(
+            String::from(example.event()),
+            serde_json::Value::Object(
+                types
+                    .into_iter()
+                    .map(|(field, kind)| (field, serde_json::Value::String(kind)))
+                    .collect(),
+            ),
+        );
+    }
+    out
+}
+
 /// Per-event **required** field sets for the SSE payloads, the required-ness counterpart of
 /// [`sse_shapes`]: [`Observation`]'s own common fields that are not `Option` (`service`,
 /// `instance`, `event`, `at` — `port` is `Option<String>` and deliberately excluded) unioned
@@ -482,6 +723,10 @@ fn generated_path() -> PathBuf {
 /// `designer/src/lib/api/mock-parity.test.ts` and by nothing else: `schema-parity.test.ts`
 /// predates them and only ever reads the keys above by name, so adding entries here cannot
 /// perturb it (and is not itself sufficient reason to touch a file eieio-m9s.15 does not own).
+///
+/// `"types"` and `"sseTypes"` are eieio-m9s.16's addition, read by `schema-parity.test.ts` and by
+/// nothing else — new top-level keys, same rule: additive, and no reason for
+/// `mock-parity.test.ts` to ever read them.
 #[test]
 fn emit_response_shapes() {
     let components = components();
@@ -489,6 +734,7 @@ fn emit_response_shapes() {
 
     let mut shapes = serde_json::Map::new();
     let mut required = serde_json::Map::new();
+    let mut types = serde_json::Map::new();
     for name in targets {
         let fields = fields_of(name, &components);
         assert!(
@@ -509,6 +755,15 @@ fn emit_response_shapes() {
                     .collect(),
             ),
         );
+        types.insert(
+            String::from(name),
+            serde_json::Value::Object(
+                types_of(name, &components)
+                    .into_iter()
+                    .map(|(field, kind)| (field, serde_json::Value::String(kind)))
+                    .collect(),
+            ),
+        );
     }
     shapes.insert(
         String::from("sse"),
@@ -521,6 +776,11 @@ fn emit_response_shapes() {
     shapes.insert(
         String::from("sseRequired"),
         serde_json::Value::Object(sse_required(&components)),
+    );
+    shapes.insert(String::from("types"), serde_json::Value::Object(types));
+    shapes.insert(
+        String::from("sseTypes"),
+        serde_json::Value::Object(sse_types(&components)),
     );
 
     let path = generated_path();
