@@ -196,6 +196,22 @@ test-golden:
 build-golden:
     cargo build --release --manifest-path examples/blocks/Cargo.toml --target {{ guest_target }}
 
+# Emit the daemon's response shapes for the Designer's parity checks, up front.
+#
+# `ci` depends on this for an ordering reason with teeth. Both parity suites regenerate the
+# file themselves in `beforeAll`, because `ci`'s stages run in parallel and a check that
+# trusted a stale file would be worse than the drift it catches. But that shells out to cargo
+# from inside vitest while the `test` stage's own cargo holds the target-directory lock — so on
+# a cold runner the hook waits out the whole workspace build and times out. That is how CI
+# failed on 2026-09-03 with "Hook timed out in 120000ms".
+#
+# Generating here, before anything runs in parallel, means the file is fresh AND the suites can
+# skip their own invocation — `ci` sets EIO_SHAPES_PREGENERATED for exactly that, and the
+# suites fall back to regenerating when it is absent, so a bare `npm test` is still
+# self-sufficient.
+shapes:
+    cargo test -p eio-cli --test response_shapes
+
 # See the comment block at the top of this file for the target rationale.
 
 # Prove the ★ crates still build without std.
@@ -261,11 +277,14 @@ publish-dry-run:
 # stage did.
 
 # The one command CI runs: builds, then fmt/lint/test/nostd/guest concurrently, then the golden blocks.
-ci: build build-golden
+ci: build build-golden shapes
     #!/usr/bin/env bash
     set -euo pipefail
     logdir="$(mktemp -d)"
     trap 'rm -rf "$logdir"' EXIT
+    # `shapes` (a dependency above) has already written the generated file, so the Designer's
+    # parity suites must not shell out to cargo again — see the `shapes` recipe for why.
+    export EIO_SHAPES_PREGENERATED=1
 
     # `test-doc` only when nextest is present: without it, `test` already ran doctests
     # via `cargo test --workspace`, and scheduling both would run them twice.
