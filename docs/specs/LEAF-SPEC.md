@@ -80,6 +80,8 @@ So a leaf's budget is a **watchdog**, not fuel: a hardware timer armed before en
 
 A CBOR decoder needs a nesting bound or a hostile batch is a stack overflow, and a stack overflow on an MCU is not a caught error. **That bound MUST be at least the configured `MAX_DEPTH`.** Setting it lower makes a value the expression language is required to handle undecodable, which turns an EXPR §9 budget into a decode failure with a different error code, on one host only — the shape of divergence ABI §13 exists to prevent.
 
+**The MUST is a floor, and a leaf should not sit on it** (eieio-x7g.7). A leaf's *evaluation* budgets belong at EXPR §9's floors, but its decode bound is not the same kind of number: it decides which values a leaf can receive at all, so lowering it toward `MAX_DEPTH` makes a batch that a daemon routes without complaint undecodable on a leaf — divergence again, in the other direction, bought for stack headroom. **A leaf therefore matches the daemon's decode bound rather than its own floors**, and both pass `eio-signal`'s `MAX_DEPTH` today. That may be the wrong trade on a real target, where 128 levels of recursive decode is exactly the overflow this section exists to bound; but it is a decision about interoperability as well as safety, and it needs a measured stack, so it is §11's memory-budget item and not a knob to turn early.
+
 ## 5. State on flash
 
 `eio:state` (ABI §7.2) is backed by flash through `host-core`'s `StateStore` trait — the same three functions, `get`/`put`/`del`, the daemon implements against redb (DAEMON §10). The trait is the boundary, so the host functions that decode `(key, key_len, buf, cap)` and apply ABI §8's size convention are shared code and cannot diverge.

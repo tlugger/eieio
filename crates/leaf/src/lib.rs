@@ -76,12 +76,28 @@ pub struct Instance {
     pub timers: Option<timer::Scheduler>,
 }
 
-/// A leaf's own budgets (LEAF §4): EXPR §9's floors, not the reference defaults.
+/// A leaf's own budgets (LEAF §4): EXPR §9's floors for evaluation, and the daemon's own
+/// decode bound.
 ///
-/// "A budget floor that only holds on a generous host is not a floor" (LEAF §9.2), so this
-/// bring-up runs its properties and its `emit` decode bound at the floor rather than at
-/// [`EvalLimits::DEFAULT`] — the daemon's choice — precisely so that a floor violation would
-/// show up here first.
+/// "A budget floor that only holds on a generous host is not a floor" (LEAF §9.2), so the
+/// *evaluation* limits are [`EvalLimits::FLOORS`] rather than the daemon's
+/// [`EvalLimits::DEFAULT`], precisely so that a floor violation shows up here first. That is
+/// now measured rather than hoped for: `tests/expr_vectors.rs`, `tests/properties_vectors.rs`
+/// and `tests/cbor_vectors.rs` run the whole of `expr-tests/` at these settings.
+///
+/// **The decode bound is deliberately not at the floor, and this comment used to claim it
+/// was** (eieio-x7g.7). `eio_signal::MAX_DEPTH` is 128; the floor, `MIN_DEPTH`, is 32. The
+/// reason to keep 128 is host parity: `crates/daemon/src/node.rs` passes the same constant,
+/// so a batch decodes on a leaf exactly when it decodes on a daemon. Lowering this to 32
+/// would make a value that a daemon routes without complaint undecodable on a leaf — which
+/// is the divergence ABI §13 calls a conformance bug by definition, bought in exchange for
+/// stack headroom.
+///
+/// That trade may still be worth making on real hardware, where 128 levels of recursive
+/// decode is exactly the stack overflow LEAF §4.1 exists to bound and "not a caught error"
+/// on an MCU. But it is a per-target decision that needs a measured stack, which is LEAF
+/// §11's memory-budget expansion item, and it is a decision about *interoperability*, not
+/// only about safety. Until then the leaf agrees with the daemon.
 pub fn leaf_budgets() -> ExprBudgets {
     ExprBudgets::new(EvalLimits::FLOORS, eio_signal::MAX_DEPTH)
 }
