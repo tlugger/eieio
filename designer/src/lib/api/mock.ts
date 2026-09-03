@@ -840,12 +840,37 @@ export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHand
     return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   }
 
+  // eieio-m9s.15: `service`, `instance`, `event` and `at` are DAEMON §9.6's *always*-present
+  // fields (`Observation`'s own, none of them `Option` — `crates/daemon/src/observe.rs`) —
+  // every frame below now carries them, where until this bead only `expr_failure` happened to
+  // (and even it was missing `service`/`event`). `mock-parity.test.ts` is what caught the gap:
+  // a field-name-only diff cannot (`instance`/`service` were never *wrong* names, just missing
+  // frames), which is exactly why that check also compares against the daemon's own
+  // required-field list, not only its field-name set.
   function tickOnce() {
     tick += 1;
+    const at = new Date().toISOString();
+    // The connection's source instance — the same one every `signals`/`expr_failure` observation
+    // below is either emitted *from* (`signals`) or, for `expr_failure`, whose downstream
+    // property the failure belongs to (`parsed!.toId`, kept separate below).
+    const instance = parsed?.fromId ?? '';
     if (tick % 5 === 0 && dependency) {
-      dispatch(sseFrame('signals', { signals: [sampleSignal(sourceManifest, parsed!.fromPort, tick, dependency.field)] }));
+      dispatch(
+        sseFrame('signals', {
+          service: tap.service,
+          instance,
+          event: 'signals',
+          at,
+          port: parsed!.fromPort,
+          signals: [sampleSignal(sourceManifest, parsed!.fromPort, tick, dependency.field)],
+        }),
+      );
       dispatch(
         sseFrame('expr_failure', {
+          service: tap.service,
+          instance: parsed!.toId,
+          event: 'expr_failure',
+          at,
           code: 'MISSING',
           // A STRING, `"start..end"` — DAEMON §9.6, and the shape `parseSpan` reads. This
           // fixture emitted `{start, end}` until eieio-m9s.13: the same object-vs-string
@@ -853,18 +878,39 @@ export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHand
           // every mock failure decoded to no span at all.
           span: `${dependency.start}..${dependency.start + dependency.field.length + 1}`,
           message: `key "${dependency.field}" not present on this signal (EXPR §6: missing data is an error, not null)`,
-          instance: parsed!.toId,
-          at: new Date().toISOString(),
           prop: dependency.prop,
+          // No `port`: `What::ExprFailure` never carries one (`observe.rs`'s `observe()` always
+          // constructs it with `port: None` — a property failure is not itself a signal on a
+          // port, the batch that triggered it is what already reported one).
         }),
       );
       return;
     }
     if (tick % 11 === 0) {
-      dispatch(sseFrame('lagged', { missed: 3 }));
+      dispatch(
+        sseFrame('lagged', {
+          // `crates/daemon/src/api/sse.rs`'s synthetic `Lagged` observation carries empty
+          // strings for both — a reader's own lag is not about any one instance, so there is no
+          // real value to put here, and an empty string is what the daemon actually sends.
+          service: '',
+          instance: '',
+          event: 'lagged',
+          at,
+          missed: 3,
+        }),
+      );
       return;
     }
-    dispatch(sseFrame('signals', { signals: [sampleSignal(sourceManifest, parsed?.fromPort ?? 'out', tick)] }));
+    dispatch(
+      sseFrame('signals', {
+        service: tap.service,
+        instance,
+        event: 'signals',
+        at,
+        port: parsed?.fromPort ?? 'out',
+        signals: [sampleSignal(sourceManifest, parsed?.fromPort ?? 'out', tick)],
+      }),
+    );
   }
 
   handlers.onStatus('connecting');
@@ -954,7 +1000,15 @@ export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStrea
           ? 'mailbox above 80% capacity'
           : 'processed 1 signal';
     return `event: log\ndata: ${JSON.stringify({
-      timestamp: new Date(Date.now() - offsetMs).toISOString(),
+      // eieio-m9s.15: this was `timestamp` — a field name `decodeLogFrame` never reads
+      // (`a36f7a7` already repointed it at the wire's own `at`) and the daemon never sends
+      // (DAEMON §9.6). Every mock log line has therefore always failed to decode: `timestamp`
+      // is dropped as unrecognized and `at` was simply missing, so `decodeLogFrame`'s own
+      // `typeof payload.at !== 'string'` guard rejected every one of them. Found by
+      // `mock-parity.test.ts`, which is also the first thing in this repository that ever
+      // exercised `streamLogs` at all.
+      at: new Date(Date.now() - offsetMs).toISOString(),
+      event: 'log',
       level,
       service: target?.service,
       instance: target?.instance,

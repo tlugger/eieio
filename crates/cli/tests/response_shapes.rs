@@ -111,6 +111,24 @@
 //! instead gained a real `prop` field alongside the untouched, `@legacy`-tagged `property` —
 //! excluded from the comparison rather than fixed, and reported as follow-up (see `types.ts`'s
 //! doc on `ExprFailureEvent.property` for the detail).
+//!
+//! # `"required"` / `"sseRequired"` (eieio-m9s.15)
+//!
+//! `designer/src/lib/api/mock.ts` is a *third* statement of every wire shape above — it
+//! manufactures the SSE frames and API responses the Designer is developed and demoed against —
+//! and nothing compared it to the two schema-parity already reconciles. A field-name diff alone
+//! (this file's `fields_of`/`sse_shapes`) catches half of that: a field the mock invents. It
+//! cannot catch the other half, a field the daemon *always* sends that the mock omits, because
+//! DAEMON §9.6 and ABI §11 both make a *sometimes*-present field absent rather than null, so a
+//! flat field-name set cannot distinguish "legitimately absent this time" from "never sent at
+//! all". `required_of`/`sse_required` add exactly that: each target schema's and each SSE
+//! event's own **required** field names (`Schema::Object.required`, i.e. not `Option` — `port`
+//! and `ExprFailure`'s `signal` are the two fields this excludes on purpose), so
+//! `mock-parity.test.ts` can assert "every field the mock invents is one the daemon has" and
+//! "every field the daemon always sends is one the mock actually included" as two separate
+//! rules, never conflating an optional field's occasional absence with an invented or a missing
+//! one. See that file's own module doc for the mechanism (it exercises the mock rather than
+//! reading its source, and says plainly which emitters it reaches).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -280,6 +298,108 @@ fn common_observation_fields(components: &BTreeMap<String, RefOr<Schema>>) -> BT
     out
 }
 
+/// One schema's own **required** field names — `Schema::Object.required`, top-level only, not
+/// recursed the way [`flatten`] is.
+///
+/// eieio-m9s.15: the field-name sets [`fields_of`]/[`sse_shapes`] emit answer "did the mock
+/// invent a field the daemon never sends" but not "did it omit one the daemon always does" —
+/// DAEMON §9.6 and ABI §11 both make a *sometimes*-present field absent rather than null, so
+/// `designer/src/lib/api/mock-parity.test.ts`'s companion rule needs to know which fields are
+/// **never** absent before it can complain about one that is. Top-level only, because every
+/// schema this file targets is one the mock either populates a nested object of in full or
+/// omits entirely — nothing here needs "is `budgets.expr_max_fuel` required given `budgets` is
+/// present" the way a partially-populated nested object would.
+fn required_fields(
+    schema: &RefOr<Schema>,
+    components: &BTreeMap<String, RefOr<Schema>>,
+) -> BTreeSet<String> {
+    match schema {
+        RefOr::Ref(reference) => {
+            let name = reference
+                .ref_location
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            components
+                .get(name)
+                .map(|resolved| required_fields(resolved, components))
+                .unwrap_or_default()
+        }
+        RefOr::T(Schema::Object(object)) => object.required.iter().cloned().collect(),
+        // `oneOf`/`anyOf`/`allOf` and anything else: none of [`emit_response_shapes`]'s named
+        // targets is itself a composition at the top level (unlike `Observation`/`What`, which
+        // [`sse_required`] below walks by hand for exactly that reason), so an empty set here
+        // would be a bug in which schema this was called on, not a case to render.
+        _ => BTreeSet::new(),
+    }
+}
+
+/// [`required_fields`]'s entry point for one named schema, mirroring [`fields_of`].
+fn required_of(name: &str, components: &BTreeMap<String, RefOr<Schema>>) -> BTreeSet<String> {
+    let schema = components
+        .get(name)
+        .unwrap_or_else(|| panic!("no schema named `{name}` in the live document"));
+    required_fields(schema, components)
+}
+
+/// Per-event **required** field sets for the SSE payloads, the required-ness counterpart of
+/// [`sse_shapes`]: [`Observation`]'s own common fields that are not `Option` (`service`,
+/// `instance`, `event`, `at` — `port` is `Option<String>` and deliberately excluded) unioned
+/// with whichever of a `What` variant's fields are not `Option` either (`ExprFailure`'s `signal`
+/// is the one per-variant exclusion: DAEMON §9.6 names it present "when the failure was
+/// per-signal", so it is never in this set).
+fn sse_required(
+    components: &BTreeMap<String, RefOr<Schema>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let RefOr::T(Schema::AllOf(all_of)) = Observation::schema() else {
+        panic!(
+            "`Observation::schema()` is no longer an `allOf` of `[What, {{common fields}}]` — \
+             see `common_observation_fields`'s identical panic message for why this assumption \
+             matters; find another route or STOP and report"
+        );
+    };
+    let mut common = BTreeSet::new();
+    for item in &all_of.items {
+        if matches!(item, RefOr::Ref(_)) {
+            continue;
+        }
+        common.extend(required_fields(item, components));
+    }
+
+    let RefOr::T(Schema::OneOf(one_of)) = What::schema() else {
+        panic!(
+            "`What::schema()` is no longer a `oneOf` — see `sse_shapes`'s identical panic \
+             message; find another route or STOP and report"
+        );
+    };
+    let examples = what_examples();
+    assert_eq!(
+        examples.len(),
+        one_of.items.len(),
+        "`What::schema()` has {} `oneOf` branches but `what_examples()` only names {} — \
+         `sse_shapes` already asserts this with the fuller message; find another route or STOP \
+         and report",
+        one_of.items.len(),
+        examples.len(),
+    );
+
+    let mut out = serde_json::Map::new();
+    for (branch, example) in one_of.items.iter().zip(examples.iter()) {
+        let mut required = common.clone();
+        required.extend(required_fields(branch, components));
+        out.insert(
+            String::from(example.event()),
+            serde_json::Value::Array(
+                required
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    out
+}
+
 /// Per-event field sets for the SSE payloads (DAEMON §9.6): `{"signals": [...], ...}`, one entry
 /// per [`What`] variant, keyed by the event name [`What::event`] reports for it — see this
 /// module's doc for the derivation and why a field-name diff needed this rather than the
@@ -357,12 +477,18 @@ fn generated_path() -> PathBuf {
 /// generated JSON — they do not have to be the daemon's Rust type name, only a name
 /// `schema-parity.test.ts` and this file agree on. They are the Rust names here because there
 /// is no reason to invent different ones.
+///
+/// `"required"` and `"sseRequired"` are eieio-m9s.15's addition, read by
+/// `designer/src/lib/api/mock-parity.test.ts` and by nothing else: `schema-parity.test.ts`
+/// predates them and only ever reads the keys above by name, so adding entries here cannot
+/// perturb it (and is not itself sufficient reason to touch a file eieio-m9s.15 does not own).
 #[test]
 fn emit_response_shapes() {
     let components = components();
     let targets = ["NodeInfo", "TapRequest", "ApiError", "ServiceSummary"];
 
     let mut shapes = serde_json::Map::new();
+    let mut required = serde_json::Map::new();
     for name in targets {
         let fields = fields_of(name, &components);
         assert!(
@@ -374,10 +500,27 @@ fn emit_response_shapes() {
             String::from(name),
             serde_json::Value::Array(fields.into_iter().map(serde_json::Value::String).collect()),
         );
+        required.insert(
+            String::from(name),
+            serde_json::Value::Array(
+                required_of(name, &components)
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
     }
     shapes.insert(
         String::from("sse"),
         serde_json::Value::Object(sse_shapes(&components)),
+    );
+    shapes.insert(
+        String::from("required"),
+        serde_json::Value::Object(required),
+    );
+    shapes.insert(
+        String::from("sseRequired"),
+        serde_json::Value::Object(sse_required(&components)),
     );
 
     let path = generated_path();
