@@ -36,7 +36,7 @@ interface NodeWithServices {
   services: ServiceSummary[];
 }
 
-function renderTree(nodes: NodeWithServices[]) {
+function renderTree(nodes: NodeWithServices[], overrides: Partial<Record<string, unknown>> = {}) {
   const target = document.createElement('div');
   document.body.appendChild(target);
   const sys = system(1);
@@ -47,6 +47,19 @@ function renderTree(nodes: NodeWithServices[]) {
       nodesBySystem: new Map([[sys.id, nodes]]),
       selected: null,
       onSelectService: () => {},
+      // eieio-m9s.34: onboarding props this component now requires. Tests that only care about
+      // the leaf/down-daemon rendering distinction never touch these, so every one is a no-op —
+      // see `AddNodeModal.test.ts` for the tests that actually exercise the onboarding forms.
+      registries: [],
+      onCreateSystem: () => {},
+      onDeleteSystem: () => {},
+      onAddNode: () => {},
+      onDeleteNode: () => {},
+      onProbeNode: () => {},
+      onAddRegistry: () => {},
+      onDeleteRegistry: () => {},
+      onboardingBusy: false,
+      ...overrides,
     },
   });
   return { target, exports };
@@ -82,6 +95,40 @@ describe('NavigatorTree — leaf versus down-daemon rendering (eieio-m9s.28)', (
 
     expect(target.querySelectorAll('.tree__leaf-note').length).toBe(0);
     expect(target.querySelectorAll('.tree__unreachable').length).toBe(0);
+
+    unmount(exports);
+  });
+});
+
+// eieio-m9s.34: DESIGNER §3.1 — "the proxy and `POST /api/nodes/{id}/probe` both refuse a leaf
+// by name rather than dialling it." A leaf serves no management API at all, so a probe button on
+// one would always fail; the sub-plan calls that "worse than none" and asks for exactly this
+// negative proof, alongside the positive one showing a daemon keeps the affordance.
+describe('NavigatorTree — a leaf is never offered a probe (eieio-m9s.34)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('offers a probe button for a daemon', () => {
+    const daemon = node({ id: 1, class: 'daemon' });
+    const { target, exports } = renderTree([{ node: daemon, services: [] }]);
+
+    const probeButtons = Array.from(target.querySelectorAll('button')).filter(
+      (b) => b.getAttribute('aria-label') === `Probe ${daemon.name}`,
+    );
+    expect(probeButtons.length).toBe(1);
+
+    unmount(exports);
+  });
+
+  it('never renders a probe button for a leaf', () => {
+    const leaf = node({ id: 2, class: 'leaf' });
+    const { target, exports } = renderTree([{ node: leaf, services: [] }]);
+
+    const probeButtons = Array.from(target.querySelectorAll('button')).filter(
+      (b) => b.getAttribute('aria-label') === `Probe ${leaf.name}`,
+    );
+    expect(probeButtons.length).toBe(0);
 
     unmount(exports);
   });

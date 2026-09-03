@@ -145,6 +145,11 @@ pub fn routes() -> Vec<Route> {
             "/registries",
             get(api::registries::list).post(api::registries::create),
         ),
+        (
+            &["DELETE"],
+            "/registries/{id}",
+            delete(api::registries::delete),
+        ),
         (&["GET"], "/blocks", get(api::blocks::list)),
         // `{*reference}` and not `{reference}`: a block reference contains slashes
         // (`ghcr.io/tlugger/temp-sensor:1.0.0`), and §2 keys the cache by the whole of it.

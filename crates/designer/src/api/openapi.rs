@@ -55,6 +55,7 @@ use utoipa::OpenApi;
         super::nodes::probe,
         super::registries::list,
         super::registries::create,
+        super::registries::delete,
         super::blocks::list,
         super::blocks::put,
         super::blocks::delete,

@@ -24,7 +24,10 @@ fn main() {
     if let Err(error) = std::fs::create_dir_all(&dist) {
         // Not a hard failure: if the directory cannot be created, rust-embed's own error is
         // clearer about what is wrong than anything this could say.
-        println!("cargo::warning=could not create {}: {error}", dist.display());
+        println!(
+            "cargo::warning=could not create {}: {error}",
+            dist.display()
+        );
     }
     println!("cargo::rerun-if-changed=build.rs");
 }

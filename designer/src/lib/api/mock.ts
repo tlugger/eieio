@@ -56,12 +56,16 @@ import type {
   ApiError,
   BlockInstance,
   BlockManifest,
+  Capability,
   Connection,
   LogFilter,
   LogStreamHandlers,
+  NewNodeInput,
+  NewRegistryInput,
   NodeInfo,
   NodeSummary,
   PutServiceResult,
+  RegistrySummary,
   ServiceDefinition,
   ServiceEditOperation,
   ServiceEditResult,
@@ -344,6 +348,180 @@ export async function listSystems(): Promise<SystemSummary[]> {
 
 export async function listNodes(systemId: number): Promise<NodeSummary[]> {
   return delay(NODES.filter((n) => n.system_id === systemId));
+}
+
+// --- Onboarding: creating Systems, nodes and registries (eieio-m9s.34) ---------------------
+//
+// `SYSTEMS`, `NODE_FIXTURES` and `NODES` are all mutated in place below (`.push`/`.splice`), the
+// same posture `SERVICES`/`TAPS` already keep elsewhere in this file — a mock that only ever read
+// its fixtures could not stand in for a registry an operator actually adds to. `NODE_FIXTURES`
+// and `NODES` are kept in sync by hand on every mutation because they are not the same array
+// (`NODES`, above, is a one-time `.map()` that strips `slug`/`actualLimits`), the same fact that
+// fixture's own doc comment already explains for the read side.
+
+function nodeSummaryOf(fixture: NodeFixture): NodeSummary {
+  const { slug: _slug, actualLimits: _actualLimits, ...summary } = fixture;
+  return summary;
+}
+
+let nextSystemId = SYSTEMS.reduce((max, s) => Math.max(max, s.id), 0) + 1;
+
+/** `POST /api/systems` (DESIGNER §3.1). */
+export async function createSystem(name: string): Promise<SystemSummary> {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    throw new Error('a system needs a non-empty name (DESIGNER §3.1)');
+  }
+  const system: SystemSummary = { id: nextSystemId++, name: trimmed };
+  SYSTEMS.push(system);
+  return delay(system);
+}
+
+/** `DELETE /api/systems/{id}` (DESIGNER §3.1). Cascades to every node filed under it
+ *  (`systems.rs`'s own doc: the schema's `ON DELETE CASCADE`) — this registry's address book
+ *  entries, never a node's own configuration (SCOPE §3.8). */
+export async function deleteSystem(id: number): Promise<void> {
+  const index = SYSTEMS.findIndex((s) => s.id === id);
+  if (index < 0) {
+    throw new Error(`no system with id ${id}`);
+  }
+  SYSTEMS.splice(index, 1);
+  for (let i = NODE_FIXTURES.length - 1; i >= 0; i--) {
+    if (NODE_FIXTURES[i]!.system_id !== id) continue;
+    const [removed] = NODE_FIXTURES.splice(i, 1);
+    const nodesIndex = NODES.findIndex((n) => n.id === removed!.id);
+    if (nodesIndex >= 0) NODES.splice(nodesIndex, 1);
+    ROUTE_KEY_BY_NODE_ID.delete(removed!.id);
+  }
+  return delay(undefined);
+}
+
+let nextNodeId = NODE_FIXTURES.reduce((max, n) => Math.max(max, n.id), 0) + 1;
+let nodeSlugCounter = 0;
+
+/**
+ * `POST /api/nodes` (DESIGNER §3.1). `input.token` is checked (a real registration needs a
+ * non-empty one, same as the real handler's own validation) and then discarded — this mock has
+ * no `token` field on `NodeFixture` to keep it in, deliberately, the same "there is no
+ * serialization in which it can appear" guarantee `NodeSummary`'s own doc states for the wire.
+ */
+export async function addNode(input: NewNodeInput): Promise<NodeSummary> {
+  const name = input.name.trim();
+  const address = input.address.trim();
+  const token = (input.token ?? '').trim();
+  if (!name || !address || !token) {
+    throw new Error('a node needs a non-empty name, address and token (DESIGNER §3.1)');
+  }
+  const nodeClass = input.class ?? 'daemon';
+  if (nodeClass !== 'daemon' && nodeClass !== 'leaf') {
+    throw new Error(`"${nodeClass}" is not a node class; expected "daemon" or "leaf" (DESIGNER §2)`);
+  }
+  if (!SYSTEMS.some((s) => s.id === input.system_id)) {
+    throw new Error(`could not register this node (is system_id ${input.system_id} a real system?)`);
+  }
+  const id = nextNodeId++;
+  nodeSlugCounter += 1;
+  const fixture: NodeFixture = {
+    id,
+    slug: `node-mock-${nodeSlugCounter}`,
+    system_id: input.system_id,
+    name,
+    class: nodeClass,
+    address,
+    // No `last_seen`/`capabilities`/`limits` — absent, not defaulted, until a probe succeeds
+    // (DESIGNER §3.1's amendment, the same rule `closet-relay`'s own fixture entry models).
+    actualLimits: { max_payload: 65536, max_batch: 256 },
+  };
+  NODE_FIXTURES.push(fixture);
+  ROUTE_KEY_BY_NODE_ID.set(id, fixture.slug);
+  const summary = nodeSummaryOf(fixture);
+  NODES.push(summary);
+  return delay(summary);
+}
+
+/** `DELETE /api/nodes/{id}` (DESIGNER §3.1). */
+export async function deleteNode(id: number): Promise<void> {
+  const index = NODE_FIXTURES.findIndex((n) => n.id === id);
+  if (index < 0) {
+    throw new Error(`no node with id ${id}`);
+  }
+  NODE_FIXTURES.splice(index, 1);
+  const nodesIndex = NODES.findIndex((n) => n.id === id);
+  if (nodesIndex >= 0) NODES.splice(nodesIndex, 1);
+  ROUTE_KEY_BY_NODE_ID.delete(id);
+  return delay(undefined);
+}
+
+/**
+ * `POST /api/nodes/{id}/probe` (DESIGNER §3.1). Refuses a leaf by id — not through
+ * `normalizeNodeRouteKey` (that function's refusal is worded for the *proxied* surface, which
+ * this call is not: `probeNode` takes the registry's own numeric id, the same id
+ * `crates/designer/src/api/nodes.rs`'s `probe` takes as a path parameter, never the slug the
+ * proxied functions above resolve) — with the real handler's own wording, so a caller checking
+ * the message sees the same text either way.
+ *
+ * A node this mock has never seen a `NODE_INFO` fixture for (every node `addNode` creates, above)
+ * still gets a plausible, honest answer rather than failing as unreachable: `['state', 'timer']`
+ * is what every real daemon in this repository actually implements
+ * (`crates/daemon/src/instance.rs`'s `IMPLEMENTED_CAPABILITIES`), so it is what a freshly
+ * onboarded mock daemon reports too, over whatever limits it was created with.
+ */
+export async function probeNode(id: number): Promise<NodeSummary> {
+  const fixture = NODE_FIXTURES.find((n) => n.id === id);
+  if (!fixture) {
+    throw new Error(`no node with id ${id}`);
+  }
+  if (fixture.class === 'leaf') {
+    throw new Error(
+      `node ${id} is leaf-class and answers no probe; it serves no management API at all (DESIGNER §7)`,
+    );
+  }
+  const info = NODE_INFO[fixture.slug];
+  fixture.last_seen = new Date().toISOString();
+  fixture.capabilities = (info?.capabilities as Capability[] | undefined) ?? ['state', 'timer'];
+  fixture.limits = info?.limits ?? fixture.actualLimits;
+  const summary = nodeSummaryOf(fixture);
+  const nodesIndex = NODES.findIndex((n) => n.id === id);
+  if (nodesIndex >= 0) {
+    NODES[nodesIndex] = summary;
+  } else {
+    NODES.push(summary);
+  }
+  return delay(summary, 150);
+}
+
+const REGISTRIES: RegistrySummary[] = [];
+let nextRegistryId = 1;
+
+/** `GET /api/registries`'s fixture — see `backend.listRegistries`. */
+export async function listRegistries(): Promise<RegistrySummary[]> {
+  return REGISTRIES.map((registry) => ({ ...registry }));
+}
+
+/** `POST /api/registries` (DESIGNER §3.1). `input.auth`, when given, is checked for presence
+ *  only and then discarded — `RegistrySummary` has no field for it, matching the real
+ *  `RegistryOut`'s own doc: write-only, never answered back. */
+export async function addRegistry(input: NewRegistryInput): Promise<RegistrySummary> {
+  const url = input.url.trim();
+  if (!url) {
+    throw new Error('a registry needs a non-empty url (DESIGNER §3.1)');
+  }
+  const registry: RegistrySummary = { id: nextRegistryId++, url };
+  REGISTRIES.push(registry);
+  return delay(registry);
+}
+
+/** `DELETE /api/registries/{id}` — see `./backend.ts`'s own doc on `deleteRegistry` for why the
+ *  real backend has no such route yet. The mock still implements it, because a fixture set that
+ *  cannot delete what it just let an operator add would be a worse stand-in than one slightly
+ *  ahead of a backend gap this bead's file list cannot close. */
+export async function deleteRegistry(id: number): Promise<void> {
+  const index = REGISTRIES.findIndex((r) => r.id === id);
+  if (index < 0) {
+    throw new Error(`no registry with id ${id}`);
+  }
+  REGISTRIES.splice(index, 1);
+  return delay(undefined);
 }
 
 // --- Session (POST/DELETE /api/session, DESIGNER §3.1) -------------------

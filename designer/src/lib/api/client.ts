@@ -33,7 +33,14 @@
 // it never reaches the browser, and that stays true regardless of what
 // this file's bodies end up doing.
 
-import type { BlockManifest, NodeSummary, SystemSummary } from './types';
+import type {
+  BlockManifest,
+  NewNodeInput,
+  NewRegistryInput,
+  NodeSummary,
+  RegistrySummary,
+  SystemSummary,
+} from './types';
 import * as backend from './backend';
 import * as mock from './mock';
 import { SessionRequiredError } from './backend';
@@ -132,6 +139,59 @@ export function listNodes(systemId: number): Promise<NodeSummary[]> {
  *  `./backend.ts`'s own doc for what the real endpoint's row shape is before flattening. */
 export function listBlockManifests(): Promise<BlockManifest[]> {
   return useRealBackend() ? watchSession(backend.listBlockManifests()) : mock.listBlockManifests();
+}
+
+// --- Onboarding: creating Systems, nodes and registries (eieio-m9s.34) --------------------
+//
+// Every one of these is a gated route (DESIGNER §3.1: "everything but /openapi.json and
+// /session"), so every one goes through `watchSession` on the real-backend branch exactly like
+// the three reads just above — a 401 here reopens the login gate the same way a 401 reading
+// `listSystems` does, rather than surfacing as an unexplained failed submit.
+
+/** `POST /api/systems` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
+export function createSystem(name: string): Promise<SystemSummary> {
+  return useRealBackend() ? watchSession(backend.createSystem(name)) : mock.createSystem(name);
+}
+
+/** `DELETE /api/systems/{id}` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
+export function deleteSystem(id: number): Promise<void> {
+  return useRealBackend() ? watchSession(backend.deleteSystem(id)) : mock.deleteSystem(id);
+}
+
+/** `POST /api/nodes` (DESIGNER §3.1), real or fixture per `useRealBackend()`. See
+ *  `./backend.ts`'s own doc on `addNode` for what a `token`-less call does today, and why. Never
+ *  stores `input.token` anywhere past this call — see this file's own module doc: nothing here
+ *  ever holds a node's bearer token. */
+export function addNode(input: NewNodeInput): Promise<NodeSummary> {
+  return useRealBackend() ? watchSession(backend.addNode(input)) : mock.addNode(input);
+}
+
+/** `DELETE /api/nodes/{id}` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
+export function deleteNode(id: number): Promise<void> {
+  return useRealBackend() ? watchSession(backend.deleteNode(id)) : mock.deleteNode(id);
+}
+
+/** `POST /api/nodes/{id}/probe` (DESIGNER §3.1), real or fixture per `useRealBackend()`. Rejects
+ *  for a leaf-class node — see `./backend.ts`'s own doc on `probeNode` for the exact `bad_request`
+ *  the real backend answers and why nothing here re-shapes it. */
+export function probeNode(id: number): Promise<NodeSummary> {
+  return useRealBackend() ? watchSession(backend.probeNode(id)) : mock.probeNode(id);
+}
+
+/** `GET /api/registries` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
+export function listRegistries(): Promise<RegistrySummary[]> {
+  return useRealBackend() ? watchSession(backend.listRegistries()) : mock.listRegistries();
+}
+
+/** `POST /api/registries` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
+export function addRegistry(input: NewRegistryInput): Promise<RegistrySummary> {
+  return useRealBackend() ? watchSession(backend.addRegistry(input)) : mock.addRegistry(input);
+}
+
+/** `DELETE /api/registries/{id}` — see `./backend.ts`'s own doc on `deleteRegistry` for why this
+ *  route does not exist on the real backend yet, and what calling it does in the meantime. */
+export function deleteRegistry(id: number): Promise<void> {
+  return useRealBackend() ? watchSession(backend.deleteRegistry(id)) : mock.deleteRegistry(id);
 }
 
 export type * from './types';

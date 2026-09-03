@@ -59,6 +59,44 @@ export interface NodeSummary {
   limits?: Record<string, number>;
 }
 
+/** `GET`/`POST /api/registries` (DESIGNER §3.1): `crates/designer/src/api/registries.rs`'s
+ *  `RegistryOut` — a block registry source. No `auth` field, and there is no serialization of
+ *  this type in which one could appear: `RegistryOut` simply declares none, the same structural
+ *  guarantee `NodeSummary` gives its own token (see that interface's own doc). `POST
+ *  /api/registries`'s body also takes an optional `auth` (opaque credential, never answered
+ *  back) — see {@link addRegistry}'s doc in `./client.ts` for the same never-retained posture
+ *  `addNode`'s `token` keeps. */
+export interface RegistrySummary {
+  id: number;
+  url: string;
+}
+
+/** `POST /api/nodes`'s body, as `addNode` (`./client.ts`) takes it — DESIGNER §3.1's own words:
+ *  the class is *stated*, not discovered, and defaults to `'daemon'`.
+ *
+ *  `token` is **required**, and eieio-m9s.34's own contract had it optional by mistake. That
+ *  contract cited §3.1 as letting "a node be named before its token is known" — but that
+ *  sentence describes the CLI's `~/.config/eieio/nodes.toml`, a different config surface,
+ *  where the field genuinely is an `Option`. `crates/designer/src/api/nodes.rs`'s `NewNode`
+ *  takes `token: String` and validates it non-empty, and §3.1's route table lists it
+ *  un-suffixed. Both halves reported the discrepancy rather than working around it. */
+export interface NewNodeInput {
+  system_id: number;
+  name: string;
+  address: string;
+  token: string;
+  class?: NodeClass;
+}
+
+/** `POST /api/registries`'s body, as `addRegistry` (`./client.ts`) takes it. The real request
+ *  type (`crates/designer/src/api/registries.rs`'s `NewRegistry`) types `auth` as an opaque
+ *  `serde_json::Value` — narrowed to `string` here, which is still valid input on the wire (a
+ *  JSON string is a JSON value) and is the only shape any caller in this SPA has to offer. */
+export interface NewRegistryInput {
+  url: string;
+  auth?: string;
+}
+
 /** A service's run state. DAEMON §9 gives start/stop/reload and
  * GET /services/{s}/errors; "errored" is this shell's label for that state.
  * GUESS: DAEMON-SPEC does not enumerate a closed set of state strings, so

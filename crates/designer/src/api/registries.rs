@@ -6,6 +6,8 @@
 //! same structural reason `crate::api::nodes::NodeOut` has no `token` one.
 
 use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -115,6 +117,42 @@ pub async fn create(
         })
         .await?;
     Ok(Json(RegistryOut { id, url }))
+}
+
+/// `DELETE /api/registries/{id}` (DESIGNER §3.1).
+///
+/// Added by eieio-m9s.36, because a registry could be added and never removed — and a registry
+/// is a URL an operator types, so a typo is the ordinary case and the remedy was editing SQLite
+/// by hand. Systems and nodes both had a `DELETE`; only this one did not, in the code or the
+/// spec table, which is what made it look like an oversight rather than a decision.
+///
+/// **Nothing is orphaned by removing one.** DESIGNER §2's schema has no foreign key pointing at
+/// `registries`, and the manifest cache is keyed by `block_ref` rather than by which registry
+/// answered for it (§3.3), so a cached manifest outlives the registry it came from and is still
+/// exactly what that reference resolved to. Compare a node, which services and taps do
+/// reference and which is removable anyway.
+#[utoipa::path(
+    delete,
+    path = "/api/registries/{id}",
+    tag = "registries",
+    params(("id" = i64, Path, description = "the registry's id")),
+    responses(
+        (status = 204, description = "removed"),
+        (status = 404, description = "no registry with that id", body = ErrorBody),
+    )
+)]
+pub async fn delete(
+    State(shared): State<crate::State>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, ApiError> {
+    let changed = shared
+        .db
+        .with(move |conn| conn.execute("DELETE FROM registries WHERE id = ?1", [id]))
+        .await?;
+    if changed == 0 {
+        return Err(ApiError::not_found(format!("no registry with id {id}")));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

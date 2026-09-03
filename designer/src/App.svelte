@@ -24,6 +24,9 @@
   import InspectorPanel from './lib/components/InspectorPanel.svelte';
   import NodeDashboard from './lib/components/NodeDashboard.svelte';
   import LoginGate from './lib/components/LoginGate.svelte';
+  import AddSystemModal from './lib/components/AddSystemModal.svelte';
+  import AddNodeModal from './lib/components/AddNodeModal.svelte';
+  import AddRegistryModal from './lib/components/AddRegistryModal.svelte';
   import * as api from './lib/api/client';
   import { resolveManifest } from './lib/derive/capabilities';
   import { makePropertyNameResolver } from './lib/derive/props';
@@ -40,6 +43,7 @@
   import type {
     BlockManifest,
     NodeSummary,
+    RegistrySummary,
     ServiceDefinition,
     ServiceEditOperation,
     ServiceSummary,
@@ -62,6 +66,132 @@
   let busy = $state(false);
   let libraryOpen = $state(false);
   let loadError = $state<string | null>(null);
+
+  // --- Onboarding: Systems, nodes, registries (eieio-m9s.34, DESIGNER §3.1) -----------------
+  //
+  // Three modals (each a single form, per SCOPE §6's single-operator posture — no wizard) plus
+  // the direct-action calls (delete, probe) `NavigatorTree` now offers per row. `onboardingBusy`
+  // is the one guard shared by every direct action, so a second click cannot fire the same call
+  // twice while the first is still in flight; the create/add modals guard themselves internally
+  // (their own `submitting` state disables their own submit button).
+  let addingSystem = $state(false);
+  let addingNodeSystemId = $state<number | null>(null);
+  let addingRegistry = $state(false);
+  let onboardingBusy = $state(false);
+
+  // Registries this Designer knows about, read from `GET /api/registries` on load. The bead's
+  // own contract omitted `listRegistries` by mistake — the route has been in DESIGNER §3.1's
+  // table all along — so this was session-only until integration; the UI agent reported the
+  // gap rather than adding the call to a file it did not own, which was the right move.
+  let registries = $state<RegistrySummary[]>([]);
+
+  function onboardingErrorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  function handleCreateSystem() {
+    addingSystem = true;
+  }
+
+  async function handleCreateSystemSubmit(name: string): Promise<SystemSummary> {
+    // Deliberately not caught here: a rejection propagates back into `AddSystemModal`'s own
+    // `try`/`catch`, which is what renders it — this only runs (closing the modal, refreshing
+    // the tree) on success. A `SessionRequiredError` still reaches `client.ts`'s `watchSession`
+    // and reopens the login gate independently of whatever this function does with it.
+    const created = await api.createSystem(name);
+    addingSystem = false;
+    await loadAll();
+    return created;
+  }
+
+  function handleAddNode(systemId: number) {
+    addingNodeSystemId = systemId;
+  }
+
+  async function handleAddNodeSubmit(input: {
+    system_id: number;
+    name: string;
+    address: string;
+    token: string;
+    class?: 'daemon' | 'leaf';
+  }): Promise<NodeSummary> {
+    const created = await api.addNode(input);
+    addingNodeSystemId = null;
+    await loadAll();
+    return created;
+  }
+
+  function handleAddRegistry() {
+    addingRegistry = true;
+  }
+
+  async function handleAddRegistrySubmit(input: { url: string; auth?: string }): Promise<RegistrySummary> {
+    const created = await api.addRegistry(input);
+    registries = [...registries, created];
+    addingRegistry = false;
+    return created;
+  }
+
+  async function handleDeleteSystem(id: number) {
+    onboardingBusy = true;
+    try {
+      await api.deleteSystem(id);
+      // The tree this System lived in is gone — release a selection it can no longer resolve
+      // rather than leave the canvas pointed at a node that `loadAll` is about to drop.
+      if (selectedNode?.system_id === id) {
+        selected = null;
+        currentService = null;
+      }
+      await loadAll();
+    } catch (err) {
+      loadError = onboardingErrorMessage(err);
+    } finally {
+      onboardingBusy = false;
+    }
+  }
+
+  async function handleDeleteNode(id: number) {
+    onboardingBusy = true;
+    try {
+      await api.deleteNode(id);
+      if (selected?.nodeId === id) {
+        selected = null;
+        currentService = null;
+      }
+      await loadAll();
+    } catch (err) {
+      loadError = onboardingErrorMessage(err);
+    } finally {
+      onboardingBusy = false;
+    }
+  }
+
+  async function handleProbeNode(id: number) {
+    // `NavigatorTree` never offers this for a leaf (DESIGNER §3.1: it "answers no probe by
+    // design") — see that component's own guard. This handler trusts that and does not repeat
+    // the check; if it is ever reached for a leaf, the backend's own refusal is what reports it.
+    onboardingBusy = true;
+    try {
+      await api.probeNode(id);
+      await loadAll();
+    } catch (err) {
+      loadError = onboardingErrorMessage(err);
+    } finally {
+      onboardingBusy = false;
+    }
+  }
+
+  async function handleDeleteRegistry(id: number) {
+    onboardingBusy = true;
+    try {
+      await api.deleteRegistry(id);
+      registries = registries.filter((r) => r.id !== id);
+    } catch (err) {
+      loadError = onboardingErrorMessage(err);
+    } finally {
+      onboardingBusy = false;
+    }
+  }
 
   // --- The login gate (DESIGNER §3.1, eieio-m9s.31) -------------------------
   //
@@ -130,7 +260,12 @@
 
   async function loadAll() {
     try {
-      const [sys, blocks] = await Promise.all([api.listSystems(), api.listBlockManifests()]);
+      const [sys, blocks, regs] = await Promise.all([
+        api.listSystems(),
+        api.listBlockManifests(),
+        api.listRegistries(),
+      ]);
+      registries = regs;
       systems = sys;
       manifests = blocks;
 
@@ -496,7 +631,21 @@
 
 <IconRail onOpenDashboard={() => (dashboardOpen = true)} />
 
-<NavigatorTree {systems} {nodesBySystem} {selected} onSelectService={selectService} />
+<NavigatorTree
+  {systems}
+  {nodesBySystem}
+  {selected}
+  onSelectService={selectService}
+  {registries}
+  onCreateSystem={handleCreateSystem}
+  onDeleteSystem={handleDeleteSystem}
+  onAddNode={handleAddNode}
+  onDeleteNode={handleDeleteNode}
+  onProbeNode={handleProbeNode}
+  onAddRegistry={handleAddRegistry}
+  onDeleteRegistry={handleDeleteRegistry}
+  {onboardingBusy}
+/>
 
 <main class="main">
   <Toolbar
@@ -569,6 +718,22 @@
     onAccept={handleConfigAccept}
     onCancel={handleConfigCancel}
   />
+{/if}
+
+{#if addingSystem}
+  <AddSystemModal onSubmit={handleCreateSystemSubmit} onCancel={() => (addingSystem = false)} />
+{/if}
+
+{#if addingNodeSystemId !== null}
+  <AddNodeModal
+    systemId={addingNodeSystemId}
+    onSubmit={handleAddNodeSubmit}
+    onCancel={() => (addingNodeSystemId = null)}
+  />
+{/if}
+
+{#if addingRegistry}
+  <AddRegistryModal onSubmit={handleAddRegistrySubmit} onCancel={() => (addingRegistry = false)} />
 {/if}
 
 <style>

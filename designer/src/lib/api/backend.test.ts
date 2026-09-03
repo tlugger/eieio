@@ -12,6 +12,13 @@ import {
   listBlockManifests,
   login,
   logout,
+  createSystem,
+  deleteSystem,
+  addNode,
+  deleteNode,
+  probeNode,
+  addRegistry,
+  deleteRegistry,
   SessionRequiredError,
   WrongPasswordError,
   BackendRequestError,
@@ -350,5 +357,358 @@ describe('client.ts — a later 401 re-raises the gate, not "Failed to load"', (
     } finally {
       unsubscribe();
     }
+  });
+});
+
+// eieio-m9s.34: the mutating half of DESIGNER §3.1's own REST surface — creating and deleting
+// Systems, nodes and registries, plus the probe. Same posture as every suite above: `fetch` is
+// stubbed, nothing here opens a socket, and every assertion is against the request this module
+// actually made and the decoding it did of a scripted response.
+
+describe('createSystem — POST /api/systems', () => {
+  it('posts {name}, with credentials, and decodes the response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { id: 7, name: 'Greenhouse' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await createSystem('Greenhouse');
+
+    expect(result).toEqual({ id: 7, name: 'Greenhouse' });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/systems');
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('same-origin');
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Greenhouse' });
+  });
+
+  it('throws SessionRequiredError on a 401, not a resolved system', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(createSystem('Greenhouse')).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 400 (an empty name), carrying the body message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(400, { error: 'bad_request', message: 'a system needs a non-empty name' })),
+    );
+    const failure = await createSystem('   ').then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as Error).message).toContain('a system needs a non-empty name');
+  });
+});
+
+describe('deleteSystem — DELETE /api/systems/{id}', () => {
+  it('sends DELETE, with credentials, to the right path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await deleteSystem(7);
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/systems/7');
+    expect(init.method).toBe('DELETE');
+    expect(init.credentials).toBe('same-origin');
+  });
+
+  it('throws SessionRequiredError on a 401', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(deleteSystem(7)).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 404 (no such system)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(404, { error: 'not_found', message: 'no system with id 9999' })),
+    );
+    const failure = await deleteSystem(9999).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as Error).message).toContain('no system with id 9999');
+  });
+});
+
+describe('addNode — POST /api/nodes', () => {
+  const input = { system_id: 1, name: 'porch-pi', address: 'http://10.0.0.5:7373', token: 'super-secret-token' };
+
+  it('posts the full body — including the token — with credentials, and decodes the response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { id: 11, system_id: 1, name: 'porch-pi', class: 'daemon', address: input.address }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await addNode(input);
+
+    expect(result).toEqual({ id: 11, system_id: 1, name: 'porch-pi', class: 'daemon', address: input.address });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/nodes');
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('same-origin');
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    // This bead's first negative proof (see the final report for the failing transcript): the
+    // token has to actually ride the request body, not just be accepted as a parameter and
+    // dropped on the floor before the `fetch` call is built.
+    expect(body.token).toBe('super-secret-token');
+    expect(body.system_id).toBe(1);
+    expect(body.name).toBe('porch-pi');
+    expect(body.address).toBe(input.address);
+  });
+
+  it('omits `class` from the body when the caller does not supply one, letting the backend default it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { id: 12, system_id: 1, name: 'porch-pi', class: 'daemon', address: input.address }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await addNode(input);
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty('class');
+  });
+
+  it('passes an explicit `class` through unchanged', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { id: 13, system_id: 1, name: 'closet-relay', class: 'leaf', address: input.address }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await addNode({ ...input, class: 'leaf' });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.class).toBe('leaf');
+  });
+
+  it('never puts a `token` field anywhere on the decoded NodeSummary', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, { id: 14, system_id: 1, name: 'porch-pi', class: 'daemon', address: input.address }),
+      ),
+    );
+    const result = await addNode(input);
+    expect(result).not.toHaveProperty('token');
+    expect(JSON.stringify(result)).not.toContain('super-secret-token');
+  });
+
+  it('throws SessionRequiredError on a 401, not a resolved node', async () => {
+    // This bead's second negative proof (see the final report for the failing transcript): a
+    // 401 anywhere in this file must reject, never resolve as if the node had been created.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(addNode(input)).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 400 (an unknown system_id), carrying the body message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(400, { error: 'bad_request', message: 'could not register this node (is system_id 9999 a real system?)' }),
+      ),
+    );
+    const failure = await addNode({ ...input, system_id: 9999 }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as Error).message).toContain('is system_id 9999 a real system');
+  });
+
+  it('throws BackendRequestError on a response body that does not parse as JSON at all', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(unparseableResponse(502)));
+    const failure = await addNode(input).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as BackendRequestError).status).toBe(502);
+  });
+});
+
+describe('deleteNode — DELETE /api/nodes/{id}', () => {
+  it('sends DELETE, with credentials, to the right path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await deleteNode(11);
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/nodes/11');
+    expect(init.method).toBe('DELETE');
+    expect(init.credentials).toBe('same-origin');
+  });
+
+  it('throws SessionRequiredError on a 401', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(deleteNode(11)).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 404 (no such node)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(404, { error: 'not_found', message: 'no node with id 9999' })),
+    );
+    await expect(deleteNode(9999)).rejects.toBeInstanceOf(BackendRequestError);
+  });
+});
+
+describe('probeNode — POST /api/nodes/{id}/probe', () => {
+  it('posts with no body, with credentials, to the right path, and decodes the refreshed node', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        id: 11,
+        system_id: 1,
+        name: 'porch-pi',
+        class: 'daemon',
+        address: 'http://10.0.0.5:7373',
+        last_seen: '2026-09-03T00:00:00Z',
+        capabilities: ['state', 'timer'],
+        limits: { max_payload: 65536, max_batch: 256 },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await probeNode(11);
+
+    expect(result.last_seen).toBe('2026-09-03T00:00:00Z');
+    expect(result.capabilities).toEqual(['state', 'timer']);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/nodes/11/probe');
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('same-origin');
+    // No body, and therefore no reason to have set a JSON content type either — a bodyless
+    // POST that still claims to carry JSON is exactly the kind of accidental leftover this
+    // asserts against.
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string> | undefined)?.['Content-Type']).toBeUndefined();
+  });
+
+  it('throws SessionRequiredError on a 401', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(probeNode(11)).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  // The sub-plan's own named case: a leaf answers no probe, and the backend says so by naming
+  // the class in a `bad_request` — this must surface as a legible, readable failure rather than
+  // a generic one.
+  it('throws BackendRequestError naming the class on a leaf node (400 bad_request)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(400, {
+          error: 'bad_request',
+          message: 'node 13 is leaf-class and answers no probe; it serves no management API at all (DESIGNER §7)',
+        }),
+      ),
+    );
+    const failure = await probeNode(13).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as BackendRequestError).status).toBe(400);
+    expect((failure as Error).message).toContain('leaf-class');
+    expect((failure as Error).message).toContain('answers no probe');
+  });
+
+  it('throws BackendRequestError on a 502 (the node could not be reached)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(502, { error: 'bad_gateway', message: 'could not reach http://x: connection refused' })),
+    );
+    const failure = await probeNode(11).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as BackendRequestError).status).toBe(502);
+  });
+});
+
+describe('addRegistry — POST /api/registries', () => {
+  it('posts {url}, with credentials, and decodes the response, omitting auth when absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { id: 3, url: 'https://registry.example/v2' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await addRegistry({ url: 'https://registry.example/v2' });
+
+    expect(result).toEqual({ id: 3, url: 'https://registry.example/v2' });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/registries');
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('same-origin');
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body).toEqual({ url: 'https://registry.example/v2' });
+  });
+
+  it('includes auth in the request when given, but never on the decoded response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { id: 4, url: 'https://registry.example/v2' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await addRegistry({ url: 'https://registry.example/v2', auth: 'super-secret-registry-token' });
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.auth).toBe('super-secret-registry-token');
+    expect(result).not.toHaveProperty('auth');
+    expect(JSON.stringify(result)).not.toContain('super-secret-registry-token');
+  });
+
+  it('throws SessionRequiredError on a 401', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(addRegistry({ url: 'https://registry.example/v2' })).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 400 (an empty url)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(400, { error: 'bad_request', message: 'a registry needs a non-empty url' })),
+    );
+    const failure = await addRegistry({ url: '   ' }).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as Error).message).toContain('a registry needs a non-empty url');
+  });
+});
+
+describe('deleteRegistry — DELETE /api/registries/{id}', () => {
+  // Unlike deleteSystem/deleteNode, this route does not exist on the real backend today (see
+  // `backend.ts`'s own doc on `deleteRegistry`) — these tests pin what this function does with
+  // whatever it is given, not that a real `crates/designer` answers 204 for it.
+  it('sends DELETE, with credentials, to the right path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await deleteRegistry(3);
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/registries/3');
+    expect(init.method).toBe('DELETE');
+    expect(init.credentials).toBe('same-origin');
+  });
+
+  it('throws SessionRequiredError on a 401', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(deleteRegistry(3)).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError naming the missing route against today\'s backend (error::not_routed)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(404, { error: 'not_found', message: 'this Designer serves no DELETE /api/registries/3' }),
+      ),
+    );
+    const failure = await deleteRegistry(3).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as Error).message).toContain('this Designer serves no DELETE /api/registries/3');
   });
 });
