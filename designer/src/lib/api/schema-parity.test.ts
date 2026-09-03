@@ -54,6 +54,14 @@ import { beforeAll, describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(process.cwd(), '..');
 const GENERATED_PATH = path.resolve(process.cwd(), 'src/lib/api/__generated__/daemon-response-shapes.json');
+/** `crates/designer/tests/response_shapes.rs`'s own generated file (eieio-m9s.33) — a sibling of
+ * [`GENERATED_PATH`], never the same file: see that Rust file's module doc for why a shared
+ * writer between two independent `cargo test` invocations would be exactly the race
+ * eieio-m9s.22 already found once. */
+const DESIGNER_GENERATED_PATH = path.resolve(
+  process.cwd(),
+  'src/lib/api/__generated__/designer-response-shapes.json',
+);
 const TYPES_PATH = path.resolve(process.cwd(), 'src/lib/api/types.ts');
 
 /** The schemas this check asserts on, and the TypeScript interface each is compared against.
@@ -68,6 +76,16 @@ const PAIRS: ReadonlyArray<readonly [daemonSchema: string, tsInterface: string]>
   ['Tap', 'TapSummary'],
 ];
 
+/** [`PAIRS`]'s counterpart for `crates/designer`'s own document (eieio-m9s.33, closing the gap
+ * eieio-m9s.20 opened: that bead gave `crates/designer` a live `/api/openapi.json` and fixed
+ * three fields hand-found against it, but nothing read the document itself until now).
+ * `SystemOut`/`NodeOut` are real, field-for-field mirrors of `SystemSummary`/`NodeSummary` — the
+ * exact schemas `client.ts`'s `listSystems`/`listNodes` call for real as of eieio-m9s.30. */
+const DESIGNER_PAIRS: ReadonlyArray<readonly [designerSchema: string, tsInterface: string]> = [
+  ['SystemOut', 'SystemSummary'],
+  ['NodeOut', 'NodeSummary'],
+];
+
 /** `ServiceDetail` and `CachedBlock` are deliberately absent, and not as an exemption: the
  * Designer has no wire mirror of either. `GET /services/{s}` answers `{name, state, definition,
  * autostart, error?}`, and this shell's `ServiceDefinition` is the *parsed* model it builds
@@ -78,7 +96,18 @@ const PAIRS: ReadonlyArray<readonly [daemonSchema: string, tsInterface: string]>
  * kind of parsed reshaping, and `manifest` itself has no live schema to check regardless (see
  * `crates/cli/tests/response_shapes.rs`'s module doc for why: `eio_manifest::schema::Manifest`
  * has no `ToSchema` derive). `ServiceSummary` and `Tap` have real mirrors and are checked; if
- * `ServiceDefinition` or `BlockManifest` ever grow a wire twin, that twin belongs above. */
+ * `ServiceDefinition` or `BlockManifest` ever grow a wire twin, that twin belongs above.
+ *
+ * `BlockManifest` stays unpaired even against `crates/designer`'s own document, for a distinct
+ * reason worth spelling out separately: `GET /api/blocks` (the Designer's own route, not the
+ * daemon's `GET /blocks` named above) answers `ManifestCacheEntry` — `{block_ref, manifest,
+ * fetched_at}` (`crates/designer/src/api/blocks.rs`) — and `BlockManifest` is not a mirror of
+ * *that* either. It flattens `manifest`'s own fields to its own top level, keeps `block_ref`,
+ * and drops `fetched_at` — the same parsed-model relationship `ServiceDefinition` has to
+ * `ServiceDetail`, just one level deeper. `crates/designer/tests/response_shapes.rs` targets
+ * only `SystemOut`/`NodeOut` for exactly this reason; see that file's own module doc for the
+ * fuller accounting (`manifest` itself is `serde_json::Value` there too, so even a mirror of
+ * `ManifestCacheEntry` alone could not check inside it). */
 
 let daemonShapes: Record<string, string[]>;
 /** `daemonShapes.sse`, typed for what it actually is: one field-name array per SSE event name,
@@ -98,13 +127,34 @@ let daemonTypes: Record<string, Record<string, string>>;
  * DAEMON §9.6's SSE payloads are flat). */
 let daemonSseTypes: Record<string, Record<string, string>>;
 
+/** [`DESIGNER_PAIRS`]'s field-name sets, from `crates/designer/tests/response_shapes.rs`'s own
+ * generated file — the same shape [`daemonShapes`] holds for the daemon's schemas, just with no
+ * `sse`/`sseRequired`/`sseTypes` keys: `crates/designer` serves no SSE payload of its own (every
+ * stream this shell reads is proxied through to a node's, and that node's shapes are already
+ * [`daemonShapes`]'s to check). */
+let designerShapes: Record<string, string[]>;
+/** [`daemonRequired`]'s counterpart for [`DESIGNER_PAIRS`]. */
+let designerRequired: Record<string, string[]>;
+/** [`daemonTypes`]'s counterpart for [`DESIGNER_PAIRS`]. */
+let designerTypes: Record<string, Record<string, string>>;
+
 beforeAll(() => {
   // Skipped when the harness already generated it (`just ci`'s `shapes` recipe sets this).
   // Shelling out to cargo here while the `test` stage holds the target-directory lock is
   // what timed this hook out on CI; regenerating remains the default so a bare `npm test`
   // is still self-sufficient and never compares against a stale file.
+  //
+  // Both invocations below happen in this one `beforeAll`, one after the other — never from a
+  // second `describe` block or a second file — for exactly the reason `crates/designer/tests/
+  // response_shapes.rs`'s own module doc gives: two `cargo test` calls racing for the workspace
+  // target-directory lock is eieio-m9s.22's bug, and the fix is one caller running them in
+  // sequence, not a second caller running one of them concurrently with the first.
   if (!process.env.EIO_SHAPES_PREGENERATED) {
     execSync('cargo test -p eio-cli --test response_shapes', {
+      cwd: REPO_ROOT,
+      stdio: 'pipe',
+    });
+    execSync('cargo test -p eio-designer --test response_shapes', {
       cwd: REPO_ROOT,
       stdio: 'pipe',
     });
@@ -116,6 +166,11 @@ beforeAll(() => {
   daemonSseRequired = (parsed.sseRequired as Record<string, string[]> | undefined) ?? {};
   daemonTypes = (parsed.types as Record<string, Record<string, string>> | undefined) ?? {};
   daemonSseTypes = (parsed.sseTypes as Record<string, Record<string, string>> | undefined) ?? {};
+
+  const designerParsed = JSON.parse(readFileSync(DESIGNER_GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
+  designerShapes = designerParsed as Record<string, string[]>;
+  designerRequired = (designerParsed.required as Record<string, string[]> | undefined) ?? {};
+  designerTypes = (designerParsed.types as Record<string, Record<string, string>> | undefined) ?? {};
 }, 120_000);
 
 /** Parses `types.ts` once and indexes every top-level `interface` by name, so a property whose
@@ -777,4 +832,93 @@ describe('SSE payload field types vs. designer/src/lib/api/types.ts (eieio-m9s.1
     }
     expect(stale, stale.join('\n')).toEqual([]);
   });
+});
+
+// --- eieio-m9s.33: crates/designer's own document, read the same way the daemon's is above ---
+//
+// Three describe blocks, mirroring the daemon's field/required/type-kind trio exactly, over
+// [`DESIGNER_PAIRS`] instead of [`PAIRS`] and `designerShapes`/`designerRequired`/`designerTypes`
+// instead of their `daemon*` counterparts. No SSE trio: `crates/designer` serves none of its own
+// (see [`designerShapes`]'s doc).
+
+describe('crates/designer response shapes vs. designer/src/lib/api/types.ts (eieio-m9s.33)', () => {
+  for (const [designerSchema, tsInterface] of DESIGNER_PAIRS) {
+    it(`\`${tsInterface}\` matches crates/designer's \`${designerSchema}\``, () => {
+      const interfaces = parseInterfaces();
+      const wireFields = new Set(designerShapes[designerSchema]);
+      expect(
+        wireFields.size,
+        `no fields were generated for \`${designerSchema}\` — check crates/designer/tests/response_shapes.rs's target list`,
+      ).toBeGreaterThan(0);
+      const tsFields = fieldsOfInterface(tsInterface, interfaces);
+
+      const onlyOnTheWire = [...wireFields].filter((field) => !tsFields.has(field)).sort();
+      const onlyInTs = [...tsFields].filter((field) => !wireFields.has(field)).sort();
+
+      const message = [
+        `\`${tsInterface}\` (designer/src/lib/api/types.ts) disagrees with crates/designer's live \`${designerSchema}\` schema.`,
+        onlyOnTheWire.length > 0
+          ? `Fields crates/designer serves that \`${tsInterface}\` is missing: ${JSON.stringify(onlyOnTheWire)}`
+          : null,
+        onlyInTs.length > 0
+          ? `Fields \`${tsInterface}\` invents that crates/designer never serves: ${JSON.stringify(onlyInTs)}`
+          : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join('\n');
+
+      expect(onlyOnTheWire.length === 0 && onlyInTs.length === 0, message).toBe(true);
+    });
+  }
+});
+
+describe("crates/designer required fields vs. designer/src/lib/api/types.ts's optional fields (eieio-m9s.33)", () => {
+  for (const [designerSchema, tsInterface] of DESIGNER_PAIRS) {
+    it(`\`${tsInterface}\` marks optional exactly the fields crates/designer's \`${designerSchema}\` sometimes omits`, () => {
+      const interfaces = parseInterfaces();
+      const node = interfaceNode(tsInterface, interfaces);
+      const wireRequired = new Set(designerRequired[designerSchema] ?? []);
+      const tsRequired = requiredFieldsOfInterface(node);
+
+      const wireRequiresTsDoesNot = [...wireRequired].filter((field) => !tsRequired.has(field)).sort();
+      const tsRequiresWireDoesNot = [...tsRequired].filter((field) => !wireRequired.has(field)).sort();
+
+      const message = [
+        `\`${tsInterface}\` (designer/src/lib/api/types.ts) disagrees with crates/designer's live \`${designerSchema}\` required set.`,
+        wireRequiresTsDoesNot.length > 0
+          ? `crates/designer always sends these, but \`${tsInterface}\` marks them optional: ${JSON.stringify(wireRequiresTsDoesNot)}`
+          : null,
+        tsRequiresWireDoesNot.length > 0
+          ? `\`${tsInterface}\` requires these, but crates/designer does not always send them: ${JSON.stringify(tsRequiresWireDoesNot)}`
+          : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join('\n');
+
+      expect(wireRequiresTsDoesNot.length === 0 && tsRequiresWireDoesNot.length === 0, message).toBe(true);
+    });
+  }
+});
+
+describe("crates/designer field types vs. designer/src/lib/api/types.ts's declared types (eieio-m9s.33)", () => {
+  for (const [designerSchema, tsInterface] of DESIGNER_PAIRS) {
+    it(`\`${tsInterface}\`'s field types agree with crates/designer's live \`${designerSchema}\` schema`, () => {
+      const interfaces = parseInterfaces();
+      const node = interfaceNode(tsInterface, interfaces);
+      const wireKinds = designerTypes[designerSchema] ?? {};
+      const tsKinds = new Map<string, Kind>();
+      collectKinds(node, '', interfaces, MAX_DEPTH, tsKinds);
+
+      const mismatches = Object.entries(wireKinds)
+        .map(([path, wireKind]): string | null => {
+          const tsKind = tsKinds.get(path);
+          if (tsKind === undefined || tsKind === wireKind) return null;
+          return `\`${path}\`: crates/designer sends \`${wireKind}\`, \`${tsInterface}\` declares \`${tsKind}\``;
+        })
+        .filter((line): line is string => line !== null)
+        .sort();
+
+      expect(mismatches, mismatches.join('\n')).toEqual([]);
+    });
+  }
 });
