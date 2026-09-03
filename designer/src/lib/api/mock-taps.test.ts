@@ -112,4 +112,27 @@ describe('streamTap', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(statuses).toEqual([{ status: 'closed', error: `no such tap: ${tap.tap_id}` }]);
   });
+
+  // eieio-m9s.28: `closet-relay` (`node-closet`) is this fixture set's `class: 'leaf'` node —
+  // DESIGNER §3.1 refuses the catch-all proxy for one by name, taps included, rather than
+  // dialling it and reporting a connection failure that would look identical to a node that is
+  // down. `createTap` is `async`, so this refusal is an ordinary rejection.
+  it('createTap refuses closet-relay (leaf), naming the class', async () => {
+    await expect(createTap('node-closet', 'relay-control', 'g1.out -> g1.in')).rejects.toThrow(/leaf-class/);
+  });
+
+  // `streamTap` is not `async` — it returns a `StreamHandle` synchronously and reports failure
+  // through `onStatus`, the same shape "reports 'closed' with an error for a tap that was already
+  // released" (above) already exercises for a not-found tap. The refusal here is discovered
+  // before the tap lookup, so it never calls `onStatus('connecting')` first, exactly like that
+  // not-found case.
+  it('streamTap reports "closed" with a class-naming error for closet-relay (leaf), never "connecting"', async () => {
+    vi.useFakeTimers();
+    const statuses: Array<{ status: StreamStatus; error?: string }> = [];
+    streamTap('node-closet', 'tap-1', { onEvent: () => {}, onStatus: (status, detail) => statuses.push({ status, error: detail?.error }) });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.status).toBe('closed');
+    expect(statuses[0]?.error).toMatch(/leaf-class/);
+  });
 });

@@ -115,38 +115,59 @@
                     {node.class === 'daemon' ? '⬡' : '◇'}
                   </span>
                   <span class="tree__label">{node.name}</span>
-                  <!-- `!node.last_seen`, not `=== null`: DESIGNER §3.1 makes the field
-                       ABSENT when a probe has never succeeded, so a strict null test missed
-                       every unprobed node and the badge never rendered (eieio-m9s.20). -->
-                  {#if !node.last_seen}
+                  <!-- eieio-m9s.28, DESIGNER §3.1: a leaf "answers no probe, because it serves
+                       no management API at all" — `!node.last_seen` is therefore always true for
+                       one, and always will be, so the daemon "unreachable" badge (a fault
+                       against a node that failed to answer) would read as a fault against a leaf
+                       working exactly as designed. §3.1 names this exact confusion. A leaf gets
+                       its own, non-alarming note instead; a daemon keeps the real badge, still
+                       driven by `!node.last_seen` (`=== null` missed the ABSENT-not-null case,
+                       eieio-m9s.20). -->
+                  {#if node.class === 'leaf'}
+                    <span
+                      class="tree__leaf-note"
+                      title="A leaf serves no management API (DESIGNER §3.1) — its services are compiled into firmware (§7), not listed here"
+                    >
+                      no management API
+                    </span>
+                  {:else if !node.last_seen}
                     <span class="tree__unreachable" title="Never successfully probed">unreachable</span>
                   {/if}
                 </button>
 
                 {#if expandedNodes.has(node.id)}
                   <ul class="tree__level">
-                    {#each services as service (service.name)}
-                      <li>
-                        <button
-                          class="tree__row tree__row--service"
-                          aria-current={selected?.nodeId === node.id && selected?.serviceName === service.name
-                            ? 'true'
-                            : undefined}
-                          onclick={() => onSelectService(node.id, service.name)}
-                        >
-                          <span
-                            class={`tree__state tree__state--${service.state}`}
-                            title={`Service is ${stateLabel(service.state)}`}
-                            aria-label={`Service is ${stateLabel(service.state)}`}
+                    {#if node.class === 'leaf'}
+                      <!-- eieio-m9s.28: "no services" here would be the same claim as a daemon's
+                           empty listing — a checked, empty answer. A leaf's is a different claim:
+                           nobody asked, because nobody can (DESIGNER §7 — its services are
+                           compiled into firmware, not filed where a management API could list
+                           them). -->
+                      <li class="tree__empty">Services are compiled into firmware — not listed here</li>
+                    {:else}
+                      {#each services as service (service.name)}
+                        <li>
+                          <button
+                            class="tree__row tree__row--service"
+                            aria-current={selected?.nodeId === node.id && selected?.serviceName === service.name
+                              ? 'true'
+                              : undefined}
+                            onclick={() => onSelectService(node.id, service.name)}
                           >
-                            {stateGlyph(service.state)}
-                          </span>
-                          <span class="tree__label">{service.name}</span>
-                        </button>
-                      </li>
-                    {/each}
-                    {#if services.length === 0}
-                      <li class="tree__empty">No services</li>
+                            <span
+                              class={`tree__state tree__state--${service.state}`}
+                              title={`Service is ${stateLabel(service.state)}`}
+                              aria-label={`Service is ${stateLabel(service.state)}`}
+                            >
+                              {stateGlyph(service.state)}
+                            </span>
+                            <span class="tree__label">{service.name}</span>
+                          </button>
+                        </li>
+                      {/each}
+                      {#if services.length === 0}
+                        <li class="tree__empty">No services</li>
+                      {/if}
                     {/if}
                   </ul>
                 {/if}
@@ -229,6 +250,14 @@
   .tree__unreachable {
     font-size: 10px;
     color: var(--state-errored);
+    flex: 0 0 auto;
+  }
+
+  /* eieio-m9s.28: deliberately NOT `--state-errored` — a leaf working exactly as designed is not
+     a fault, and DESIGNER §3.1 exists specifically so this note never reads as one. */
+  .tree__leaf-note {
+    font-size: 10px;
+    color: var(--chrome-text-muted);
     flex: 0 0 auto;
   }
 

@@ -131,4 +131,18 @@ describe('streamLogs', () => {
     await vi.advanceTimersByTimeAsync(60_000); // long enough to catch a leaked interval
     expect(events.length).toBe(countBeforeClose);
   });
+
+  // eieio-m9s.28: `closet-relay` (`node-closet`) is this fixture set's `class: 'leaf'` node.
+  // Unlike `'no-such-node'` above — which is a real "empty stream" case, DESIGNER §3.1 says
+  // nothing about an unknown id — a leaf is a node the operator deliberately registered, and its
+  // logs can never be fetched by design. `streamLogs` is not `async`, so this reports the choke
+  // point's refusal through `onStatus('closed', ...)` rather than opening and staying silent the
+  // way `'no-such-node'` does; those two must not read the same, and this pins the difference.
+  it('refuses closet-relay (leaf) by naming the class, rather than opening an empty stream', async () => {
+    const { events, statuses, handle } = collect('node-closet');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses).toEqual([{ status: 'closed', error: expect.stringMatching(/leaf-class/) }]);
+    expect(events).toEqual([]);
+    handle.close();
+  });
 });

@@ -54,9 +54,19 @@
 
   // Fires once per node the first time the dashboard renders it - `GET
   // /node` per row, not one bulk call DAEMON §9 does not offer.
+  //
+  // eieio-m9s.28, DESIGNER §3.1: a leaf answers no `GET /node` at all, by design — `getNodeInfo`
+  // now refuses one (the mock's own choke point, mirroring `crates/designer/src/api/proxy.rs`),
+  // so calling it here would only ever resolve to the generic `'error'` bucket above, which
+  // renders nothing and reads as this row failing to connect. Skipped rather than asked and
+  // discarded: the markup below states the true reason directly off `node.class`, not off an
+  // absence this effect manufactured.
   $effect(() => {
     for (const entries of nodesBySystem.values()) {
-      for (const { node } of entries) void loadNodeInfo(node.id);
+      for (const { node } of entries) {
+        if (node.class === 'leaf') continue;
+        void loadNodeInfo(node.id);
+      }
     }
   });
 
@@ -108,8 +118,22 @@
                   {node.class === 'daemon' ? '⬡' : '◇'}
                 </span>
                 <span class="dashboard__node-name">{node.name}</span>
-                <span class="dashboard__node-health" class:dashboard__node-health--down={!node.last_seen}>
-                  {node.last_seen ? `last seen ${new Date(node.last_seen).toLocaleString()}` : 'never probed'}
+                <!-- eieio-m9s.28, DESIGNER §3.1: "never probed" is a fault reading — a daemon
+                     that has never answered a probe might be down. A leaf answers no probe *by
+                     design* (§3.1), so it is never "never probed" in that sense; it is
+                     unprobeable, permanently, and that is not a fault. The `--down` styling is
+                     withheld for the same reason the badge text changes: nothing here is down. -->
+                <span
+                  class="dashboard__node-health"
+                  class:dashboard__node-health--down={node.class !== 'leaf' && !node.last_seen}
+                >
+                  {#if node.class === 'leaf'}
+                    no management API — services compiled into firmware (DESIGNER §7)
+                  {:else if node.last_seen}
+                    last seen {new Date(node.last_seen).toLocaleString()}
+                  {:else}
+                    never probed
+                  {/if}
                 </span>
                 {#if info === 'loading'}
                   <span class="dashboard__node-version">loading…</span>
@@ -122,38 +146,46 @@
               </div>
 
               <ul class="dashboard__services">
-                {#each services as service (service.name)}
-                  {@const key = `${node.id}/${service.name}`}
-                  <li class="dashboard__service">
-                    <button
-                      type="button"
-                      class="dashboard__service-row"
-                      disabled={service.state !== 'errored'}
-                      onclick={() => toggleErrors(node.id, service.name)}
-                    >
-                      <span class="dashboard__service-state dashboard__service-state--{service.state}">{service.state}</span>
-                      <span class="dashboard__service-name">{service.name}</span>
-                      <span class="dashboard__service-autostart">{service.autostart ? 'autostart' : ''}</span>
-                      {#if service.state === 'errored'}
-                        <span class="dashboard__service-hint">{expanded.has(key) ? 'hide' : 'show'} errors</span>
-                      {/if}
-                    </button>
-                    {#if expanded.has(key)}
-                      <div class="dashboard__errors" role="region" aria-label={`Errors for ${service.name}`}>
-                        {#if service.error}
-                          <div class="dashboard__error">
-                            <span class="dashboard__error-code">[{service.error.error}]</span>
-                            {service.error.message}
-                          </div>
-                        {:else}
-                          <span class="dashboard__muted">No structured error reported.</span>
+                {#if node.class === 'leaf'}
+                  <!-- eieio-m9s.28: "No services" (below, for a daemon) is a checked, empty
+                       answer. A leaf's is a different claim — nobody asked, because nobody can
+                       (DESIGNER §7: its services are compiled into firmware, not filed anywhere
+                       a management API could list them). -->
+                  <li class="dashboard__empty">Services are compiled into firmware — not listed here</li>
+                {:else}
+                  {#each services as service (service.name)}
+                    {@const key = `${node.id}/${service.name}`}
+                    <li class="dashboard__service">
+                      <button
+                        type="button"
+                        class="dashboard__service-row"
+                        disabled={service.state !== 'errored'}
+                        onclick={() => toggleErrors(node.id, service.name)}
+                      >
+                        <span class="dashboard__service-state dashboard__service-state--{service.state}">{service.state}</span>
+                        <span class="dashboard__service-name">{service.name}</span>
+                        <span class="dashboard__service-autostart">{service.autostart ? 'autostart' : ''}</span>
+                        {#if service.state === 'errored'}
+                          <span class="dashboard__service-hint">{expanded.has(key) ? 'hide' : 'show'} errors</span>
                         {/if}
-                      </div>
-                    {/if}
-                  </li>
-                {/each}
-                {#if services.length === 0}
-                  <li class="dashboard__empty">No services</li>
+                      </button>
+                      {#if expanded.has(key)}
+                        <div class="dashboard__errors" role="region" aria-label={`Errors for ${service.name}`}>
+                          {#if service.error}
+                            <div class="dashboard__error">
+                              <span class="dashboard__error-code">[{service.error.error}]</span>
+                              {service.error.message}
+                            </div>
+                          {:else}
+                            <span class="dashboard__muted">No structured error reported.</span>
+                          {/if}
+                        </div>
+                      {/if}
+                    </li>
+                  {/each}
+                  {#if services.length === 0}
+                    <li class="dashboard__empty">No services</li>
+                  {/if}
                 {/if}
               </ul>
             </div>

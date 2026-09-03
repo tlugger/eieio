@@ -307,13 +307,35 @@ const ROUTE_KEY_BY_NODE_ID = new Map<number, string>(NODE_FIXTURES.map((n) => [n
  *  `mock-taps.test.ts`/`mock-parity.test.ts` hard-code) passes through unchanged, since
  *  `Number('node-porch')` is not finite; `String(node.id)` (what this shell's own components
  *  pass — they hold a `NodeSummary`, not a slug) resolves through {@link ROUTE_KEY_BY_NODE_ID}.
- *  Every proxied-surface function below (`listServices`, `getService`, `createTap`, `streamTap`,
- *  `streamLogs`, `getNodeInfo`, …) normalizes through this before touching a fixture, so neither
- *  caller has to know the other shape exists. */
+ *
+ *  **This is also the one choke point that refuses a leaf-class node** (eieio-m9s.28, DESIGNER
+ *  §3.1/§7): every proxied-surface function below (`listServices`, `getService`, `putService`,
+ *  `startService`/`stopService`/`reloadService`, `getServiceErrors`, `createTap`, `listTaps`,
+ *  `deleteTap`, `streamTap`, `streamLogs`, `getNodeInfo`) already resolves a `nodeId` through
+ *  here before touching a fixture — the same seam `crates/cli/src/config.rs`'s `Config::resolve`
+ *  is for the CLI, and for the identical reason (eieio-x7g.5's report): a refusal written once
+ *  per function is a refusal someone forgets on the next function, so it lives here, once, and
+ *  every caller inherits it for free. A leaf "serves no management API at all" (DESIGNER §3.1) —
+ *  there is nothing at the far end of a proxied call to a leaf, the same fact
+ *  `crates/designer/src/api/proxy.rs`'s `forward()` acts on for the real backend, and this
+ *  throws the identical message that handler does, naming the class rather than leaving a
+ *  caller to read a connection error as a node that is down (the exact confusion §3.1 exists to
+ *  prevent). Synchronous, deliberately: `streamTap`/`streamLogs` are not `async`, and a caller
+ *  that returns a `StreamHandle` before this can resolve has nowhere else to route the refusal
+ *  to but a thrown exception at the point it first touches the fixture — both of those two catch
+ *  it and translate it into their normal `onStatus('closed', { error })` shape rather than
+ *  letting it escape past their synchronous return. */
 function normalizeNodeRouteKey(nodeId: string): string {
   const asNumber = Number(nodeId);
-  if (!Number.isFinite(asNumber)) return nodeId;
-  return ROUTE_KEY_BY_NODE_ID.get(asNumber) ?? nodeId;
+  const key = Number.isFinite(asNumber) ? (ROUTE_KEY_BY_NODE_ID.get(asNumber) ?? nodeId) : nodeId;
+  const fixture = NODE_FIXTURES.find((n) => n.slug === key);
+  if (fixture?.class === 'leaf') {
+    throw new Error(
+      `node ${fixture.id} is leaf-class and serves no management API; a leaf's services ` +
+        `are deployed by firmware build, not over HTTP (DESIGNER §7)`,
+    );
+  }
+  return key;
 }
 
 export async function listSystems(): Promise<SystemSummary[]> {
@@ -408,30 +430,13 @@ const SERVICES: Record<string, MockService[]> = {
       },
     },
   ],
-  'node-closet': [
-    {
-      // eieio-m9s.20: closet-relay has never been probed (no `capabilities` at all, above) —
-      // gpio-echo's block card exercises the *unknown*-compatibility badge here now, not the
-      // "confirmed missing" one, since there is no capability list to check `gpio` against.
-      // (Every *probed* node fixture reaches "confirmed missing" for gpio-echo since eieio-
-      // m9s.24 made them all honest — none of them has ever had `gpio`. eieio-m9s.23 added
-      // `cellar-pi` (`node-cellar`, above) before that fix, specifically so a "confirmed missing
-      // capability" demo existed at all; see its own comment for why it is kept now that it is
-      // no longer unique. No service references `node-cellar` — the palette's capability filter
-      // reads `NodeSummary.capabilities` directly and has no need of one.)
-      state: 'stopped',
-      file: {
-        name: 'relay-control',
-        autostart: false,
-        overflow: 'backpressure',
-        blocks: {
-          g1: { id: 'g1', name: 'Door sensor', block: 'gpio-echo:0.1.0', props: { pin: '4' } },
-        },
-        connections: [],
-        ui: { blocks: { g1: { x: 80, y: 80 } } },
-      },
-    },
-  ],
+  // No `'node-closet'` entry (eieio-m9s.28): `closet-relay` is this fixture set's leaf, and a
+  // leaf's services live in firmware, never in a file a management API could list (DESIGNER
+  // §3.1, §7) — a services fixture here would model something no real leaf can ever answer, the
+  // exact confusion this bead exists to remove. `NODE_FIXTURES`' own `closet-relay` entry, above,
+  // is untouched and still exercises `BlockCard`'s *unknown*-compatibility badge: that reads
+  // `NodeSummary.capabilities` (absent — never probed, and never can be), not anything from this
+  // map.
 };
 
 /** The mock's stand-in for a service file's bytes — see this module's
@@ -485,6 +490,10 @@ export async function stopService(nodeId: string, serviceName: string): Promise<
 }
 
 export async function reloadService(nodeId: string, serviceName: string): Promise<void> {
+  // Touches nothing else — `reloadService` has never needed a fixture — but it is still a
+  // proxy-routed call (DAEMON §9.4) and must resolve through the same choke point as every
+  // other one, or a leaf would be refused everywhere except here.
+  normalizeNodeRouteKey(nodeId);
   return delay(undefined, 200);
 }
 
@@ -795,24 +804,30 @@ function connectionToString(c: Connection): string {
 // `limits` comes from `actualLimits`, not the listing's own (possibly absent) `limits`: a direct
 // `GET /node` is a live hit on a reachable node, independent of whether the Designer's probe
 // cache has ever been populated for it (`NodeFixture`'s own doc).
+//
+// eieio-m9s.28: **no entry for a `class: 'leaf'` fixture.** This table used to hold one for
+// `closet-relay` too, built the same way as every daemon's, with a comment arguing a leaf's
+// `capabilities` answer is identical to a daemon's (`IMPLEMENTED_CAPABILITIES`/`crates/leaf`'s
+// `spawn` refuse the identical set beyond `state`/`timer`). That comparison is no longer one this
+// mock can make: `getNodeInfo` now resolves every `nodeId` through `normalizeNodeRouteKey`, which
+// refuses a leaf before this table is ever read (DESIGNER §3.1 — a leaf answers no `GET /node` at
+// all). Keeping a fixture entry a real call can never reach would be exactly the thing this bead
+// removes from the `SERVICES` table above, for the identical reason: it models something
+// unreachable. `NODE_FIXTURES.filter` below is therefore load-bearing, not decorative.
 const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
-  NODE_FIXTURES.map((n, i) => [
+  NODE_FIXTURES.filter((n) => n.class !== 'leaf').map((n, i) => [
     n.slug,
     {
       id: n.slug,
       name: n.name,
       version: `0.${i + 1}.0`,
       abi: '1.0',
-      // The shape `crates/daemon/src/api/node.rs` actually serves, not a guess:
-      // three flat budget numbers, and `capabilities` — which DESIGNER §5's
-      // design-time badge reads and which the earlier guessed shape omitted.
-      //
-      // eieio-m9s.24: not branched on `n.class`. `IMPLEMENTED_CAPABILITIES`
-      // (`crates/daemon/src/instance.rs`) is `[state, timer]` for a daemon; the leaf runtime
-      // (`crates/leaf/src/lib.rs`'s `spawn`) refuses anything else too, so a leaf's list is not
-      // a smaller version of a daemon's — it is the same list, not a separate question (ABI §7's
-      // opening paragraphs). And no `'core'`: `eio:core` requires no manifest capability at all
-      // (ABI §7.0), so it never appears in a real capabilities list.
+      // The shape `crates/daemon/src/api/node.rs` actually serves, not a guess: three flat
+      // budget numbers, and `capabilities` — which DESIGNER §5's design-time badge reads and
+      // which the earlier guessed shape omitted. `crates/daemon/src/instance.rs`'s
+      // IMPLEMENTED_CAPABILITIES is exactly `[state, timer]`, and no `'core'`: `eio:core`
+      // requires no manifest capability at all (ABI §7.0), so it never appears in a real
+      // capabilities list.
       capabilities: ['state', 'timer'],
       limits: n.actualLimits,
       budgets: { fuel: 100_000_000, deadline_ms: 1000, expr_max_fuel: 100_000 },
@@ -961,7 +976,18 @@ function findFieldDependency(
  * unprompted, to exercise the panel's disconnect handling in the running
  * app (see this section's header doc). */
 export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHandlers): StreamHandle {
-  const key = normalizeNodeRouteKey(nodeId);
+  let key: string;
+  try {
+    key = normalizeNodeRouteKey(nodeId);
+  } catch (error) {
+    // A leaf refusal (eieio-m9s.28) — this function is not `async`, so there is nowhere else to
+    // route the choke point's thrown refusal but here, translated into the same
+    // `onStatus('closed', { error })` shape the "no such tap" branch just below already uses for
+    // a refusal discovered before a stream ever opens.
+    const message = error instanceof Error ? error.message : String(error);
+    const timer = setTimeout(() => handlers.onStatus('closed', { error: message }), 0);
+    return { close: () => clearTimeout(timer) };
+  }
   const tap = TAPS[tapId];
   if (!tap || tap.nodeId !== key) {
     const timer = setTimeout(() => handlers.onStatus('closed', { error: `no such tap: ${tapId}` }), 0);
@@ -1159,7 +1185,18 @@ function instancesFor(nodeId: string): Array<{ service: string; instance: string
  * lines land synchronously, then one live line arrives roughly every
  * second, filtered the same way either way. */
 export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStreamHandlers): StreamHandle {
-  const instances = instancesFor(nodeId);
+  let instances: Array<{ service: string; instance: string }>;
+  try {
+    instances = instancesFor(nodeId);
+  } catch (error) {
+    // A leaf refusal (eieio-m9s.28) — same reasoning as `streamTap`'s own catch, just above it
+    // in this file: not `async`, so the choke point's throw is translated here into the same
+    // `onStatus('closed', { error })` shape rather than escaping past this function's
+    // synchronous return.
+    const message = error instanceof Error ? error.message : String(error);
+    const timer = setTimeout(() => handlers.onStatus('closed', { error: message }), 0);
+    return { close: () => clearTimeout(timer) };
+  }
   const parser = new IncrementalSseParser();
   let stopped = false;
   let tick = 0;

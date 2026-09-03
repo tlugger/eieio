@@ -94,8 +94,19 @@
         // `node.id` (a `number`, DESIGNER §3.1) is rendered to one at the call site, same as a
         // template literal would. This is the one conversion in this file; every *comparison*
         // against `node.id`/`system.id` below instead uses the number as-is.
+        //
+        // eieio-m9s.28: a leaf must not even be asked. DESIGNER §3.1 has the proxy refuse
+        // `listServices` for one by name (it "serves no management API at all"), so calling it
+        // here for every node used to mean one leaf in a System failed this whole `Promise.all`
+        // — turning "this one node has no services to list" into "nothing in this System loaded
+        // at all" (`loadError`, below). A leaf's services live in firmware (§7), never in a
+        // listing this shell could ever fetch, so its entry gets `[]` directly; NavigatorTree
+        // and NodeDashboard render the true reason off `node.class`, not off this empty array.
         const entries = await Promise.all(
-          nodesForSystem.map(async (node) => ({ node, services: await api.listServices(String(node.id)) })),
+          nodesForSystem.map(async (node) => ({
+            node,
+            services: node.class === 'leaf' ? [] : await api.listServices(String(node.id)),
+          })),
         );
         map.set(system.id, entries);
         nodes.push(...nodesForSystem);

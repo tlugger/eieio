@@ -336,20 +336,35 @@ describe('startService / stopService / reloadService — the lifecycle App.svelt
 describe('getNodeInfo — actual field values, not just the field names mock-parity.test.ts checks (eieio-m9s.17)', () => {
   // eieio-m9s.24: this used to assert the opposite — that a daemon reports capabilities a leaf
   // does not — which was only true because the fixture handed `porch-pi` (`daemon`) `gpio`/`i2c`
-  // no daemon implements. Honestly, `crates/daemon/src/instance.rs`'s IMPLEMENTED_CAPABILITIES
-  // and `crates/leaf/src/lib.rs`'s `spawn` refuse the identical set beyond `state`/`timer`, so a
-  // daemon and a leaf report the *same* list today — device class is not what a capability list
-  // varies on in this repository. (A leaf gaining a device namespace later would make this
-  // diverge again; nothing here assumes it stays this way forever.)
-  it('a daemon-class node and a leaf-class node report the same capabilities', async () => {
-    const daemonNode = await getNodeInfo('node-porch'); // class: 'daemon'
-    const leafNode = await getNodeInfo('node-attic'); // class: 'leaf'
-    expect(daemonNode.capabilities).toEqual(['state', 'timer']);
-    expect(leafNode.capabilities).toEqual(['state', 'timer']);
+  // no daemon implements. Fixed to compare two honest *daemon* fixtures instead: `node-attic`'s
+  // own comment in `mock.ts` is explicit that it is `class: 'daemon'`, not `'leaf'` — the stale
+  // `// class: 'leaf'` this test used to carry beside it was simply wrong, left over from before
+  // that fixture was corrected, and named the wrong node for what eieio-m9s.28 below actually
+  // exercises. `crates/daemon/src/instance.rs`'s IMPLEMENTED_CAPABILITIES is `[state, timer]`
+  // for every daemon in this fixture set — this asserts that two independent ones agree, not
+  // that a leaf does (a leaf answers no `GET /node` at all, below).
+  it('two daemon-class nodes report the same capabilities', async () => {
+    const porch = await getNodeInfo('node-porch'); // class: 'daemon'
+    const attic = await getNodeInfo('node-attic'); // class: 'daemon'
+    expect(porch.capabilities).toEqual(['state', 'timer']);
+    expect(attic.capabilities).toEqual(['state', 'timer']);
   });
 
   it('rejects an unknown node id rather than resolving to something empty', async () => {
     await expect(getNodeInfo('no-such-node')).rejects.toThrow();
+  });
+
+  // eieio-m9s.28: DESIGNER §3.1 — a leaf "answers no probe, because it serves no management API
+  // at all", and `GET /node` is exactly that. `getNodeInfo` on `closet-relay` (this fixture
+  // set's actual leaf, `class: 'leaf'`) must refuse by naming the class, not throw whatever a
+  // connection error happens to look like — that distinction is the entire reason `class`
+  // exists, per §3.1's own text.
+  it('refuses getNodeInfo for a leaf-class node, naming the class rather than failing to connect', async () => {
+    await expect(getNodeInfo('node-closet')).rejects.toThrow(/leaf-class/);
+  });
+
+  it('still answers getNodeInfo for a daemon-class node — the leaf guard is not too wide', async () => {
+    await expect(getNodeInfo('node-porch')).resolves.toMatchObject({ capabilities: ['state', 'timer'] });
   });
 });
 
@@ -376,5 +391,45 @@ describe('getServiceErrors (eieio-m9s.18: answers one ApiError, matching GET /se
     expect(error).toEqual(listed?.error);
     expect(error.error).toBe('unresolvable');
     expect(error.message).toMatch(/restart budget/);
+  });
+});
+
+// eieio-m9s.28: the mock used to give `node-closet` (this fixture set's `class: 'leaf'` node,
+// `closet-relay`) a service list, and `mock-parity.test.ts` iterated it alongside the two daemons
+// as if all three answered the same proxy — so nothing in this repository was ever forced to
+// handle DESIGNER §3.1's refusal. Every proxy-routed call now resolves through `mock.ts`'s
+// `normalizeNodeRouteKey`, the one choke point (mirroring `crates/cli/src/config.rs`'s
+// `Config::resolve`, eieio-x7g.5), which refuses a leaf by naming the class — matching
+// `crates/designer/src/api/proxy.rs`'s `forward()` verbatim, since that is the real refusal this
+// mock stands in for. This suite is the proof: broken deliberately (see this bead's final report
+// for the transcript of the guard accepting a leaf, and the SPA test that renders one as "down"),
+// each of the calls below fails to refuse, and put back, each refuses again.
+describe('a leaf-class node refuses every proxy-routed call, by naming the class (eieio-m9s.28, DESIGNER §3.1/§7)', () => {
+  it('listServices refuses closet-relay (leaf) but still answers porch-pi (daemon)', async () => {
+    await expect(listServices('node-closet')).rejects.toThrow(/leaf-class/);
+    await expect(listServices('node-porch')).resolves.not.toHaveLength(0);
+  });
+
+  it('getService refuses closet-relay (leaf) but still answers porch-pi (daemon)', async () => {
+    await expect(getService('node-closet', 'relay-control')).rejects.toThrow(/leaf-class/);
+    await expect(getService('node-porch', 'kitchen')).resolves.toBeDefined();
+  });
+
+  it('putService refuses closet-relay (leaf) rather than answering a 412/422 shape', async () => {
+    await expect(putService('node-closet', 'relay-control', '{}', '*')).rejects.toThrow(/leaf-class/);
+  });
+
+  it('startService / stopService / reloadService each refuse closet-relay (leaf)', async () => {
+    await expect(startService('node-closet', 'relay-control')).rejects.toThrow(/leaf-class/);
+    await expect(stopService('node-closet', 'relay-control')).rejects.toThrow(/leaf-class/);
+    await expect(reloadService('node-closet', 'relay-control')).rejects.toThrow(/leaf-class/);
+  });
+
+  it('getServiceErrors refuses closet-relay (leaf)', async () => {
+    await expect(getServiceErrors('node-closet', 'relay-control')).rejects.toThrow(/leaf-class/);
+  });
+
+  it('the refusal names the class, not a connection failure', async () => {
+    await expect(listServices('node-closet')).rejects.toThrow(/leaf-class and serves no management API/);
   });
 });

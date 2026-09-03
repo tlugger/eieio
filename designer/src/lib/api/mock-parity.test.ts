@@ -270,8 +270,14 @@ describe('mock.ts response shapes vs. the daemon\'s own schemas (eieio-m9s.15)',
     assertRequiredFieldsPresent('getNodeInfo("node-porch")', fields, daemonRequired.NodeInfo ?? []);
   });
 
+  // eieio-m9s.28: this used to include `'node-closet'` — this fixture set's `class: 'leaf'` node
+  // — alongside the two daemons, as if all three answered the same proxied `listServices` call.
+  // They do not: DESIGNER §3.1 has the proxy refuse a leaf by name, so `'node-closet'` is no
+  // longer interchangeable with a daemon here and carries no `SERVICES` fixture to check a shape
+  // against (`mock.ts`'s own comment on the now-removed entry explains why). The refusal itself
+  // is checked in the describe block below, not folded into this loop's per-shape assertions.
   it('listServices matches ServiceSummary for every fixture service, including one with a structured error', async () => {
-    for (const nodeId of ['node-porch', 'node-attic', 'node-closet']) {
+    for (const nodeId of ['node-porch', 'node-attic']) {
       const services = await listServices(nodeId);
       expect(services.length, `no fixture services for "${nodeId}" — nothing to check`).toBeGreaterThan(0);
       for (const service of services) {
@@ -306,6 +312,22 @@ describe('mock.ts response shapes vs. the daemon\'s own schemas (eieio-m9s.15)',
       assertNoInventedFields(label, fields, daemonShapes.ApiError ?? []);
       assertRequiredFieldsPresent(label, fields, daemonRequired.ApiError ?? []);
     }
+  });
+});
+
+// --- The three nodes are not interchangeable (eieio-m9s.28, DESIGNER §3.1) ---------------------
+//
+// `node-porch`/`node-attic` are `class: 'daemon'`; `node-closet` is this fixture set's
+// `class: 'leaf'`. Before this bead, the describe block above iterated all three as if a proxied
+// `listServices` meant the same thing for each — the bug this file exists to catch is a wire-shape
+// drift, and a leaf modelled as a reachable node is exactly that: it teaches that a leaf serves
+// services, when DESIGNER §3.1 says a leaf "serves no management API at all" and the proxy
+// "refuses a leaf by name rather than dialling it".
+describe('the three fixture nodes are not interchangeable: a leaf refuses, a daemon answers', () => {
+  it('node-closet (leaf) refuses listServices; node-porch/node-attic (daemon) still answer', async () => {
+    await expect(listServices('node-closet')).rejects.toThrow(/leaf-class/);
+    await expect(listServices('node-porch')).resolves.not.toHaveLength(0);
+    await expect(listServices('node-attic')).resolves.not.toHaveLength(0);
   });
 });
 
