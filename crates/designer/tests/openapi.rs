@@ -103,13 +103,11 @@ impl Harness {
 ///
 /// Read from `eio_designer::routes()` rather than hand-copied, matching `eio-daemon`'s own
 /// `api::tests::every_route_is_documented_and_every_documented_path_is_served`
-/// (`crates/daemon/src/api/tests.rs`): that table is exactly what `lib.rs::router` folds into
-/// its `gated` sub-router, so a route added to it is guard-probed here by construction, and a
-/// route added anywhere else in `router()` — in particular to `surface` after `gated` is
-/// merged in, which is the direction that would actually escape the session guard — is not in
-/// this list and so is not accounted for by this test at all. `every_gated_route_is_served`
-/// below is what catches *that* half: it fails if the table and the live router ever disagree
-/// about what `/api` serves.
+/// (`crates/daemon/src/api/tests.rs`): `lib.rs::router` (eieio-m9s.29) folds this table, and
+/// [`ungated_routes`]'s, into one router before the session middleware is attached, so a route
+/// added to this table is guard-probed here by construction. A route added to neither table —
+/// in particular, straight onto the router `lib.rs::router`'s own doc names as the seam this
+/// cannot close — is not in this list and so is not accounted for by this test at all.
 fn guarded_routes() -> Vec<(reqwest::Method, String)> {
     eio_designer::routes()
         .into_iter()
@@ -122,6 +120,22 @@ fn guarded_routes() -> Vec<(reqwest::Method, String)> {
                 (
                     reqwest::Method::from_bytes(method.as_bytes()).expect("a valid HTTP method"),
                     format!("/api{probe}"),
+                )
+            })
+        })
+        .collect()
+}
+
+/// The mirror of [`guarded_routes`], read from `eio_designer::unauthenticated_routes()` — the
+/// exempt table `session::require_session` itself consults, never a copy of it.
+fn ungated_routes() -> Vec<(reqwest::Method, String)> {
+    eio_designer::unauthenticated_routes()
+        .into_iter()
+        .flat_map(|(methods, path, _)| {
+            methods.iter().map(move |method| {
+                (
+                    reqwest::Method::from_bytes(method.as_bytes()).expect("a valid HTTP method"),
+                    format!("/api{path}"),
                 )
             })
         })
@@ -205,6 +219,40 @@ async fn every_other_api_route_still_requires_a_session() {
         "a real session must still work; a guard that refuses everything would make the loop \
          above pass for the wrong reason"
     );
+}
+
+#[tokio::test]
+async fn every_unauthenticated_route_is_reachable_without_a_session() {
+    // eieio-m9s.29's other half: the test above proves the *gated* table is exhaustive by
+    // probing every path it lists with no session and requiring 401. This proves the opposite
+    // direction over `eio_designer::unauthenticated_routes()` — the exempt table
+    // `session::require_session` itself consults, never a copy of it — so an entry moved (or
+    // added) there is checked as reachable, not merely allowed to be. Nothing here can prove a
+    // route reachable *without going through either table at all* exists — `lib.rs::router`'s
+    // own doc names that seam.
+    let harness = Harness::start().await;
+
+    for (method, path) in ungated_routes() {
+        let request = harness.client.request(method.clone(), harness.url(&path));
+        // `POST /api/session` is the one exempt route that reads a body; an empty JSON object
+        // fails validation (missing `password`), but must fail with something other than a 401
+        // — the point here is that the session guard never got a say, not that the login itself
+        // succeeds.
+        let request = if method == reqwest::Method::POST {
+            request.json(&serde_json::json!({}))
+        } else {
+            request
+        };
+        let response = request
+            .send()
+            .await
+            .unwrap_or_else(|error| panic!("{method} {path}: request failed: {error}"));
+        assert_ne!(
+            response.status(),
+            401,
+            "{method} {path} is in the unauthenticated table and must not need a session"
+        );
+    }
 }
 
 #[tokio::test]

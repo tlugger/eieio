@@ -89,7 +89,32 @@ pub type Route = (
     axum::routing::MethodRouter<State>,
 );
 
-/// Every guarded route this node serves (DAEMON §9).
+/// Every route this node serves with **no** bearer check at all (DAEMON §9.1): the document,
+/// and only the document — a schema a client must already hold a token to *discover* is one
+/// nobody can bootstrap against.
+///
+/// A table, on purpose, for the same reason [`routes`] is one (eieio-m9s.29): [`router`] folds
+/// both tables into a *single* router before the auth middleware is attached, so a route's
+/// presence here is what exempts it, not a second `.route(...)` call sitting outside the guard
+/// in [`router`]'s own body where nothing checks it against anything. `auth::require_token`
+/// reads this same table (by the route's matched pattern, never the request's raw URI) rather
+/// than a copy of it, so a route moved between the two tables never has to be told twice.
+pub fn unauthenticated_routes() -> Vec<Route> {
+    vec![(&["GET"], "/openapi.json", get(openapi::document))]
+}
+
+/// Whether `pattern` — a route's own registered pattern, e.g. `axum::extract::MatchedPath`'s
+/// value, never a request's raw URI — is one [`unauthenticated_routes`] exempts.
+///
+/// `pub(crate)` rather than `pub`: `auth::require_token` is this function's only caller outside
+/// of a test, and both live in this crate.
+pub(crate) fn is_unauthenticated(pattern: &str) -> bool {
+    unauthenticated_routes()
+        .into_iter()
+        .any(|(_, exempt, _)| exempt == pattern)
+}
+
+/// Every other route this node serves (DAEMON §9), behind the bearer check.
 ///
 /// A table rather than a chain of `.route(...)` calls, and that is §9.5's doing: the contract
 /// test has to enumerate what is served *from the thing that serves it*, or it is comparing the
@@ -159,25 +184,43 @@ pub fn routes() -> Vec<Route> {
 
 /// The router: every route of DAEMON §9, behind the bearer check except `/openapi.json`.
 pub fn router(shared: State) -> Router {
-    // Split rather than one router with a per-route exemption, because "which routes are
-    // authenticated" is a security property and a reader should be able to see it in the
-    // shape of the code rather than by checking each route for an opt-out (§9.1).
-    let mut guarded = Router::new();
-    for (_, path, handlers) in routes() {
-        guarded = guarded.route(path, handlers);
+    // One router, built from *both* tables, rather than a guarded sub-router merged onto an
+    // outer one that carries its own `.route(...)` calls (eieio-m9s.29): the outer shape used
+    // to give a route added directly to it — in neither table — a way to exist that no test
+    // could see, because nothing here read the router back to check. Building both tables into
+    // the same `Router` before the middleware below is attached removes that seam: there is no
+    // "outer" builder left to add a route to.
+    let mut merged = Router::new();
+    for (_, path, handlers) in unauthenticated_routes() {
+        merged = merged.route(path, handlers);
     }
-    let guarded = guarded.route_layer(axum::middleware::from_fn_with_state(
+    for (_, path, handlers) in routes() {
+        merged = merged.route(path, handlers);
+    }
+    // `route_layer`, not `layer`: it wraps every route already registered above — from either
+    // table, indifferently — and, unlike `layer`, leaves the fallback and method-not-allowed
+    // handlers set below untouched, so an unrouted path still answers §9.2's envelope without a
+    // token. `require_token` is what tells the two tables apart at request time, by checking
+    // `axum::extract::MatchedPath` against `unauthenticated_routes()` — the same table, not a
+    // copy of it.
+    //
+    // The seam this cannot close: a `.route(...)` call added *after* this line, rather than to
+    // either table above it, still reaches a client with no bearer check — `route_layer` only
+    // ever wraps what is already on the router when it runs. Nothing below this comment may add
+    // a route.
+    let merged = merged.route_layer(axum::middleware::from_fn_with_state(
         Arc::clone(&shared),
         auth::require_token,
     ));
 
-    Router::new()
-        .route("/openapi.json", get(openapi::document))
-        .merge(guarded)
+    merged
         // §9.2 says *every* failure answers in the envelope, and a path that matched no route
         // is a failure like any other. Without these two, axum answers an unrouted path with
         // an empty 404 and a wrong method with an empty 405 — bodies a client cannot parse
-        // with the one code path the envelope exists to give it.
+        // with the one code path the envelope exists to give it. `route_layer` above leaves
+        // both of these unwrapped by construction (it maps only `path_router`, per `axum`'s own
+        // source), which is what keeps an unrouted request from having to carry a token just to
+        // be told it matched nothing.
         .fallback(error::not_routed)
         .method_not_allowed_fallback(error::wrong_method)
         .with_state(shared)

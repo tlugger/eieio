@@ -31,6 +31,9 @@ axum = { workspace = true, default-features = false, features = [
     "json",
     "tokio",
     "query",
+    # Lets the auth boundary tell a route's registered *pattern* from a request's raw URI
+    # (eieio-m9s.29), through `axum::extract::MatchedPath`.
+    "matched-path",
 ] }
 
 # The registry (DESIGNER §2): systems, nodes, registries, manifest cache — and nothing a

@@ -377,6 +377,31 @@ async fn every_route_is_documented_and_every_documented_path_is_served() {
 }
 
 #[tokio::test]
+async fn every_unauthenticated_route_is_reachable_without_a_token() {
+    // eieio-m9s.29's other half: the test above proves the *gated* table is exhaustive by
+    // probing every path it lists with no token and requiring 401. This proves the opposite
+    // direction over `crate::api::unauthenticated_routes()` — the exempt table, never a copy of
+    // it — so an entry moved (or added) there is checked as reachable, not merely allowed to be.
+    // Nothing here can prove a route reachable *without going through either table exists at
+    // all* — `crate::api::router`'s own doc names that seam.
+    let harness = Harness::start("api-openapi-unauthenticated").await;
+    for (methods, path, _) in crate::api::unauthenticated_routes() {
+        for method in methods {
+            let answer = match *method {
+                "GET" => harness.get_with(path, None).await,
+                other => panic!("no probe for {other}"),
+            };
+            assert_ne!(
+                answer.status, 401,
+                "{method} {path} is in the unauthenticated table and must not need a token; \
+                 got {} {}",
+                answer.status, answer.body
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn nothing_is_reachable_without_this_nodes_token() {
     // DAEMON §9.1. Three ways to be wrong, because they fail in different places: no header at
     // all, a header that is not bearer, and a bearer token that is somebody else's.

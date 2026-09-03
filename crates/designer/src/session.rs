@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::header;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -80,12 +80,24 @@ pub fn session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
     })
 }
 
-/// Rejects a request carrying no live session (DESIGNER §3.1's whole gated surface).
+/// Rejects a request carrying no live session (DESIGNER §3.1's whole gated surface), unless it
+/// matched one of [`crate::unauthenticated_routes`]'s own patterns.
+///
+/// `route_layer` (`crate::router`) wraps this around every route from both tables
+/// indifferently, so the exemption has to be decided in here rather than by which sub-router the
+/// route happened to be added to — there no longer is one. `matched` is the route's registered
+/// *pattern* (`/api/systems`), never the request's raw URI, which is what makes checking it
+/// safe: a request cannot spell its way into a pattern it did not actually match.
 pub async fn require_session(
     State(shared): State<crate::State>,
+    matched: Option<MatchedPath>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    if matched.is_some_and(|matched| crate::is_unauthenticated(matched.as_str())) {
+        return Ok(next.run(request).await);
+    }
+
     let presented = session_cookie(request.headers());
     match presented
         .as_deref()

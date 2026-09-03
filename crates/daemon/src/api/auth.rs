@@ -9,18 +9,30 @@
 //! rather than despite it: this token is currently the whole of what stands between a caller
 //! and deploying arbitrary WASM to the node, so it should not also be the weakest part.
 
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 
 use crate::api::error::{ApiError, Kind};
 
-/// Rejects a request that does not carry this node's token (DAEMON §9.1).
+/// Rejects a request that does not carry this node's token (DAEMON §9.1), unless it matched one
+/// of [`crate::api::unauthenticated_routes`]'s own patterns.
+///
+/// `route_layer` (`crate::api::router`) wraps this around every route from both tables
+/// indifferently, so the exemption has to be decided in here rather than by which sub-router the
+/// route happened to be added to — there no longer is one. `matched` is the route's registered
+/// *pattern* (`/services/{service}`), never the request's raw URI, which is what makes checking
+/// it safe: a request cannot spell its way into a pattern it did not actually match.
 pub async fn require_token(
     State(shared): State<crate::api::State>,
+    matched: Option<MatchedPath>,
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    if matched.is_some_and(|matched| crate::api::is_unauthenticated(matched.as_str())) {
+        return Ok(next.run(request).await);
+    }
+
     let presented = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)

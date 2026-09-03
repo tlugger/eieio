@@ -80,17 +80,51 @@ pub type Route = (
     axum::routing::MethodRouter<State>,
 );
 
-/// Every route DESIGNER §3.1's surface serves *behind* the session guard — everything except
-/// `/openapi.json` and `/session` themselves, which [`router`] merges in afterwards.
+/// Every route this surface serves with **no** session check at all: `/openapi.json` (a schema
+/// nobody can be asked to already hold a session to discover) and `/session` itself (DESIGNER
+/// §3.1 — a caller with no session has to be able to reach the endpoint that mints one).
+///
+/// A table, on purpose, for the same reason [`routes`] is one (eieio-m9s.29): [`router`] folds
+/// both tables into a *single* router before the session middleware is attached, so a route's
+/// presence here is what exempts it, not a second `.route(...)` call sitting outside the guard
+/// in [`router`]'s own body where nothing checks it against anything. `session::require_session`
+/// reads this same table (by the route's matched pattern, never the request's raw URI) rather
+/// than a copy of it, so a route moved between the two tables never has to be told twice.
+///
+/// Paths here are relative to `/api`, matching [`routes`]'s own convention — [`is_unauthenticated`]
+/// is what re-applies the prefix before comparing against a live request's matched pattern.
+pub fn unauthenticated_routes() -> Vec<Route> {
+    vec![
+        (&["GET"], "/openapi.json", get(api::openapi::document)),
+        (
+            &["POST", "DELETE"],
+            "/session",
+            post(api::session::login).delete(api::session::logout),
+        ),
+    ]
+}
+
+/// Whether `pattern` — a route's own registered pattern, e.g. `axum::extract::MatchedPath`'s
+/// value as seen from the *outer* router (so it already carries the `/api` prefix `router`
+/// nests this surface under), is one [`unauthenticated_routes`] exempts.
+///
+/// `pub(crate)` rather than `pub`: `session::require_session` is this function's only caller
+/// outside of a test, and both live in this crate.
+pub(crate) fn is_unauthenticated(pattern: &str) -> bool {
+    unauthenticated_routes()
+        .into_iter()
+        .any(|(_, exempt, _)| pattern == format!("/api{exempt}"))
+}
+
+/// Every other route DESIGNER §3.1's surface serves, behind the session guard.
 ///
 /// A table rather than a chain of `.route(...)` calls, matching `eio-daemon::api::routes()`
 /// (`crates/daemon/src/api.rs`'s own doc) for exactly its reason: `tests/openapi.rs`'s
-/// auth-boundary test has to enumerate what `gated` serves *from the thing that serves it*, or
-/// it is comparing the guard against a second hand-maintained list and proving nothing about a
-/// route added here and forgotten there. [`router`] folds this into `gated`, so a route added
-/// to this table is served and guard-probed by construction, and a route added anywhere else
-/// (in particular, to `surface` after `gated` is merged in) is not — which is exactly the case
-/// the auth-boundary test must catch.
+/// auth-boundary test has to enumerate what this surface serves *from the thing that serves it*,
+/// or it is comparing the guard against a second hand-maintained list and proving nothing about
+/// a route added here and forgotten there. [`router`] folds this into the router, so a route
+/// added to this table is served and guard-probed by construction, and a route added anywhere
+/// else is not — which is exactly the case the auth-boundary test must catch.
 pub fn routes() -> Vec<Route> {
     vec![
         (
@@ -134,41 +168,36 @@ pub fn routes() -> Vec<Route> {
 /// The whole router: DESIGNER §3.1's surface, gated by a session except login and the
 /// document, plus the SPA.
 ///
-/// Split into a `gated` router carrying `session::require_session` and an outer one that does
-/// not, matching `eio-daemon::api::router`'s own shape (`crates/daemon/src/api.rs`'s doc):
-/// "which routes are authenticated" is a security property, and a reader should be able to see
-/// it in the *shape* of this function rather than by checking each route for an opt-out.
-/// `route_layer` is what makes this safe to build this way — it wraps only the routes already
-/// added to `gated`, never a route added to the router it is later merged into (confirmed
-/// against `axum`'s own source: `Router::route_layer` maps `path_router` alone, leaving
-/// `fallback_router`/`catch_all_fallback` untouched) — so `/api/openapi.json` and
-/// `/api/session` merging in *after* `gated` is built is what keeps them outside the guard, not
-/// a per-route exemption inside it.
+/// One router, built from *both* tables, rather than a guarded sub-router merged onto an outer
+/// one that carries its own `.route(...)` calls (eieio-m9s.29): the outer shape used to give a
+/// route added directly to it — in neither table — a way to exist that no test could see,
+/// because nothing here read the router back to check. Building both tables into the same
+/// `Router` before the middleware below is attached removes that seam: there is no "outer"
+/// builder left to add a route to. `route_layer` wraps every route already registered — from
+/// either table, indifferently — and, unlike `layer`, leaves the `.fallback()` set below
+/// untouched (confirmed against `axum`'s own source: `Router::route_layer` maps `path_router`
+/// alone), so an unrouted `/api` path still answers `error::not_routed` without a session.
+/// `require_session` is what tells the two tables apart at request time, by checking
+/// `axum::extract::MatchedPath` against `unauthenticated_routes()` — the same table, not a copy
+/// of it.
+///
+/// The seam this cannot close: a `.route(...)` call added *after* the `route_layer` line below,
+/// rather than to either table above it, still reaches a client with no session check —
+/// `route_layer` only ever wraps what is already on the router when it runs. Nothing below that
+/// line may add a route.
 pub fn router(shared: State, assets_dir: std::path::PathBuf) -> Router {
-    let mut gated = Router::new();
-    for (_, path, handlers) in routes() {
-        gated = gated.route(path, handlers);
+    let mut surface = Router::new();
+    for (_, path, handlers) in unauthenticated_routes() {
+        surface = surface.route(path, handlers);
     }
-    let gated = gated.route_layer(axum::middleware::from_fn_with_state(
+    for (_, path, handlers) in routes() {
+        surface = surface.route(path, handlers);
+    }
+    let surface = surface.route_layer(axum::middleware::from_fn_with_state(
         Arc::clone(&shared),
         session::require_session,
     ));
-
-    // `/openapi.json`: eieio-m9s.20's amendment to DESIGNER §3.1, on the same reasoning DAEMON
-    // §9.1 gives for its own — a schema a client must already be authenticated to *discover* is
-    // one nobody can bootstrap against. Built here, in the merge, rather than as a route on
-    // `gated`: `gated` carries no `.fallback()` of its own for exactly this reason too — a
-    // second custom fallback set here would conflict with one already on `gated` when merged
-    // (`axum::Router::merge` panics if both sides have one), so `not_routed` is set once, after
-    // every route above and below it has landed.
-    let surface = Router::new()
-        .route("/openapi.json", get(api::openapi::document))
-        .route(
-            "/session",
-            post(api::session::login).delete(api::session::logout),
-        )
-        .merge(gated)
-        .fallback(error::not_routed);
+    let surface = surface.fallback(error::not_routed);
 
     Router::new()
         .nest("/api", surface)
