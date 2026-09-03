@@ -8,7 +8,15 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+# `dist/` itself must EXIST on a fresh checkout even when empty: `crates/designer`'s
+# `#[derive(RustEmbed)] #[folder = ".../designer/dist"]` is a compile-time error when the
+# folder is absent, so `cargo build --workspace` — and therefore `just ci` — fails on any
+# machine that has not run the SPA build. That is what kept GitHub CI red from 2026-08-24
+# while `just ci` passed locally, where the directory happened to exist. An EMPTY dist is
+# already a supported state (see `just ci`'s npm check and `crates/designer/src/assets.rs`):
+# the server builds and serves no UI. So ignore the contents, keep the directory.
+dist/*
+!dist/.gitkeep
 dist-ssr
 *.local
 
