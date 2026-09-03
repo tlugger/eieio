@@ -12,10 +12,13 @@
 //! check even runs, which is exactly what distinguishes "refused by the guard" from "refused for
 //! any other reason" in the tests below.
 //!
-//! `nodes.toml` is written by hand here, not through `eio node add`, because there is no
-//! `eio node add --class` — SCOPE §3.7's `class` is something an operator (or a Designer export,
-//! eieio-m9s.6) hand-edits into the file, the same way any other TOML file in this system is
-//! authored (SERVICE §9). See `src/config.rs`'s `Config::add` for why.
+//! Sections 1–6 below write `nodes.toml` by hand rather than through `eio node add`: they
+//! predate `eio node add --class` (eieio-x7g.5 landed the guard first; the flag came with the
+//! integration fix eieio-x7g.9 covers) and still stand in for the other ways a `class` key
+//! reaches the file — an operator hand-editing it, or a Designer export (eieio-m9s.6) —
+//! the same way any other TOML file in this system is authored (SERVICE §9). Section 7 below
+//! is the flag itself: `eio node add --class` is real now, and `Config::add` takes a
+//! `NodeClass` argument — see `src/config.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -255,4 +258,125 @@ fn round_trip_preserves_leaf_and_never_mints_class_for_absent() {
         1,
         "an absent (or default) `class` must not be minted on write: {text}"
     );
+}
+
+// ─── 7: `eio node add --class` itself (eieio-x7g.9) ───
+//
+// Everything above hand-writes `nodes.toml`; these three drive the flag `Config::add` takes.
+
+/// Parses `nodes.toml` and returns the `[nodes.<name>]` table, so the tests below can assert
+/// on `class`'s presence or absence structurally — via the parsed document, not by scanning
+/// the file's text for the substring `"class"` — which is the same choice `nodes_export.rs`
+/// makes for the analogous JSON assertions, and for the same reason: a structural read cannot
+/// be fooled by the string appearing somewhere unrelated (a comment, a different node's own
+/// key), where a substring search silently would be.
+fn node_table(nodes_toml_path: &Path, name: &str) -> toml::Value {
+    let text = std::fs::read_to_string(nodes_toml_path).expect("reading nodes.toml");
+    let doc: toml::Value = toml::from_str(&text).expect("nodes.toml parses as TOML");
+    doc.get("nodes")
+        .and_then(|nodes| nodes.get(name))
+        .unwrap_or_else(|| panic!("no [nodes.{name}] table in:\n{text}"))
+        .clone()
+}
+
+#[test]
+fn add_dash_dash_class_leaf_writes_the_class_key() {
+    let config_home = scratch("add-class-leaf");
+    let path = config_home.join("eieio").join("nodes.toml");
+
+    ok(
+        &config_home,
+        &[
+            "node",
+            "add",
+            "porch-sensor",
+            "--addr",
+            "http://10.0.0.7:7777",
+            "--class",
+            "leaf",
+            "--default",
+        ],
+    );
+
+    let table = node_table(&path, "porch-sensor");
+    assert_eq!(
+        table.get("class").and_then(toml::Value::as_str),
+        Some("leaf"),
+        "--class leaf must write class = \"leaf\": {table:?}"
+    );
+
+    // Not just present as text — effective: a reaching command is refused, naming the class.
+    let refusal = refused(&config_home, &["node", "info"]);
+    assert!(refusal.contains("leaf"), "{refusal}");
+}
+
+#[test]
+fn add_dash_dash_class_daemon_writes_no_class_key() {
+    // THE test that matters most (see this crate's plan): `--class daemon` must write NO
+    // `class` key at all, because `NodeEntry::class`'s `skip_serializing_if` exists precisely
+    // to keep an explicitly-`daemon` entry — and every `nodes.toml` written before `class`
+    // existed — from gaining a redundant key the next time the file is saved. A test that
+    // instead checked for `class = "daemon"` would pass against code that serializes the
+    // default unconditionally, which is exactly the regression this field's
+    // `skip_serializing_if` exists to prevent — it would be asserting the wrong string and
+    // passing vacuously (this file's own module doc / the plan for this bead).
+    //
+    // Asserted structurally (parsed TOML, `!table.contains_key`), not by scanning the file's
+    // raw text for the substring `"class"` — see `node_table`'s doc.
+    let config_home = scratch("add-class-daemon");
+    let path = config_home.join("eieio").join("nodes.toml");
+
+    ok(
+        &config_home,
+        &[
+            "node",
+            "add",
+            "kitchen",
+            "--addr",
+            "http://10.0.0.5:7777",
+            "--class",
+            "daemon",
+        ],
+    );
+
+    let table = node_table(&path, "kitchen");
+    assert!(
+        !table
+            .as_table()
+            .expect("a node entry is a TOML table")
+            .contains_key("class"),
+        "--class daemon must write NO class key at all, not class = \"daemon\": {table:?}"
+    );
+}
+
+#[test]
+fn add_without_class_flag_behaves_the_same_as_dash_dash_class_daemon() {
+    let config_home = scratch("add-class-omitted");
+    let path = config_home.join("eieio").join("nodes.toml");
+
+    ok(
+        &config_home,
+        &[
+            "node",
+            "add",
+            "kitchen",
+            "--addr",
+            "http://10.0.0.5:7777",
+            "--default",
+        ],
+    );
+
+    let table = node_table(&path, "kitchen");
+    assert!(
+        !table
+            .as_table()
+            .expect("a node entry is a TOML table")
+            .contains_key("class"),
+        "omitting --class must write no class key, same as --class daemon: {table:?}"
+    );
+
+    // Effective, not just textual: a reaching command gets past the guard unrefused.
+    let refusal = refused(&config_home, &["node", "info"]);
+    assert!(refusal.contains("no token configured"), "{refusal}");
+    assert!(!refusal.contains("leaf"), "{refusal}");
 }

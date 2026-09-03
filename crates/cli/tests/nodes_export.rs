@@ -411,3 +411,250 @@ fn import_of_a_nonexistent_file_is_refused_before_touching_nodes_toml() {
         "a failed import must not create nodes.toml"
     );
 }
+
+// ─── `class` in the export/import round trip (eieio-x7g.9) ───
+//
+// `ExportedNode` gained `class` (`src/nodes.rs`'s module doc, rewritten by eieio-x7g.5's
+// integration fix: `nodes.toml` no longer never holds one). The four tests below are the ones
+// the plan for this bead calls out as missing: that a leaf's `class` survives into the export,
+// that importing it back restores an effective `leaf` (not just the text `"leaf"`), that a
+// pre-`class` export — the shape a v1 export had before the field existed — still imports as
+// `daemon`, and that `--force` on a name already configured as `leaf` cannot lose that class to
+// an export that forgot to carry it.
+
+/// Parses `nodes.toml` and returns the `[nodes.<name>]` table, structurally rather than by
+/// scanning the file's raw text — the same choice `node_class.rs`'s `node_table` makes and for
+/// the same reason: a substring search for `"class"` can't tell "absent" from "present in a
+/// comment or another entry", where a parsed table can.
+fn node_table(config_home: &Path, name: &str) -> toml::Value {
+    let text = std::fs::read_to_string(config_home.join("eieio").join("nodes.toml"))
+        .expect("reading nodes.toml");
+    let doc: toml::Value = toml::from_str(&text).expect("nodes.toml parses as TOML");
+    doc.get("nodes")
+        .and_then(|nodes| nodes.get(name))
+        .unwrap_or_else(|| panic!("no [nodes.{name}] table in:\n{text}"))
+        .clone()
+}
+
+/// Parses an export file and returns the entry named `name` from its `nodes` array,
+/// structurally (`serde_json::Value`) rather than by scanning the file's raw text, for the same
+/// reason `node_table` above parses rather than greps.
+fn exported_node(export_path: &Path, name: &str) -> serde_json::Value {
+    let text = std::fs::read_to_string(export_path).expect("reading the export file");
+    let doc: serde_json::Value = serde_json::from_str(&text).expect("export parses as JSON");
+    doc["nodes"]
+        .as_array()
+        .expect("nodes is an array")
+        .iter()
+        .find(|node| node["name"] == name)
+        .unwrap_or_else(|| panic!("no entry named {name} in:\n{text}"))
+        .clone()
+}
+
+#[test]
+fn export_carries_class_for_a_leaf_entry_and_omits_it_for_a_daemon_one() {
+    let config_home = scratch("export-carries-leaf-class");
+    ok(
+        &config_home,
+        &[
+            "node",
+            "add",
+            "porch-sensor",
+            "--addr",
+            "http://10.0.0.7:7777",
+            "--class",
+            "leaf",
+        ],
+    );
+    ok(
+        &config_home,
+        &[
+            "node",
+            "add",
+            "kitchen",
+            "--addr",
+            "http://10.0.0.5:7777",
+            "--class",
+            "daemon",
+        ],
+    );
+
+    let export_file = config_home.join("export.json");
+    ok(
+        &config_home,
+        &[
+            "nodes",
+            "export",
+            "--out",
+            export_file.to_str().expect("utf-8 path"),
+        ],
+    );
+
+    let leaf = exported_node(&export_file, "porch-sensor");
+    assert_eq!(
+        leaf.get("class").and_then(serde_json::Value::as_str),
+        Some("leaf"),
+        "a leaf entry's class must be carried into the export: {leaf}"
+    );
+
+    let daemon = exported_node(&export_file, "kitchen");
+    assert!(
+        daemon.get("class").is_none(),
+        "a daemon entry's class must be omitted from the export, just as `nodes.toml` omits \
+         it: {daemon}"
+    );
+}
+
+#[test]
+fn import_of_an_exported_leaf_restores_an_effective_leaf_not_just_the_text() {
+    let source = scratch("import-leaf-source");
+    let dest = scratch("import-leaf-dest");
+    let export_file = scratch("import-leaf-artifact").join("export.json");
+
+    ok(
+        &source,
+        &[
+            "node",
+            "add",
+            "porch-sensor",
+            "--addr",
+            "http://10.0.0.7:7777",
+            "--class",
+            "leaf",
+        ],
+    );
+    ok(
+        &source,
+        &[
+            "nodes",
+            "export",
+            "--out",
+            export_file.to_str().expect("utf-8 path"),
+        ],
+    );
+
+    ok(
+        &dest,
+        &["nodes", "import", export_file.to_str().expect("utf-8 path")],
+    );
+
+    // Present in the file...
+    let table = node_table(&dest, "porch-sensor");
+    assert_eq!(
+        table.get("class").and_then(toml::Value::as_str),
+        Some("leaf"),
+        "{table:?}"
+    );
+    // ...and effective, not merely textual: the guard refuses a reaching command against it,
+    // the same proof `node_class.rs` uses for a hand-written leaf entry.
+    let refusal = refused(&dest, &["--node", "porch-sensor", "node", "info"]);
+    assert!(refusal.contains("leaf"), "{refusal}");
+}
+
+#[test]
+fn import_of_a_pre_class_export_imports_as_daemon() {
+    // Hand-written, not derived from a fresh export with `class` deleted: this is what a v1
+    // export written *before* eieio-x7g.5 actually looked like — the field did not exist in
+    // `ExportedNode` at all — so the fixture has to be independent of whatever the current
+    // export format happens to produce, or a future format change could make this test pass
+    // for the wrong reason.
+    let config_home = scratch("import-pre-class-export");
+    let export_file = config_home.join("pre-class-export.json");
+    std::fs::write(
+        &export_file,
+        r#"{"format":"eieio.nodes/v1","nodes":[{"name":"kitchen","address":"http://10.0.0.5:7777"}]}"#,
+    )
+    .expect("writing the pre-class export fixture");
+
+    ok(
+        &config_home,
+        &["nodes", "import", export_file.to_str().expect("utf-8 path")],
+    );
+
+    let table = node_table(&config_home, "kitchen");
+    assert!(
+        !table
+            .as_table()
+            .expect("a node entry is a TOML table")
+            .contains_key("class"),
+        "a pre-class export must import as daemon (no class key), not gain one: {table:?}"
+    );
+    // Effective, not just textual: no token was carried either (this fixture predates that
+    // too), so a reaching command fails on the deterministic, network-free "no token
+    // configured" check, never on "leaf" — proving the entry is genuinely daemon-class.
+    let refusal = refused(&config_home, &["--node", "kitchen", "node", "info"]);
+    assert!(refusal.contains("no token configured"), "{refusal}");
+    assert!(!refusal.contains("leaf"), "{refusal}");
+}
+
+#[test]
+fn import_force_on_a_leaf_collision_preserves_the_class_the_import_carries() {
+    // What should `import --force` do when a name already configured as `leaf` collides with
+    // an import? The plan for this bead is explicit that the defensible claim is narrower than
+    // "the class always survives force": the import is what the operator chose to apply, so an
+    // import that explicitly says `daemon` for that name changing it to `daemon` would be a
+    // legitimate, deliberate downgrade, not a bug. What must never happen is the class
+    // *silently* reverting to `daemon` because the export format forgot to carry it — which is
+    // exactly the bug eieio-x7g.5's integration fix closed (`Config::add` rebuilds the entry
+    // from scratch, so a `class` missing from `ExportedNode` — or dropped on the way into
+    // `config.add` — would flip a working leaf back to daemon with no operator choice involved
+    // at all).
+    //
+    // So this test exercises the case that actually proves the fix: the existing entry is
+    // `leaf`, the import explicitly re-asserts `class":"leaf"` while also changing the address
+    // (an operator re-provisioning the same device), and `--force` must apply the address
+    // change while the class comes through as `leaf` — not the zero-value `daemon` a broken
+    // `class` field or a `config.add` call that dropped it on the floor would produce. Combined
+    // with `export_carries_class_for_a_leaf_entry_and_omits_it_for_a_daemon_one` above (which
+    // proves a leaf's class is never merely *omitted* from a fresh export), this rules out the
+    // silent-loss failure mode without asserting an opinion about the deliberate-downgrade case,
+    // which this test does not exercise.
+    let config_home = scratch("import-force-leaf-collision");
+    ok(
+        &config_home,
+        &[
+            "node",
+            "add",
+            "pi-porch",
+            "--addr",
+            "http://10.0.0.7:7777",
+            "--class",
+            "leaf",
+        ],
+    );
+
+    let export_file = config_home.join("reprovisioned-export.json");
+    std::fs::write(
+        &export_file,
+        r#"{"format":"eieio.nodes/v1","nodes":[{"name":"pi-porch","address":"http://10.0.0.7:9999","class":"leaf"}]}"#,
+    )
+    .expect("writing the reprovisioned export fixture");
+
+    let report = ok(
+        &config_home,
+        &[
+            "nodes",
+            "import",
+            "--force",
+            export_file.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert!(report.contains("updated"), "{report}");
+    assert!(report.contains("pi-porch"), "{report}");
+
+    let table = node_table(&config_home, "pi-porch");
+    assert_eq!(
+        table.get("addr").and_then(toml::Value::as_str),
+        Some("http://10.0.0.7:9999"),
+        "force must still apply the address change: {table:?}"
+    );
+    assert_eq!(
+        table.get("class").and_then(toml::Value::as_str),
+        Some("leaf"),
+        "force must not lose the class an explicit leaf-carrying import reasserted: {table:?}"
+    );
+
+    // Effective, not just textual: still refused as a leaf, at the new address.
+    let refusal = refused(&config_home, &["--node", "pi-porch", "node", "info"]);
+    assert!(refusal.contains("leaf"), "{refusal}");
+}
