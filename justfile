@@ -290,6 +290,10 @@ ci: build build-golden shapes
     # `shapes` (a dependency above) has already written the generated file, so the Designer's
     # parity suites must not shell out to cargo again — see the `shapes` recipe for why.
     export EIO_SHAPES_PREGENERATED=1
+    # `build-golden` (a dependency above) has already built the golden blocks, so no test
+    # process may invoke cargo on that target directory — see `golden::build`'s comment for
+    # why even a no-op invocation is a writer, and how that turned CI red twice.
+    export EIO_GOLDEN_PREBUILT=1
 
     # `test-doc` only when nextest is present: without it, `test` already ran doctests
     # via `cargo test --workspace`, and scheduling both would run them twice.

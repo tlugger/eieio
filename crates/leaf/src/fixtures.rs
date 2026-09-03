@@ -31,6 +31,20 @@ pub fn build() -> &'static Path {
     static BUILT: OnceLock<PathBuf> = OnceLock::new();
     BUILT.get_or_init(|| {
         let blocks = Path::new(env!("CARGO_MANIFEST_DIR")).join(BLOCKS);
+        let out = blocks.join("target").join(PORTABLE_TARGET).join("release");
+        // See `eio_conformance::golden::build`'s own comment: `just ci` builds these once up
+        // front and sets this, so no test process invokes cargo on that target directory while
+        // another is reading from it. Cargo re-links the final artifact even on a no-op run,
+        // and a reader in that window sees a file that is there before and after.
+        if std::env::var_os("EIO_GOLDEN_PREBUILT").is_some() {
+            assert!(
+                out.is_dir(),
+                "EIO_GOLDEN_PREBUILT is set but {} does not exist — the harness promised to \
+                 build the golden blocks and did not",
+                out.display()
+            );
+            return out;
+        }
         let status = Command::new(env!("CARGO"))
             .current_dir(&blocks)
             .args(["build", "--release", "--target", PORTABLE_TARGET])
@@ -39,7 +53,7 @@ pub fn build() -> &'static Path {
             .status()
             .expect("cargo runs");
         assert!(status.success(), "the golden blocks did not build");
-        blocks.join("target").join(PORTABLE_TARGET).join("release")
+        out
     })
 }
 
