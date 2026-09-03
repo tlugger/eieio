@@ -118,5 +118,31 @@ jobs:
           cache: npm
           cache-dependency-path: designer/package-lock.json
 
+      - name: Install wasm-pack
+        # `just designer-wasm` builds `crates/expr-wasm` into the package the SPA imports, and
+        # `test-designer` depends on it — so without this the Designer's suite could not run at
+        # all, and `just ci` failed rather than degrading, which is how CI was red from
+        # 2026-08-24 to 2026-09-03 (the other half was a missing `designer/dist`).
+        #
+        # Given a toolchain rather than skipped, for the reason the Node step above states: a
+        # skip that looks green is what this repository keeps removing.
+        #
+        # Version and checksum pinned the way `just` above is, and for the same reason — a
+        # checksum fetched alongside its own tarball proves nothing about that release.
+        env:
+          WASM_PACK_VERSION: 0.12.1
+          WASM_PACK_SHA256: 7339ba3ad776bd5fc04dd5d6b9babe952648050a54226c08206fab4ffeec621f
+        run: |
+          set -euo pipefail
+          dir="wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl"
+          archive="${dir}.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/rustwasm/wasm-pack/releases/download/v${WASM_PACK_VERSION}/${archive}"
+          echo "${WASM_PACK_SHA256}  ${archive}" | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" "${dir}/wasm-pack"
+          install -m 0755 "${dir}/wasm-pack" /usr/local/bin/wasm-pack
+          rm -rf "$dir" "$archive"
+          wasm-pack --version
+
       - name: just ci
         run: just ci
