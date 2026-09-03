@@ -346,6 +346,24 @@ export async function listNodes(systemId: number): Promise<NodeSummary[]> {
   return delay(NODES.filter((n) => n.system_id === systemId));
 }
 
+// --- Session (POST/DELETE /api/session, DESIGNER §3.1) -------------------
+//
+// There is no backend behind mock mode, and therefore nothing that can ever answer `401` —
+// every other function in this file simply returns a fixture, never a `SessionRequiredError`.
+// `client.ts`'s login gate has to exist regardless, so it stays developable and testable with
+// no `crates/designer` running; these two stand in for the real POST/DELETE so it has something
+// to call. They accept any password rather than a magic fixture one, on purpose: the gate is
+// never actually shown in mock mode (nothing here ever signals a session is required), so the
+// only caller left is a developer or a future test deliberately forcing the gate open, and it
+// should not have to know a fixture password to get through it.
+export async function login(_password: string): Promise<void> {
+  await delay(undefined);
+}
+
+export async function logout(): Promise<void> {
+  await delay(undefined);
+}
+
 // --- Services (proxied per-node, /api/nodes/{id}/daemon/services/...) ---
 
 /** The fields a service *file* actually holds (SERVICE §3, §5, §6) — never

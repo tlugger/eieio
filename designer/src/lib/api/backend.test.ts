@@ -6,7 +6,17 @@
 // the *decoding* it did of a scripted response, never a real socket.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { listSystems, listNodes, listBlockManifests, SessionRequiredError, BackendRequestError } from './backend';
+import {
+  listSystems,
+  listNodes,
+  listBlockManifests,
+  login,
+  logout,
+  SessionRequiredError,
+  WrongPasswordError,
+  BackendRequestError,
+} from './backend';
+import { listSystems as clientListSystems, onSessionRequired } from './client';
 import type { NodeSummary } from './types';
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -28,6 +38,7 @@ function unparseableResponse(status: number): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe('listSystems — GET /api/systems', () => {
@@ -197,5 +208,147 @@ describe('listBlockManifests — GET /api/blocks, flattened', () => {
   it('throws SessionRequiredError on a 401, not an empty palette', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
     await expect(listBlockManifests()).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+});
+
+describe('login — POST /api/session', () => {
+  function noBodyResponse(status: number): Response {
+    return new Response(null, { status });
+  }
+
+  it('posts the password, with credentials, to the right path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(noBodyResponse(204));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await login('the-operator-password');
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/session');
+    expect(init?.method).toBe('POST');
+    expect(init?.credentials).toBe('same-origin');
+    expect(JSON.parse(init?.body as string)).toEqual({ password: 'the-operator-password' });
+  });
+
+  it('resolves on the right password (204) without trying to decode a body', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(noBodyResponse(204)));
+    await expect(login('correct')).resolves.toBeUndefined();
+  });
+
+  // This bead's first negative proof: a wrong password must never resolve as success. See the
+  // final report for the transcript of this test failing while `login` briefly treated `401`
+  // the same as any other status and let it fall through to `response.ok` (true for neither,
+  // but a mis-ordered check let it slip past into a silent resolve in the version that failed
+  // this test).
+  it('throws WrongPasswordError on a 401, not a resolved login', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'wrong password' })),
+    );
+    await expect(login('not-it')).rejects.toBeInstanceOf(WrongPasswordError);
+  });
+
+  it('a WrongPasswordError is distinguishable from a SessionRequiredError by type', async () => {
+    // The same status code, `401`, means two different things depending on which endpoint
+    // answers it — this is the assertion that a caller can actually tell them apart rather
+    // than both being "some 401 happened".
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'x' })));
+    const failure = await login('nope').then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(WrongPasswordError);
+    expect(failure).not.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 500, carrying the body message', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(500, { error: 'internal', message: 'no randomness to mint a session' })),
+    );
+    const failure = await login('correct').then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as BackendRequestError).status).toBe(500);
+    expect((failure as Error).message).toContain('no randomness to mint a session');
+  });
+});
+
+describe('logout — DELETE /api/session', () => {
+  it('sends DELETE, with credentials, to the right path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await logout();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/session');
+    expect(init?.method).toBe('DELETE');
+    expect(init?.credentials).toBe('same-origin');
+  });
+
+  it('resolves whether or not a session was live (backend idempotence, session.rs)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(logout()).resolves.toBeUndefined();
+  });
+});
+
+describe('client.ts — a later 401 re-raises the gate, not "Failed to load"', () => {
+  // `App.svelte` has no component test harness yet (eieio-m9s.32 is adding one in parallel),
+  // so the one thing about the gate that *can* be pinned as a plain function is this: does a
+  // `SessionRequiredError` surfacing through `client.ts`, from any call and at any point (not
+  // only the first one `App.svelte` makes), actually notify something that can react to it —
+  // as opposed to only being a rejection a `catch` happened to be looking for. `onSessionRequired`
+  // is that "something"; `App.svelte` is its one real subscriber, but the wiring that fires it
+  // is plain TypeScript and testable without mounting anything.
+  //
+  // `VITE_EIO_BACKEND=real` is forced here so `client.ts`'s own dispatch (`useRealBackend()`)
+  // takes the real-fetch branch under `vitest run`'s otherwise-mock default (`./client.ts`'s
+  // own module doc) — the one deliberate exception to "tests never need a real backend": this
+  // still never opens a socket, only the branch that would.
+  it('notifies onSessionRequired subscribers when a later call hits a 401, in addition to rejecting', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    try {
+      // This bead's second, more important negative proof: see the final report for the
+      // transcript of this test failing while `client.ts`'s wrapper caught
+      // `SessionRequiredError` and rethrew it without telling `onSessionRequired`'s
+      // subscribers at all — the exact shape a regression back to "just let it reject and
+      // hope some `catch` renders it" would take, and indistinguishable from "Failed to
+      // load" at the one layer (`App.svelte`) that has no harness to catch it directly.
+      await expect(clientListSystems()).rejects.toBeInstanceOf(SessionRequiredError);
+      expect(notified).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('does not notify on an unrelated failure (a 500 is "Failed to load", not the gate)', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(500, { error: 'internal', message: 'the registry is locked' })),
+    );
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    try {
+      await expect(clientListSystems()).rejects.toBeInstanceOf(BackendRequestError);
+      expect(notified).toBe(false);
+    } finally {
+      unsubscribe();
+    }
   });
 });

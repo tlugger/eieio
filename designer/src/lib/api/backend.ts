@@ -57,24 +57,80 @@ export class BackendRequestError extends Error {
   }
 }
 
+/**
+ * Thrown when `POST /api/session` itself answers `401` — the password presented was wrong
+ * (`crates/designer/src/api/session.rs`'s `login`, `constant_time_eq`). Distinct from
+ * {@link SessionRequiredError}: that one means "no session was presented"; this one means
+ * "one was, deliberately, at the login endpoint itself, and it was rejected" — the same
+ * endpoint answering the same status code for two different reasons is exactly why a caller
+ * needs a type to switch on rather than a status number.
+ */
+export class WrongPasswordError extends Error {
+  constructor() {
+    super('wrong password');
+    this.name = 'WrongPasswordError';
+  }
+}
+
+/** Builds the `BackendRequestError` for a non-2xx, non-401 response, folding in the body's
+ *  `{message}` when there is one — the same fallback `getJson` and `login`/`logout` all need. */
+async function backendErrorFrom(path: string, response: Response): Promise<BackendRequestError> {
+  const error = new BackendRequestError(path, response.status);
+  try {
+    const body = (await response.json()) as { message?: unknown };
+    if (typeof body?.message === 'string' && body.message.length > 0) {
+      error.message = `${path}: HTTP ${response.status}: ${body.message}`;
+    }
+  } catch {
+    // Not JSON, or not `{message}` — `error.message` already carries the status alone.
+  }
+  return error;
+}
+
 async function getJson<T>(path: string): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin' });
   if (response.status === 401) {
     throw new SessionRequiredError(path);
   }
   if (!response.ok) {
-    const error = new BackendRequestError(path, response.status);
-    try {
-      const body = (await response.json()) as { message?: unknown };
-      if (typeof body?.message === 'string' && body.message.length > 0) {
-        error.message = `${path}: HTTP ${response.status}: ${body.message}`;
-      }
-    } catch {
-      // Not JSON, or not `{message}` — `error.message` already carries the status alone.
-    }
-    throw error;
+    throw await backendErrorFrom(path, response);
   }
   return (await response.json()) as T;
+}
+
+/**
+ * `POST /api/session` (DESIGNER §3.1): logs in with the operator password. The response body
+ * is empty either way (`204` or `401` with `{error, message}`) — nothing here is decoded, and
+ * nothing here retains the password past this call; the session it mints travels back as a
+ * `Set-Cookie` the browser stores and this code never reads (`session.rs`'s doc: `HttpOnly`).
+ */
+export async function login(password: string): Promise<void> {
+  const path = '/api/session';
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  });
+  if (response.status === 401) {
+    throw new WrongPasswordError();
+  }
+  if (!response.ok) {
+    throw await backendErrorFrom(path, response);
+  }
+}
+
+/**
+ * `DELETE /api/session` (DESIGNER §3.1): logs out. Idempotent on the backend (a missing or
+ * already-dead cookie is not an error, `api/session.rs`'s `logout`), so this has no real
+ * failure mode of its own short of the network being down entirely.
+ */
+export async function logout(): Promise<void> {
+  const path = '/api/session';
+  const response = await fetch(path, { method: 'DELETE', credentials: 'same-origin' });
+  if (!response.ok) {
+    throw await backendErrorFrom(path, response);
+  }
 }
 
 /** `GET /api/systems` (DESIGNER §3.1). */

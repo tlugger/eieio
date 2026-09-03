@@ -36,6 +36,7 @@
 import type { BlockManifest, NodeSummary, SystemSummary } from './types';
 import * as backend from './backend';
 import * as mock from './mock';
+import { SessionRequiredError } from './backend';
 
 export {
   listServices,
@@ -62,27 +63,76 @@ function useRealBackend(): boolean {
   return import.meta.env.PROD;
 }
 
+// --- Session (eieio-m9s.31) ------------------------------------------------
+//
+// DESIGNER §3.1's login gate is one password field and `POST /api/session`; everything below
+// is the seam that lets a login gate exist without every call site above having to think about
+// a `401`. `backend.ts` already throws `SessionRequiredError` — a type, not a message — for
+// exactly this reason; this is where that type gets turned into a signal something can react
+// to no matter which of this file's functions noticed it first.
+//
+// This is a plain listener set and not a Svelte store on purpose: this module is imported by
+// `backend.test.ts` and the other `mock-*.test.ts` suites, none of which run inside a Svelte
+// component, and a store would make this file depend on `svelte` for no reason those tests
+// need. `App.svelte` — the one place in this SPA that owns "is the gate up" — subscribes once
+// at the top of its own script and turns this into `$state` itself.
+type SessionRequiredListener = () => void;
+const sessionRequiredListeners = new Set<SessionRequiredListener>();
+
+/**
+ * Calls `listener` the next time (and every time) a call through this seam discovers there is
+ * no live session. Returns an unsubscribe function. `App.svelte`'s gate is the only intended
+ * subscriber — see this file's own note above on why it is a plain set rather than a store.
+ */
+export function onSessionRequired(listener: SessionRequiredListener): () => void {
+  sessionRequiredListeners.add(listener);
+  return () => sessionRequiredListeners.delete(listener);
+}
+
+/** Wraps a real-backend call so a `SessionRequiredError` it throws also notifies every
+ *  `onSessionRequired` subscriber — in addition to, never instead of, rethrowing it, so a
+ *  caller with its own `try`/`catch` (`backend.test.ts`'s own assertions included) still sees
+ *  exactly the rejection `backend.ts` produced. */
+async function watchSession<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call;
+  } catch (error) {
+    if (error instanceof SessionRequiredError) {
+      for (const listener of sessionRequiredListeners) listener();
+    }
+    throw error;
+  }
+}
+
+/** `POST /api/session` (DESIGNER §3.1), real or a no-op stand-in per `useRealBackend()` — see
+ *  `mock.ts`'s own doc for why a mock login accepts any password rather than a fixture one. */
+export function login(password: string): Promise<void> {
+  return useRealBackend() ? backend.login(password) : mock.login(password);
+}
+
+/** `DELETE /api/session` (DESIGNER §3.1), real or a no-op stand-in per `useRealBackend()`. */
+export function logout(): Promise<void> {
+  return useRealBackend() ? backend.logout() : mock.logout();
+}
+
+export { SessionRequiredError, WrongPasswordError, BackendRequestError } from './backend';
+
 /** `GET /api/systems` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
 export function listSystems(): Promise<SystemSummary[]> {
-  return useRealBackend() ? backend.listSystems() : mock.listSystems();
+  return useRealBackend() ? watchSession(backend.listSystems()) : mock.listSystems();
 }
 
 /** `GET /api/nodes` (DESIGNER §3.1), filtered to one System — see `./backend.ts`'s own doc for
  *  why the real implementation does that filtering itself rather than the wire. */
 export function listNodes(systemId: number): Promise<NodeSummary[]> {
-  return useRealBackend() ? backend.listNodes(systemId) : mock.listNodes(systemId);
+  return useRealBackend() ? watchSession(backend.listNodes(systemId)) : mock.listNodes(systemId);
 }
 
 /** `GET /api/blocks` (DESIGNER §3.1), flattened to `BlockManifest` either way — see
  *  `./backend.ts`'s own doc for what the real endpoint's row shape is before flattening. */
 export function listBlockManifests(): Promise<BlockManifest[]> {
-  return useRealBackend() ? backend.listBlockManifests() : mock.listBlockManifests();
+  return useRealBackend() ? watchSession(backend.listBlockManifests()) : mock.listBlockManifests();
 }
-
-// Named, `instanceof`-able so a future caller can tell "not logged in" from any other failure.
-// `./backend.ts`'s own doc explains why this seam stops at exporting them rather than also
-// building the login prompt nothing in this SPA has yet — that UI is outside this bead's files.
-export { SessionRequiredError, BackendRequestError } from './backend';
 
 export type * from './types';
 export type { InstalledBlock, RevalidationOutcome } from './manifests';
@@ -104,8 +154,19 @@ import type { InstalledBlock } from './manifests';
  * a second, per-endpoint route. Used only to revalidate an already-cached manifest before an
  * act — never to populate the palette, which reads the Designer's own cache and nothing else.
  */
-export async function getNodeCachedBlocks(nodeId: string): Promise<InstalledBlock[]> {
-  const response = await fetch(`/api/nodes/${nodeId}/daemon/blocks`);
+export function getNodeCachedBlocks(nodeId: string): Promise<InstalledBlock[]> {
+  return watchSession(getNodeCachedBlocksReal(nodeId));
+}
+
+async function getNodeCachedBlocksReal(nodeId: string): Promise<InstalledBlock[]> {
+  const path = `/api/nodes/${nodeId}/daemon/blocks`;
+  const response = await fetch(path, { credentials: 'same-origin' });
+  // Proxied through this crate's own session guard same as everything else under `/api`
+  // (DESIGNER §3.1) — a session that expired mid-use is exactly as reachable here as it is
+  // through `listSystems`/`listNodes`/`listBlockManifests`, so it gets the same treatment.
+  if (response.status === 401) {
+    throw new SessionRequiredError(path);
+  }
   if (!response.ok) {
     throw new Error(`GET /blocks on node ${nodeId} failed: ${response.status}`);
   }
@@ -120,12 +181,21 @@ export async function getNodeCachedBlocks(nodeId: string): Promise<InstalledBloc
  * contains `/`), so it is written into the path verbatim rather than URI-component-encoded,
  * which would escape the very slashes the route expects to see.
  */
-export async function putCachedManifest(reference: string, manifest: unknown): Promise<void> {
-  const response = await fetch(`/api/blocks/${reference}`, {
+export function putCachedManifest(reference: string, manifest: unknown): Promise<void> {
+  return watchSession(putCachedManifestReal(reference, manifest));
+}
+
+async function putCachedManifestReal(reference: string, manifest: unknown): Promise<void> {
+  const path = `/api/blocks/${reference}`;
+  const response = await fetch(path, {
     method: 'PUT',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ manifest }),
   });
+  if (response.status === 401) {
+    throw new SessionRequiredError(path);
+  }
   if (!response.ok) {
     throw new Error(`PUT /api/blocks/${reference} failed: ${response.status}`);
   }

@@ -23,6 +23,7 @@
   import ConflictBanner from './lib/components/ConflictBanner.svelte';
   import InspectorPanel from './lib/components/InspectorPanel.svelte';
   import NodeDashboard from './lib/components/NodeDashboard.svelte';
+  import LoginGate from './lib/components/LoginGate.svelte';
   import * as api from './lib/api/client';
   import { resolveManifest } from './lib/derive/capabilities';
   import { makePropertyNameResolver } from './lib/derive/props';
@@ -61,6 +62,54 @@
   let busy = $state(false);
   let libraryOpen = $state(false);
   let loadError = $state<string | null>(null);
+
+  // --- The login gate (DESIGNER §3.1, eieio-m9s.31) -------------------------
+  //
+  // `sessionRequired` starts true — the SPA has no way to ask "is there already a live
+  // session" (the spec's own surface is exactly `POST`/`DELETE /api/session`, nothing that
+  // reads one), so the honest default is to assume the gate is needed until the very first
+  // load proves otherwise. `booting` covers the gap while that first load is in flight, so a
+  // page that turns out to already hold a valid cookie never flashes an empty navigator/canvas
+  // before its data arrives — the same "no empty list" rule this bead's brief calls out for a
+  // 401, applied to the one other moment an empty shell could show through.
+  //
+  // `client.ts`'s `onSessionRequired` is the seam every later 401 arrives through, from
+  // whichever call noticed it first (`loadAll` below, an edit, a manifest revalidation) — this
+  // is the one and only place that reacts to it, which is the whole point of that seam: no
+  // other component in this shell has to know a session can expire.
+  let sessionRequired = $state(true);
+  let booting = $state(true);
+
+  api.onSessionRequired(() => {
+    sessionRequired = true;
+  });
+
+  function handleAuthenticated() {
+    sessionRequired = false;
+    loadError = null;
+    booting = true;
+    void loadAll();
+  }
+
+  async function handleSignOut() {
+    try {
+      await api.logout();
+    } finally {
+      // A session this tab minted is gone either way (the backend's own `logout` is
+      // idempotent, `session.rs`'s doc) — drop everything this tab loaded under it rather
+      // than leave a signed-out screen showing a signed-in operator's data underneath the
+      // gate once it reopens.
+      sessionRequired = true;
+      booting = true;
+      systems = [];
+      nodesBySystem = new Map();
+      manifests = [];
+      allNodes = [];
+      selected = null;
+      currentService = null;
+      loadError = null;
+    }
+  }
 
   // The last edit attempt's refusal, if any (DESIGNER §5: rendered inline on
   // the offending block/property/connection, never silently swallowed).
@@ -115,6 +164,8 @@
       allNodes = nodes;
     } catch (err) {
       loadError = err instanceof Error ? err.message : String(err);
+    } finally {
+      booting = false;
     }
   }
 
@@ -433,6 +484,16 @@
   }
 </script>
 
+{#if sessionRequired}
+  <LoginGate onAuthenticated={handleAuthenticated} />
+{:else if booting}
+  <!-- The gap between "no SessionRequiredError yet" and "the first load actually landed" —
+       see the state declarations above for why this exists at all rather than just letting
+       the navigator/canvas render with nothing in them for a moment. -->
+  <div class="boot">Loading…</div>
+{:else}
+<button type="button" class="sign-out" onclick={handleSignOut}>Sign out</button>
+
 <IconRail onOpenDashboard={() => (dashboardOpen = true)} />
 
 <NavigatorTree {systems} {nodesBySystem} {selected} onSelectService={selectService} />
@@ -495,6 +556,7 @@
 {#if libraryOpen}
   <BlockLibrary {manifests} node={selectedNode} onSelect={handleAddBlock} onClose={() => (libraryOpen = false)} />
 {/if}
+{/if}
 
 {#if configuringInstance && currentService}
   <ConfigModal
@@ -522,5 +584,37 @@
     background: var(--state-errored);
     color: #fff;
     font-size: 12px;
+  }
+
+  .boot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100vw;
+    height: 100vh;
+    color: var(--chrome-text-muted);
+    font-size: 13px;
+  }
+
+  /* The smallest defensible sign-out affordance (DESIGNER §3.1 leaves this UX-optional):
+     `DELETE /api/session` needs a caller from somewhere, and every other component in this
+     shell is another bead's file — this sits directly on the app shell rather than inside
+     Toolbar/IconRail so it does not touch either. */
+  .sign-out {
+    position: fixed;
+    top: 8px;
+    right: 12px;
+    z-index: 10;
+    border: 1px solid var(--chrome-border);
+    background: var(--chrome-bg-raised);
+    color: var(--chrome-text-muted);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .sign-out:hover {
+    color: var(--chrome-text);
   }
 </style>
