@@ -179,6 +179,23 @@ test-doc:
 test-golden:
     cargo test --manifest-path examples/blocks/Cargo.toml
 
+# Build the golden blocks' wasm once, up front, so no test process has to.
+#
+# `ci` depends on this and it is not an optimisation. Two crates build these on demand —
+# `eio_conformance::golden::build()` (reached from `suite::run_own`) and
+# `eio_leaf::fixtures::build()` — and both shell out to this same `cargo build` against this
+# same target directory. Under nextest every test binary is its own *process*, so neither
+# crate's in-process memoisation helps: half a dozen of them race, cargo's lock serialises the
+# builds but not a build against another process's *read*, and a reader that arrives while the
+# artifact is being re-linked sees `No such file or directory` for a file that is there before
+# and after. That is exactly how `ci` went red on `wamr_passes_the_conformance_suite` looking
+# for `transform.wasm`, which passed on its own immediately afterwards.
+#
+# Building first makes every later invocation a no-op that touches no artifact, which is the
+# fix: the race needs a *writer*, and after this there is none.
+build-golden:
+    cargo build --release --manifest-path examples/blocks/Cargo.toml --target {{ guest_target }}
+
 # See the comment block at the top of this file for the target rationale.
 
 # Prove the ★ crates still build without std.
@@ -244,7 +261,7 @@ publish-dry-run:
 # stage did.
 
 # The one command CI runs: builds, then fmt/lint/test/nostd/guest concurrently, then the golden blocks.
-ci: build
+ci: build build-golden
     #!/usr/bin/env bash
     set -euo pipefail
     logdir="$(mktemp -d)"
