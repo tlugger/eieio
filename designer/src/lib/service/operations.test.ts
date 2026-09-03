@@ -15,7 +15,8 @@ import {
   setPropertiesOperations,
   setNameOperations,
 } from './operations';
-import { ERROR_PORT } from '../api/types';
+import { ERROR_PORT, type UiLayout } from '../api/types';
+import { parseUiFragment } from './toml-values';
 
 describe('mintBlockId', () => {
   afterEach(() => {
@@ -168,6 +169,145 @@ describe('layoutOperations', () => {
 
     const changed = layoutOperations({ blocks: {}, viewport: { x: 0, y: 0, zoom: 1.5 } }, previous);
     expect(changed).toEqual([{ op: 'set_ui', key: 'viewport', value: '{ x = 0.0, y = 0.0, zoom = 1.5 }' }]);
+  });
+
+  // eieio-m9s.26: SERVICE §6's "[ui] MUST survive a read-modify-write
+  // unchanged" pinned at the seam that would actually break it — a drag
+  // that rewrites the very entry an unknown key was nested inside. A test
+  // that only shows an *untouched* file is unchanged proves nothing (the
+  // bead's own words); these move the block or the viewport that carries
+  // the unknown key.
+  it('carries a moved block\'s unrecognized nested key forward into the new value', () => {
+    const previous = { blocks: { a: { x: 0, y: 0, extra: 'locked = true' } } };
+    const ops = layoutOperations({ blocks: { a: { x: 20, y: 10 } } }, previous);
+    expect(ops).toEqual([{ op: 'set_ui', key: 'a', value: '{ x = 20.0, y = 10.0, locked = true }' }]);
+  });
+
+  it('carries a moved viewport\'s unrecognized nested key forward into the new value', () => {
+    const previous = { blocks: {}, viewport: { x: 0, y: 0, zoom: 1, extra: 'note = "do not touch"' } };
+    const ops = layoutOperations({ blocks: {}, viewport: { x: 5, y: 5, zoom: 2 } }, previous);
+    expect(ops).toEqual([
+      { op: 'set_ui', key: 'viewport', value: '{ x = 5.0, y = 5.0, zoom = 2.0, note = "do not touch" }' },
+    ]);
+  });
+
+  it('never emits an operation for a stale [ui] entry the canvas no longer has', () => {
+    // SERVICE §6: "an entry naming an id the file does not define is not an
+    // error"; SERVICE §9: "removing a block does not touch [ui]" — a stale
+    // annotation is inert by design, not something this shell should tidy
+    // up. `f3m9` sits in `previous` (the block was deleted from the
+    // canvas) but never in `next.blocks`, so it is simply never iterated —
+    // there is nothing here to "clean up" and nothing that would.
+    const previous = { blocks: { a: { x: 0, y: 0 }, f3m9: { x: 340, y: 120, extra: 'locked = true' } } };
+    const ops = layoutOperations({ blocks: { a: { x: 0, y: 0 } } }, previous);
+    expect(ops).toEqual([]);
+  });
+});
+
+// eieio-m9s.26: the guarantee proved at the level of a whole `[ui]` table's
+// text, not just one formatted value — the case this shell's own doc
+// comments call out as the one a naive reconstruction loses ("a key nested
+// inside a known one"). `applySetUi` below stands in for `Document::set_ui`
+// (`eio-service`, out of this bead's scope: it lives in `crates/**`) just
+// enough to grade the property this bead is pinning: replace exactly the
+// named key's value, touch no other line. It is a test-only stand-in, not a
+// second editor — nothing here is shipped, and it asserts nothing about
+// what an unrecognized key *means*, only that its bytes come back.
+function applySetUi(rawTable: string, key: string, value: string): string {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const lineRe = new RegExp(`^(\\s*${escapedKey}\\s*=\\s*).*$`, 'm');
+  if (!lineRe.test(rawTable)) throw new Error(`applySetUi: no "${key}" entry in the table`);
+  return rawTable.replace(lineRe, (_match, prefix: string) => `${prefix}${value}`);
+}
+
+/** The mirror of `applySetUi`: turns a raw `[ui]` table's text into the
+ * `UiLayout` `layoutOperations` diffs against, using `parseUiFragment` per
+ * entry. A line whose value is not an inline table (`notes = "…"`, a plain
+ * string) is left out of the parsed model entirely — it is not a block
+ * position or the viewport, so this shell has no slot for it and, more to
+ * the point, never needs one: nothing here targets it, which is the whole
+ * proof for the top-level-unknown-key case. */
+function buildUiLayoutFromRawTable(rawTable: string): UiLayout {
+  const blocks: UiLayout['blocks'] = {};
+  let viewport: UiLayout['viewport'];
+  for (const line of rawTable.split('\n')) {
+    const m = /^(\S+)\s*=\s*(\{.*\})\s*$/.exec(line.trim());
+    if (!m) continue;
+    const [, key, value] = m;
+    const { known, extra } = parseUiFragment(value!);
+    if (key === 'viewport') {
+      if (known.x !== undefined && known.y !== undefined && known.zoom !== undefined) {
+        viewport = { x: known.x, y: known.y, zoom: known.zoom, ...(extra ? { extra } : {}) };
+      }
+    } else if (known.x !== undefined && known.y !== undefined) {
+      blocks[key!] = { x: known.x, y: known.y, ...(extra ? { extra } : {}) };
+    }
+  }
+  return viewport ? { blocks, viewport } : { blocks };
+}
+
+describe('round trip: an unknown [ui] key survives an edit that rewrites the table', () => {
+  const rawUiTable = [
+    'b7k2 = { x = 40.0, y = 120.0 }',
+    'f3m9 = { x = 340.0, y = 120.0, locked = true }',
+    'notes = "operator wrote this by hand"',
+    'viewport = { x = 0.0, y = 0.0, zoom = 1.0 }',
+  ].join('\n');
+
+  it('an unknown key nested inside the block that moves survives, and only that line changes', () => {
+    const previous = buildUiLayoutFromRawTable(rawUiTable);
+    const ops = layoutOperations({ blocks: { b7k2: { x: 40, y: 120 }, f3m9: { x: 999, y: 888 } } }, previous);
+    expect(ops).toEqual([{ op: 'set_ui', key: 'f3m9', value: '{ x = 999.0, y = 888.0, locked = true }' }]);
+
+    let text = rawUiTable;
+    for (const op of ops) {
+      if (op.op === 'set_ui') text = applySetUi(text, op.key, op.value);
+    }
+    expect(text).toBe(
+      [
+        'b7k2 = { x = 40.0, y = 120.0 }',
+        'f3m9 = { x = 999.0, y = 888.0, locked = true }',
+        'notes = "operator wrote this by hand"',
+        'viewport = { x = 0.0, y = 0.0, zoom = 1.0 }',
+      ].join('\n'),
+    );
+  });
+
+  it('an unknown key nested inside the viewport survives a viewport-only edit', () => {
+    const rawWithViewportExtra = rawUiTable.replace(
+      'viewport = { x = 0.0, y = 0.0, zoom = 1.0 }',
+      'viewport = { x = 0.0, y = 0.0, zoom = 1.0, locked = true }',
+    );
+    const previous = buildUiLayoutFromRawTable(rawWithViewportExtra);
+    const ops = layoutOperations(
+      { blocks: { b7k2: { x: 40, y: 120 }, f3m9: { x: 340, y: 120 } }, viewport: { x: 10, y: 20, zoom: 2 } },
+      previous,
+    );
+    expect(ops).toEqual([
+      { op: 'set_ui', key: 'viewport', value: '{ x = 10.0, y = 20.0, zoom = 2.0, locked = true }' },
+    ]);
+
+    let text = rawWithViewportExtra;
+    for (const op of ops) {
+      if (op.op === 'set_ui') text = applySetUi(text, op.key, op.value);
+    }
+    expect(text).toBe(
+      [
+        'b7k2 = { x = 40.0, y = 120.0 }',
+        'f3m9 = { x = 340.0, y = 120.0, locked = true }',
+        'notes = "operator wrote this by hand"',
+        'viewport = { x = 10.0, y = 20.0, zoom = 2.0, locked = true }',
+      ].join('\n'),
+    );
+  });
+
+  it('a top-level key this shell has never heard of is named by no operation at all', () => {
+    const previous = buildUiLayoutFromRawTable(rawUiTable);
+    const ops = layoutOperations({ blocks: { b7k2: { x: 40, y: 120 }, f3m9: { x: 340, y: 120 } } }, previous);
+    expect(ops).toEqual([]);
+    // Nothing above touches `notes` — there is no `UiLayout` slot for it and
+    // no operation could name it, which is why the raw text is untouched by
+    // construction rather than by a check this test performs on the text.
   });
 });
 

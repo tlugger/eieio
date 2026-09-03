@@ -147,6 +147,18 @@ export function setAutostartOperations(value: boolean): ServiceEditOperation[] {
  * `[ui]` this shell last read, and skipping unchanged positions is what
  * keeps an unrelated pan-and-zoom from writing a `set_ui` for every block on
  * the canvas (SERVICE §9: preserve what did not change).
+ *
+ * A moved block's or viewport's `before.extra` — whatever this shell does
+ * not understand that was already sitting in that same entry
+ * (eieio-m9s.26, `toml-values.ts`'s `parseUiFragment`) — is threaded into
+ * the new value alongside the new `x`/`y`. Skipping that would make this a
+ * naive reconstruction from the canvas's own model, which only knows `x`
+ * and `y`: it would silently drop a hand-written note or an unrecognized
+ * key the moment its block was next dragged, which is exactly the failure
+ * SERVICE §6's "MUST survive a read-modify-write unchanged" exists to rule
+ * out. A `previous` entry with no `extra` (nothing recognized, or a block
+ * this shell added itself) costs nothing here: `formatPositionToml`/
+ * `formatViewportToml` simply omit it.
  */
 export function layoutOperations(
   next: { blocks: Record<string, { x: number; y: number }>; viewport?: { x: number; y: number; zoom: number } },
@@ -156,14 +168,14 @@ export function layoutOperations(
   for (const [id, position] of Object.entries(next.blocks)) {
     const before = previous.blocks[id];
     if (before && before.x === position.x && before.y === position.y) continue;
-    ops.push({ op: 'set_ui', key: id, value: formatPositionToml(position) });
+    ops.push({ op: 'set_ui', key: id, value: formatPositionToml(position, before?.extra) });
   }
   if (next.viewport) {
     const before = previous.viewport;
     const unchanged =
       before && before.x === next.viewport.x && before.y === next.viewport.y && before.zoom === next.viewport.zoom;
     if (!unchanged) {
-      ops.push({ op: 'set_ui', key: 'viewport', value: formatViewportToml(next.viewport) });
+      ops.push({ op: 'set_ui', key: 'viewport', value: formatViewportToml(next.viewport, before?.extra) });
     }
   }
   return ops;

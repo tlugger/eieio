@@ -148,6 +148,30 @@ The operations are `Document`'s own (SERVICE §9): `add_block`, `remove_block`, 
 - **Layout lives in the service file** under the daemon-ignored `[ui]` table (DAEMON-SPEC §2): node positions, canvas viewport, notes. Rationale: the service file stays the single portable artifact — git-clone a service onto a fresh node and the Designer renders it laid out; agents can read/write layout like anything else. The daemon's ignore-contract keeps this honest.
 - Conflict handling (file changed on disk / by an agent since read): the daemon's, not the Designer's. DAEMON §9.3 makes an overwrite conditional on the `ETag` a `GET` returned, so a stale `PUT` is refused with the current text and a diff before it reaches the disk — the Designer's part is to carry the tag it read and to render the refusal, and it could not silent-overwrite if it tried. Agents and humans editing the same files is the _expected_ condition, not an edge case (SCOPE §4).
 
+### 4.1 The `[ui]` table (normative)
+
+SERVICE §6 defines `[ui]` by refusing to define it — "It has no schema here and never will; a daemon that read a key inside it would make the Designer's layout format a thing the daemon has an opinion about." The daemon is right to be silent, which makes this the document that owes the answer. Until eieio-m9s.26 the answer was a TypeScript interface and nothing else.
+
+**What the Designer writes**, and it is only two shapes, both inline tables under `[ui].<key>`:
+
+|Key|Value|
+|---|---|
+|a block's id|`{ x = <float>, y = <float> }`|
+|the literal `viewport`|`{ x = <float>, y = <float>, zoom = <float> }`|
+
+Numbers are always emitted with a decimal point — a TOML float, never a bare integer — so a position that happens to be whole does not change type between one write and the next.
+
+**What the Designer reads** is exactly `x`, `y` and `zoom`, and only when each is spelled as a bare TOML number. A key present but not a bare number is not read as that key; it falls through to the next rule.
+
+**Everything else is preserved without being understood, and SERVICE §6 makes that a MUST rather than a courtesy** — "It MUST survive a read-modify-write unchanged, which is what makes it safe to put a human's canvas in a file a program rewrites." There are two scopes to it, and the second is the one that was broken:
+
+- **A `[ui]` key outside the two shapes above** is never named by any operation, so an edit does not touch it. That includes an entry for a block id the service no longer declares: a stale annotation is inert, not an error.
+- **An extra member inside a known entry's own inline table** — `locked = true` sitting beside `x` and `y` — is carried forward verbatim and re-spliced whenever that entry is rewritten for an unrelated reason, such as a drag. This is the case a reconstruct-from-the-model implementation loses, and it did: rebuilding a moved block's value from `{x, y}` dropped it silently the moment the block next moved.
+
+**The Designer MUST NOT interpret a preserved member, and MUST NOT normalise one.** It is opaque text; splitting it is quote- and depth-aware precisely so a comma inside a string or a nested inline table survives as itself.
+
+**Not yet reachable end to end, and stating so is the point** (eieio-m9s.26): nothing produces a *structured* `ui` from a real backend. `crates/daemon`'s `ServiceDetail` has no `ui` field, `crates/designer` has no handler that builds one, and `designer/src/lib/api/client.ts` still re-exports the whole service surface from the mock. So preservation is proven where it lives — the pure transform of DESIGNER §3.2 — and the wire representation of a preserved member is an open question for whoever wires the real path, not a settled part of this schema.
+
 ## 5. Canvas and editing UX
 
 - **Shell: one navigator, library on demand.** nio's four always-present columns (System rail, service list, canvas, block library) become a rail, a single indented System → Node → Service tree, and the canvas; the block library opens over the canvas when a block is being added. Same hierarchy, less permanent chrome — a self-hosted operator with two nodes should not spend a third of the window on three list rows. **Run state is shown in the tree and the available action on the toolbar, and they are inverse** (`▷` in the tree means running; `▷` on the toolbar means *start*). nio did this and never labelled it; label it.
@@ -192,4 +216,4 @@ Multi-user/RBAC (SCOPE §6), cloud hosting, canvas undo-collaboration (CRDTs etc
 
 ## 10. Expansion list (for the in-depth pass)
 
-Service-file ↔ canvas mapping (normative, incl. `[ui]` schema), tap inspector UX and sampling controls, palette search/filtering, node onboarding flow (token exchange ergonomics), manifest cache invalidation, MCP tool schema, diff/conflict UX, leaf pipeline integration contract, System-level topology view (cross-node pub/sub edges — depends on OPEN SCOPE §3.9).
+Service-file ↔ canvas mapping (normative — the `[ui]` half is done, §4.1), tap inspector UX and sampling controls, palette search/filtering, node onboarding flow (token exchange ergonomics), manifest cache invalidation, MCP tool schema, diff/conflict UX, leaf pipeline integration contract, System-level topology view (cross-node pub/sub edges — depends on OPEN SCOPE §3.9).

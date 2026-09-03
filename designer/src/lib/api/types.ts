@@ -179,10 +179,23 @@ export interface Connection {
 }
 
 /** SERVICE-SPEC §6: the `[ui]` table. Opaque to the daemon; this shell owns
- * its shape. */
+ * its shape for the two entries it knows how to place on a canvas —
+ * `viewport` and a block's position.
+ *
+ * `extra` on either is eieio-m9s.26's preservation seam: raw TOML member
+ * text (`"key = value, key2 = value2"`) for whatever else was sitting
+ * beside `x`/`y`/`zoom` in that same entry — a hand-written note, a future
+ * Designer version's field, a third-party tool's annotation. SERVICE §6
+ * makes `[ui]` **not this shell's to interpret**, so `extra` is carried
+ * verbatim and never parsed past finding where it ends
+ * (`lib/service/toml-values.ts`'s `parseUiFragment`); it exists so that
+ * `layoutOperations`/`addBlockOperations` can fold it back into a
+ * `set_ui` value they rewrite for an unrelated reason (a position change)
+ * without discarding it — see that module's doc comment for why a naive
+ * `{ x, y }` reconstruction loses it. */
 export interface UiLayout {
-  viewport?: { x: number; y: number; zoom: number };
-  blocks: Record<string, { x: number; y: number }>;
+  viewport?: { x: number; y: number; zoom: number; extra?: string };
+  blocks: Record<string, { x: number; y: number; extra?: string }>;
 }
 
 export type OverflowPolicy = 'backpressure' | 'drop-oldest';
