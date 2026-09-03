@@ -1,10 +1,28 @@
 // The single seam between the shell and the backend.
 //
-// Today every export below is re-exported straight from mock.ts. Swapping
-// to the real backend (crates/designer's axum binary, DESIGNER §3.1) means
-// rewriting the bodies of these functions to call `fetch('/api/...')` and
-// leaving every call site elsewhere in `src/` untouched — this file is the
-// only one that is allowed to know the mock exists.
+// eieio-m9s.30: three of the exports below — `listSystems`, `listNodes`, `listBlockManifests`,
+// DESIGNER §3.1's own small REST surface — now call the real backend (`./backend.ts`,
+// `fetch('/api/...')`) some of the time, chosen by `useRealBackend()` just below. Every other
+// export is still re-exported straight from `mock.ts`, unchanged: everything service-, tap-,
+// log- or block-pull-shaped is reached through DESIGNER §3.1's one catch-all proxy and needs a
+// real node on the other end of it, which is a separate decision this bead does not make. This
+// file's own promise — that swapping an implementation never touches a call site elsewhere in
+// `src/` — is exactly why the three swapped functions below still have the mock's own
+// signatures, `listNodes`'s included (see `./backend.ts`'s doc comment on why that one needs
+// client-side filtering to keep it that way).
+//
+// **Real versus mock is chosen by `import.meta.env.PROD`, with an explicit override.** The
+// default is the property that must hold regardless of anything else: neither `vite dev`'s
+// server nor `vitest run` ever sets `PROD` true, so a developer's everyday loop and the whole
+// test suite never depend on a backend being up — the mock stays what it has always been,
+// "the fixture set for tests and for developing with no backend" (this bead's own brief).
+// `import.meta.env.PROD` is true for exactly the build `crates/designer` actually embeds
+// (`vite build`, run by the `designer-build`/`run-designer` recipes) — the one case where a
+// real backend is not just present but is the very process serving this SPA's own bytes, so
+// defaulting to it there is not a leap of faith. `VITE_EIO_BACKEND=real`/`=mock` overrides
+// either way, for a developer who wants to point `vite dev` at a real `crates/designer`
+// through the already-configured `/api` proxy (`vite.config.ts`) without a production build,
+// or who wants a production *preview* (`vite preview`) to still run on fixtures.
 //
 // DESIGNER §3.1's split matters here: systems/nodes/manifests are the
 // backend's own small REST surface; anything service- or block-shaped is
@@ -15,10 +33,11 @@
 // it never reaches the browser, and that stays true regardless of what
 // this file's bodies end up doing.
 
+import type { BlockManifest, NodeSummary, SystemSummary } from './types';
+import * as backend from './backend';
+import * as mock from './mock';
+
 export {
-  listSystems,
-  listNodes,
-  listBlockManifests,
   listServices,
   getService,
   startService,
@@ -34,6 +53,36 @@ export {
   streamTap,
   streamLogs,
 } from './mock';
+
+/** See this file's own module doc for what each branch means and why the default is safe. */
+function useRealBackend(): boolean {
+  const override = import.meta.env.VITE_EIO_BACKEND;
+  if (override === 'real') return true;
+  if (override === 'mock') return false;
+  return import.meta.env.PROD;
+}
+
+/** `GET /api/systems` (DESIGNER §3.1), real or fixture per `useRealBackend()`. */
+export function listSystems(): Promise<SystemSummary[]> {
+  return useRealBackend() ? backend.listSystems() : mock.listSystems();
+}
+
+/** `GET /api/nodes` (DESIGNER §3.1), filtered to one System — see `./backend.ts`'s own doc for
+ *  why the real implementation does that filtering itself rather than the wire. */
+export function listNodes(systemId: number): Promise<NodeSummary[]> {
+  return useRealBackend() ? backend.listNodes(systemId) : mock.listNodes(systemId);
+}
+
+/** `GET /api/blocks` (DESIGNER §3.1), flattened to `BlockManifest` either way — see
+ *  `./backend.ts`'s own doc for what the real endpoint's row shape is before flattening. */
+export function listBlockManifests(): Promise<BlockManifest[]> {
+  return useRealBackend() ? backend.listBlockManifests() : mock.listBlockManifests();
+}
+
+// Named, `instanceof`-able so a future caller can tell "not logged in" from any other failure.
+// `./backend.ts`'s own doc explains why this seam stops at exporting them rather than also
+// building the login prompt nothing in this SPA has yet — that UI is outside this bead's files.
+export { SessionRequiredError, BackendRequestError } from './backend';
 
 export type * from './types';
 export type { InstalledBlock, RevalidationOutcome } from './manifests';
