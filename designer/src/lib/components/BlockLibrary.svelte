@@ -38,7 +38,11 @@
     }),
   );
 
-  function missing(manifest: BlockManifest): Capability[] {
+  /** `undefined` means `node` has never answered a probe (`NodeSummary.capabilities`,
+   *  eieio-m9s.20) — compatibility is unknown, not "this node can run nothing". The template
+   *  below renders that as its own neutral note, never as the red warning `unmet.length > 0`
+   *  gets. */
+  function missing(manifest: BlockManifest): Capability[] | undefined {
     return node ? missingCapabilities(manifest, node.capabilities) : [];
   }
 
@@ -100,10 +104,14 @@
                   <span class="library__ports">out: {manifest.outputs.map((p) => p.name).join(', ')}</span>
                 {/if}
                 {#each manifest.capabilities as cap (cap)}
-                  <span class="library__capability" class:library__capability--missing={unmet.includes(cap)}>{cap}</span>
+                  <span class="library__capability" class:library__capability--missing={unmet?.includes(cap) ?? false}>{cap}</span>
                 {/each}
               </div>
-              {#if unmet.length > 0}
+              {#if unmet === undefined}
+                <div class="library__unknown">
+                  {node?.name} has never been probed — capability compatibility is unknown.
+                </div>
+              {:else if unmet.length > 0}
                 <div class="library__warning" role="alert">
                   {node?.name} is missing capabilit{unmet.length > 1 ? 'ies' : 'y'}: {unmet.join(', ')}
                 </div>
@@ -272,6 +280,15 @@
     margin-top: 4px;
     font-size: 10px;
     color: var(--state-errored);
+  }
+
+  /* Unknown, not missing — a muted note rather than the alert-styled warning
+     above, so the two are never confused (eieio-m9s.20). */
+  .library__unknown {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--chrome-text-muted);
+    font-style: italic;
   }
 
   .library__empty {

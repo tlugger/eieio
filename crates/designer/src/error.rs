@@ -11,25 +11,38 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 /// A failure from this crate's own handlers.
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
-    body: Body,
+    body: ErrorBody,
 }
 
-#[derive(Debug, Serialize)]
-struct Body {
-    error: &'static str,
-    message: String,
+/// The body of every failure this crate's own handlers answer with — `{error, message}`,
+/// nothing else (see the module doc: there is no `detail` here, unlike `eio-daemon`'s own
+/// `ApiError`, because none of this crate's own slugs carries per-slug structure the way
+/// DAEMON §9.2's does).
+///
+/// `pub(crate)` rather than private: every `#[utoipa::path]` across `crate::api::*` that
+/// answers one of this crate's own error statuses (`400`, `401`, `404`, `502`, `500`) names
+/// this type as that response's `body`, so the OpenAPI document reports the shape actually
+/// serialized rather than a hand-restated one.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// The stable slug a client branches on: `"not_found"`, `"bad_request"`,
+    /// `"unauthorized"`, `"bad_gateway"` or `"internal"`.
+    pub error: &'static str,
+    /// One sentence for a person. Not to be parsed.
+    pub message: String,
 }
 
 impl ApiError {
     fn new(status: StatusCode, error: &'static str, message: impl Into<String>) -> ApiError {
         ApiError {
             status,
-            body: Body {
+            body: ErrorBody {
                 error,
                 message: message.into(),
             },

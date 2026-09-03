@@ -13,7 +13,11 @@
   interface BlockCardData extends Record<string, unknown> {
     instance: BlockInstance;
     manifest: BlockManifest | undefined;
-    missingCapabilities: Capability[];
+    /** `undefined` means the node's own capability set is unknown — it has never answered a
+     *  probe (`NodeSummary.capabilities`, eieio-m9s.20) — which is a different, weaker claim
+     *  than `[]` ("checked: this block is fully compatible"). Rendered as its own neutral badge
+     *  below, never folded into either the "missing" badge or the no-badge silence a `[]` gets. */
+    missingCapabilities: Capability[] | undefined;
     /** Set when the last edit attempt naming this block was refused
      * (DESIGNER §5: "validation errors... rendered inline on the offending
      * block"). A custom node's `data` is the only channel SvelteFlow gives a
@@ -63,7 +67,16 @@
   }}
   title="Double-click to configure"
 >
-  {#if data.missingCapabilities.length > 0}
+  {#if data.missingCapabilities === undefined}
+    <div
+      class="capability-badge capability-badge--unknown"
+      role="img"
+      title="This node has never answered a probe — capability compatibility is unknown, not confirmed either way."
+      aria-label="Capability compatibility unknown: this node has not been successfully probed"
+    >
+      ?
+    </div>
+  {:else if data.missingCapabilities.length > 0}
     <div
       class="capability-badge"
       role="img"
@@ -228,5 +241,13 @@
     justify-content: center;
     border: 2px solid var(--card-bg);
     z-index: 1;
+  }
+
+  /* Unknown is not a claim of "missing" — a neutral, muted badge rather than
+     the alarm-red one below, so the two are never mistaken for each other at
+     a glance (DESIGNER §5's badge exists to be trusted at a glance). */
+  .capability-badge--unknown {
+    background: var(--chrome-border);
+    color: var(--chrome-text-muted);
   }
 </style>

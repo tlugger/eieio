@@ -4,6 +4,7 @@
 
 pub mod blocks;
 pub mod nodes;
+pub mod openapi;
 pub mod proxy;
 pub mod registries;
 pub mod service_edit;

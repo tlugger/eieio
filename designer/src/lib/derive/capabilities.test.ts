@@ -56,4 +56,18 @@ describe('missingCapabilities', () => {
     // and a badge either way would be a claim this has not got.
     expect(missingCapabilities(undefined, [])).toEqual([]);
   });
+
+  // eieio-m9s.20: `NodeSummary.capabilities` is absent until a node is successfully probed
+  // (DESIGNER §3.1's amendment) — this is the case the sub-plan calls out by name: "a block
+  // marked unusable is a claim; a block marked unknown is the truth."
+  it('is unknown, not "missing everything", for a node that has never been probed', () => {
+    const m = manifest('gpio-echo:1.0.0', 'gpio-echo', ['gpio', 'i2c']);
+    // The wrong fix: `nodeCapabilities ?? []` would make every one of the manifest's
+    // capabilities "missing", asserting this node can run nothing when the truth is nobody
+    // has checked. `undefined` in, `undefined` out is how this function refuses to manufacture
+    // that claim.
+    expect(missingCapabilities(m, undefined)).toBeUndefined();
+    // And it stays visibly different from "checked, and it can run everything this needs":
+    expect(missingCapabilities(m, ['gpio', 'i2c'])).toEqual([]);
+  });
 });

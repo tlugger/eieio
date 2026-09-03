@@ -46,11 +46,16 @@
   } from './lib/api/client';
 
   let systems = $state<SystemSummary[]>([]);
-  let nodesBySystem = $state<Map<string, { node: NodeSummary; services: ServiceSummary[] }[]>>(new Map());
+  // eieio-m9s.20: `SystemSummary.id`/`NodeSummary.id` are `number` (a SQLite rowid,
+  // DESIGNER §3.1) — every id-keyed collection below is keyed by that number, not a
+  // stringified form of it, so a `===`/`.get()` against a live `NodeSummary`/`SystemSummary`
+  // never silently compares across the two representations (see this bead's final report for
+  // the full audit of every id comparison this shell makes).
+  let nodesBySystem = $state<Map<number, { node: NodeSummary; services: ServiceSummary[] }[]>>(new Map());
   let manifests = $state<BlockManifest[]>([]);
   let allNodes = $state<NodeSummary[]>([]);
 
-  let selected = $state<{ nodeId: string; serviceName: string } | null>(null);
+  let selected = $state<{ nodeId: number; serviceName: string } | null>(null);
   let currentService = $state<ServiceDefinition | null>(null);
   let busy = $state(false);
   let libraryOpen = $state(false);
@@ -79,12 +84,17 @@
       systems = sys;
       manifests = blocks;
 
-      const map = new Map<string, { node: NodeSummary; services: ServiceSummary[] }[]>();
+      const map = new Map<number, { node: NodeSummary; services: ServiceSummary[] }[]>();
       const nodes: NodeSummary[] = [];
       for (const system of sys) {
         const nodesForSystem = await api.listNodes(system.id);
+        // `listServices` (and every other daemon-proxy call below) is a path parameter on
+        // `/api/nodes/{id}/daemon/...` — a string on the wire regardless of what mints it — so
+        // `node.id` (a `number`, DESIGNER §3.1) is rendered to one at the call site, same as a
+        // template literal would. This is the one conversion in this file; every *comparison*
+        // against `node.id`/`system.id` below instead uses the number as-is.
         const entries = await Promise.all(
-          nodesForSystem.map(async (node) => ({ node, services: await api.listServices(node.id) })),
+          nodesForSystem.map(async (node) => ({ node, services: await api.listServices(String(node.id)) })),
         );
         map.set(system.id, entries);
         nodes.push(...nodesForSystem);
@@ -101,13 +111,17 @@
   const selectedNode = $derived(allNodes.find((n) => n.id === selected?.nodeId) ?? null);
   const selectedServiceSummary = $derived(
     selected
-      ? (nodesBySystem.get(selectedNode?.system_id ?? '') ?? [])
+      ? // `-1` is a sentinel that can never equal a real `system_id` (a SQLite rowid, DESIGNER
+        // §3, starts at 1) — not `''`, which does not even type-check against `Map<number, …>`
+        // and previously worked only because it could never coincide with the string ids this
+        // shell used before eieio-m9s.20. Same reasoning as `selectedNode`'s own `?? null`.
+        (nodesBySystem.get(selectedNode?.system_id ?? -1) ?? [])
           .find((e) => e.node.id === selected!.nodeId)
           ?.services.find((s) => s.name === selected!.serviceName) ?? null
       : null,
   );
 
-  async function selectService(nodeId: string, serviceName: string) {
+  async function selectService(nodeId: number, serviceName: string) {
     selected = { nodeId, serviceName };
     currentService = null;
     editErrorMessage = null;
@@ -121,11 +135,11 @@
     // sub-plan calls out.
     tappedConnection = null;
     selectedBlockId = null;
-    currentService = await api.getService(nodeId, serviceName);
+    currentService = await api.getService(String(nodeId), serviceName);
   }
 
-  async function refreshServiceList(nodeId: string) {
-    const services = await api.listServices(nodeId);
+  async function refreshServiceList(nodeId: number) {
+    const services = await api.listServices(String(nodeId));
     const node = allNodes.find((n) => n.id === nodeId);
     if (!node) return;
     const entries = nodesBySystem.get(node.system_id) ?? [];
@@ -182,7 +196,12 @@
         editErrorBlockId = failure?.instance ?? null;
         return;
       }
-      const putResult = await api.putService(selected!.nodeId, selected!.serviceName, editResult.toml, currentService!.etag);
+      const putResult = await api.putService(
+        String(selected!.nodeId),
+        selected!.serviceName,
+        editResult.toml,
+        currentService!.etag,
+      );
       if (!putResult.ok) {
         if (putResult.status === 412) {
           conflict = { current: putResult.current ?? '' };
@@ -191,7 +210,7 @@
         }
         return;
       }
-      currentService = await api.getService(selected!.nodeId, selected!.serviceName);
+      currentService = await api.getService(String(selected!.nodeId), selected!.serviceName);
       await refreshServiceList(selected!.nodeId);
       ok = true;
     });
@@ -201,7 +220,7 @@
   async function handleReloadLatest() {
     if (!selected) return;
     conflict = null;
-    currentService = await api.getService(selected.nodeId, selected.serviceName);
+    currentService = await api.getService(String(selected.nodeId), selected.serviceName);
   }
 
   // --- Lifecycle (Toolbar) -------------------------------------------------
@@ -209,8 +228,8 @@
   async function handleStart() {
     if (!selected) return;
     await withBusy(async () => {
-      await api.startService(selected!.nodeId, selected!.serviceName);
-      currentService = await api.getService(selected!.nodeId, selected!.serviceName);
+      await api.startService(String(selected!.nodeId), selected!.serviceName);
+      currentService = await api.getService(String(selected!.nodeId), selected!.serviceName);
       await refreshServiceList(selected!.nodeId);
     });
   }
@@ -218,8 +237,8 @@
   async function handleStop() {
     if (!selected) return;
     await withBusy(async () => {
-      await api.stopService(selected!.nodeId, selected!.serviceName);
-      currentService = await api.getService(selected!.nodeId, selected!.serviceName);
+      await api.stopService(String(selected!.nodeId), selected!.serviceName);
+      currentService = await api.getService(String(selected!.nodeId), selected!.serviceName);
       await refreshServiceList(selected!.nodeId);
     });
   }
@@ -227,8 +246,8 @@
   async function handleReload() {
     if (!selected) return;
     await withBusy(async () => {
-      await api.reloadService(selected!.nodeId, selected!.serviceName);
-      currentService = await api.getService(selected!.nodeId, selected!.serviceName);
+      await api.reloadService(String(selected!.nodeId), selected!.serviceName);
+      currentService = await api.getService(String(selected!.nodeId), selected!.serviceName);
       await refreshServiceList(selected!.nodeId);
     });
   }

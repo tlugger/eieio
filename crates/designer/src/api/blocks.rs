@@ -11,21 +11,39 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::ApiError;
 
 /// One cached manifest.
-#[derive(Debug, Serialize)]
+///
+/// `manifest` is untyped: it is a block manifest (ABI §11), but this crate only ever stores and
+/// replays what the browser already fetched and validated against a node (module doc) — it is
+/// never itself parsed here, so declaring it as `eio_manifest::schema::Manifest` would assert a
+/// dependency this crate does not have and a check this handler does not perform. The real,
+/// typed schema for a manifest is `eio_manifest`'s, which is a `no_std` ★ crate with no
+/// `utoipa` dependency by design (this repository's `CLAUDE.md`); an untyped object here is
+/// what "cached, not validated" (module doc) actually means on the wire.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ManifestCacheEntry {
     /// The block this manifest describes, exactly as a service file would reference it.
     pub block_ref: String,
-    /// The manifest itself (ABI §11).
+    /// The manifest itself (ABI §11), opaque to this crate — see this struct's own doc.
     pub manifest: serde_json::Value,
     /// When this crate last cached it.
     pub fetched_at: String,
 }
 
-/// `GET /api/blocks`.
+/// Every manifest this crate has cached, across every registry a browser has browsed.
+#[utoipa::path(
+    get,
+    path = "/api/blocks",
+    tag = "blocks",
+    responses(
+        (status = 200, description = "Every cached manifest, ordered by reference", body = Vec<ManifestCacheEntry>),
+        (status = 401, description = "No session cookie, or one naming no live session", body = crate::error::ErrorBody),
+    ),
+)]
 pub async fn list(
     State(shared): State<crate::State>,
 ) -> Result<Json<Vec<ManifestCacheEntry>>, ApiError> {
@@ -67,17 +85,30 @@ pub async fn list(
 }
 
 /// `PUT /api/blocks/{reference}`'s body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CachedManifest {
-    /// The manifest the browser read from a node (ABI §11).
+    /// The manifest the browser read from a node (ABI §11), opaque to this crate — see
+    /// [`ManifestCacheEntry`]'s doc.
     pub manifest: serde_json::Value,
 }
 
-/// `PUT /api/blocks/{reference}` — cache one manifest (§3.3).
+/// Caches one manifest the browser already read from a node (§3.3).
 ///
 /// Keyed by the whole reference, never by the manifest's own `name`: two registries may publish
 /// `temp-sensor`, and two versions of one block may declare different ports and properties
 /// (ABI §11.1). §2 keys `manifest_cache` by `block_ref` for exactly that reason.
+#[utoipa::path(
+    put,
+    path = "/api/blocks/{reference}",
+    tag = "blocks",
+    params(("reference" = String, Path, description = "The block reference, exactly as a service file would spell it (may contain `/`)")),
+    request_body = CachedManifest,
+    responses(
+        (status = 200, description = "Cached (an upsert: re-browsing a reference refreshes it)", body = ManifestCacheEntry),
+        (status = 400, description = "An empty reference", body = crate::error::ErrorBody),
+        (status = 401, description = "No session cookie, or one naming no live session", body = crate::error::ErrorBody),
+    ),
+)]
 pub async fn put(
     State(shared): State<crate::State>,
     Path(reference): Path<String>,
@@ -120,11 +151,21 @@ pub async fn put(
     }))
 }
 
-/// `DELETE /api/blocks/{reference}` — forget one.
+/// Forgets one cached manifest.
 ///
 /// A cache entry, so forgetting it costs nothing: the browser re-fetches from the node that
 /// answered for it. Answers `204` whether or not it was there, for ABI §7.2's reason — the call
 /// states the intended end state, not a transition.
+#[utoipa::path(
+    delete,
+    path = "/api/blocks/{reference}",
+    tag = "blocks",
+    params(("reference" = String, Path, description = "The block reference to forget")),
+    responses(
+        (status = 204, description = "Gone, or never cached — either way, not cached now"),
+        (status = 401, description = "No session cookie, or one naming no live session", body = crate::error::ErrorBody),
+    ),
+)]
 pub async fn delete(
     State(shared): State<crate::State>,
     Path(reference): Path<String>,

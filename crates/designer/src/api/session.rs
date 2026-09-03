@@ -10,12 +10,13 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use utoipa::ToSchema;
 
 use crate::error::ApiError;
 use crate::session::{self, COOKIE};
 
 /// `POST /api/session`'s body.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
     /// This Designer's own operator password (`crate::password`).
     pub password: String,
@@ -45,7 +46,21 @@ fn constant_time_eq(presented: &[u8], expected: &[u8]) -> bool {
     differences == 0
 }
 
-/// `POST /api/session`.
+/// Logs in with this Designer's own operator password, minting a session cookie.
+///
+/// Outside the session guard by construction — logging in cannot itself require a session
+/// (`lib.rs`'s router: this route is never nested under `require_session`).
+#[utoipa::path(
+    post,
+    path = "/api/session",
+    tag = "session",
+    request_body = LoginRequest,
+    responses(
+        (status = 204, description = "Logged in",
+         headers(("set-cookie" = String, description = "The session cookie, `HttpOnly` and `SameSite=Lax`"))),
+        (status = 401, description = "The wrong password", body = crate::error::ErrorBody),
+    ),
+)]
 pub async fn login(
     State(shared): State<crate::State>,
     Json(body): Json<LoginRequest>,
@@ -63,7 +78,16 @@ pub async fn login(
     ))
 }
 
-/// `DELETE /api/session`. Idempotent: a cookie naming no live session is not an error.
+/// Logs out. Idempotent: a cookie naming no live session, or no cookie at all, is not an
+/// error — also outside the session guard, for the same reason [`login`] is.
+#[utoipa::path(
+    delete,
+    path = "/api/session",
+    tag = "session",
+    responses(
+        (status = 204, description = "Logged out, whether or not a session was live"),
+    ),
+)]
 pub async fn logout(State(shared): State<crate::State>, headers: HeaderMap) -> Response {
     if let Some(id) = session::session_cookie(&headers) {
         shared.sessions.revoke(&id);

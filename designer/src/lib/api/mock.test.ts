@@ -236,7 +236,25 @@ describe('listBlockManifests / listSystems / listNodes — the palette and topol
   });
 
   it('listNodes answers an empty list for an unknown system, not an error', async () => {
-    expect(await listNodes('no-such-system')).toEqual([]);
+    expect(await listNodes(999999)).toEqual([]);
+  });
+
+  // eieio-m9s.20: `NodeSummary.capabilities`/`.limits` are absent until a probe succeeds
+  // (DESIGNER §3.1's amendment) — `node-closet` is this fixture's "never probed" node.
+  it('a node that has never been probed carries no capabilities or limits at all', async () => {
+    const [system] = await listSystems();
+    const nodes = await listNodes(system!.id);
+    const closet = nodes.find((n) => n.name === 'closet-relay');
+    expect(closet).toBeDefined();
+    // Absent, not null — all three fields follow the same rule (DESIGNER §3.1). Asserted with
+    // `toBeUndefined` rather than a falsy check, because `null` passing here is exactly the
+    // shape the server was sending before eieio-m9s.20 fixed it.
+    expect(closet?.last_seen).toBeUndefined();
+    expect(closet?.capabilities).toBeUndefined();
+    expect(closet?.limits).toBeUndefined();
+    // And it is not alone in the mix — at least one node in the same fixture set has been
+    // probed, so "absent" reads as this node's own fact, not a global default gone missing.
+    expect(nodes.some((n) => n.capabilities !== undefined)).toBe(true);
   });
 });
 

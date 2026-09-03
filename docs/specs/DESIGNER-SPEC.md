@@ -57,16 +57,25 @@ Notably absent: services, blocks-in-services, connections, layout — all of tha
 
 Two kinds of endpoint, and the split is the whole design. Everything the Designer *itself* knows is a small REST surface; everything a **node** knows is reached by proxy and is never re-modelled here.
 
+**This surface is a generated document too, for the reason DAEMON §9 gives about its own: "the document is the product, not a by-product."** `crates/designer` carried no schema generation at all until eieio-m9s.20, and the consequence was not hypothetical — the SPA hand-writes a TypeScript type for every body it reads, the parity check that holds those types against the daemon's live schemas could not reach this half, and three fields had already drifted: `id` and `system_id` were declared as strings against a server that serves integers, and `capabilities`/`limits` were declared required against a server that omits them until a probe succeeds. A table of field *names* in a specification, which is all this section used to be, does not catch any of that.
+
+So: **`GET /api/openapi.json` serves this surface's generated document, unauthenticated**, on the same reasoning DAEMON §9.1 gives for the node's — it is a schema, it holds nothing a reader could not find in this specification, and a tool surface a client must already be authorized to discover is one nobody can bootstrap against. Every response type below is generated from the handler, not restated beside it.
+
+**Two things the table below is now explicit about, because leaving them to a reader is what drifted.** An `id` and a `system_id` are **integers**: they are SQLite rowids, and the store is what mints them (§3). And `last_seen`, `capabilities` and `limits` are **absent until a probe succeeds** — a node the Designer has recorded but never reached has neither, and an absent field is the answer rather than an empty object, the same rule DAEMON §9.6 and ABI §11 keep everywhere else.
+
 ```
 POST   /api/session                       { password } -> session cookie
 DELETE /api/session
 
-GET    /api/systems                       [{ id, name }]
+GET    /api/systems                       [{ id: int, name }]
 POST   /api/systems                       { name }
 DELETE /api/systems/{id}
 
-GET    /api/nodes                         [{ id, system_id, name, class, address,
-                                             last_seen, capabilities, limits }]
+GET    /api/openapi.json                  this document (no auth)
+
+GET    /api/nodes                         [{ id: int, system_id: int, name, class,
+                                             address, last_seen?, capabilities?,
+                                             limits? }]
 POST   /api/nodes                         { system_id, name, address, token,
                                             class? }   default "daemon"
 DELETE /api/nodes/{id}

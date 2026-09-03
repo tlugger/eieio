@@ -20,7 +20,10 @@
 
   interface Props {
     open: boolean;
-    nodeId: string | null;
+    /** `NodeSummary.id` (`number`, DESIGNER §3.1 — eieio-m9s.20); rendered to a string only at
+     *  the three daemon-proxy calls below (`createTap`/`streamTap`/`streamLogs`, `nodeId: string`
+     *  path parameters), never compared against anything, so it stays a plain number here. */
+    nodeId: number | null;
     serviceName: string | null;
     tappedConnection: TappedConnection | null;
     selectedBlockId: string | null;
@@ -156,15 +159,16 @@
     const connectionString = `${conn.fromId}.${conn.fromPort} -> ${conn.toId}.${conn.toPort}`;
     const sourceLabel = `${svc}.${conn.fromId}`;
 
+    const nidPath = String(nid);
     api
-      .createTap(nid, svc, connectionString)
+      .createTap(nidPath, svc, connectionString)
       .then((tap) => {
         if (cancelled) {
-          void api.deleteTap(nid, tap.tap_id);
+          void api.deleteTap(nidPath, tap.tap_id);
           return;
         }
         createdTapId = tap.tap_id;
-        handle = api.streamTap(nid, tap.tap_id, {
+        handle = api.streamTap(nidPath, tap.tap_id, {
           onEvent: (event) => appendTap(tapEventToLine(event, sourceLabel)),
           onStatus: (status, detail) => {
             tapStatus = status;
@@ -184,7 +188,7 @@
       // DAEMON §9.6: "a tap holds a subscription and a ring and nothing
       // else... releasing it releases everything" - explicit on our side
       // too, rather than counting on the node to notice the client is gone.
-      if (createdTapId) void api.deleteTap(nid, createdTapId);
+      if (createdTapId) void api.deleteTap(nidPath, createdTapId);
     };
   });
 
@@ -203,7 +207,7 @@
     logStatus = 'connecting';
     logStatusError = undefined;
     const handle = api.streamLogs(
-      nid,
+      String(nid),
       { service: svc, instance: instanceFilter },
       {
         onEvent: (event: LogLineEvent) =>

@@ -15,15 +15,35 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 
 /// A node, as `GET /api/nodes` answers it. Deliberately no `token` field — see module doc.
-#[derive(Debug, Serialize)]
+///
+/// **`id` and `system_id` are integers**, the same rowid `crate::api::systems::SystemOut::id`
+/// is (§3) — not strings, which is one of the two drifts DESIGNER §3.1's eieio-m9s.20 amendment
+/// calls out by name.
+///
+/// **`capabilities` and `limits` are `Option`, and stay that way.** They come from a node's own
+/// `GET /node` (DAEMON §9), which this crate never calls until an operator asks for a probe
+/// (`probe`, below) — a node this registry has only just recorded has neither, and *absent* is
+/// the honest answer, not an empty object standing in for "not probed yet" (the same rule
+/// DAEMON §9.6 and ABI §11 keep everywhere else, and the amendment's other named drift).
+///
+/// **Why `serde_json::Value` and not a typed shape.** This crate stores whatever the probed
+/// node's `GET /node` sent back, verbatim and unparsed (`probe`, below) — the daemon's own
+/// `NodeInfo::capabilities`/`NodeLimits` are what actually type these fields, on the daemon's
+/// side of the wire (`crates/daemon/src/api/node.rs`). Inventing a second, narrower shape here
+/// would let this cache silently drop a field the daemon added, or accept a value only a
+/// specific daemon version would ever send; an untyped object is what "stored opaquely" (this
+/// module's own doc) actually means, so the schema says so rather than promising a structure
+/// this crate does not itself enforce.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct NodeOut {
-    /// This registry's own id for the node.
+    /// This registry's own id for the node — a SQLite rowid (§3).
     pub id: i64,
-    /// The System it belongs to.
+    /// The System it belongs to — a SQLite rowid (§3).
     pub system_id: i64,
     /// A label for people. Nothing resolves by it.
     pub name: String,
@@ -32,16 +52,37 @@ pub struct NodeOut {
     pub class: String,
     /// Where the node's management API is.
     pub address: String,
-    /// When a probe last reached it successfully, RFC 3339. `None` if it never has been.
+    /// When a probe last reached it successfully, RFC 3339. **Absent** if it never has been —
+    /// the same rule as [`NodeOut::capabilities`] below, and for the same reason: "never
+    /// reached" is the absence of a stamp, not a stamp whose value is null.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<String>,
-    /// What the last successful probe's `GET /node` reported as `capabilities` (DAEMON §9).
+    /// What the last successful probe's `GET /node` reported as `capabilities` (DAEMON §9),
+    /// stored opaquely — see this struct's own doc for why it is untyped rather than absent.
+    ///
+    /// No `#[schema(value_type = ...)]` override: `serde_json::Value`'s own `ToSchema` (utoipa's
+    /// built-in impl) renders as an unconstrained "any value" schema, which is the honest shape
+    /// — the daemon's own `capabilities` is an array of strings today (`NodeInfo::capabilities`,
+    /// `crates/daemon/src/api/node.rs`) and could add a differently-shaped field tomorrow without
+    /// this crate parsing it either way (module doc: it is cached, not validated). Declaring
+    /// `Object` here would assert a constraint this crate does not itself check or rely on.
+    ///
+    /// **Absent, not `null`, when a probe has never succeeded** (DESIGNER §3.1). This carried
+    /// no `skip_serializing_if` until the amendment that pinned the field, so it serialized as
+    /// `"capabilities": null` — which the SPA's `capabilities?: string[]` does not accept, and
+    /// which contradicts the rule DAEMON §9.6 and ABI §11 keep everywhere else. The eieio-m9s.20
+    /// agent reported the mismatch rather than changing a wire shape it had not been asked to.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<serde_json::Value>,
-    /// What the last successful probe's `GET /node` reported as `limits` (DAEMON §9).
+    /// What the last successful probe's `GET /node` reported as `limits` (DAEMON §9), stored
+    /// opaquely — see [`NodeOut::capabilities`]'s doc for why it carries no narrower schema, and
+    /// for why it is absent rather than `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub limits: Option<serde_json::Value>,
 }
 
 /// `POST /api/nodes`'s body.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct NewNode {
     /// The System this node belongs to. Must already exist.
     pub system_id: i64,
@@ -110,7 +151,16 @@ impl std::fmt::Debug for NodeCredential {
     }
 }
 
-/// `GET /api/nodes`.
+/// Every node this registry knows about, across every System.
+#[utoipa::path(
+    get,
+    path = "/api/nodes",
+    tag = "nodes",
+    responses(
+        (status = 200, description = "Every node, ordered by id", body = Vec<NodeOut>),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+    ),
+)]
 pub async fn list(State(shared): State<crate::State>) -> Result<Json<Vec<NodeOut>>, ApiError> {
     let rows = shared
         .db
@@ -139,7 +189,18 @@ pub async fn list(State(shared): State<crate::State>) -> Result<Json<Vec<NodeOut
     Ok(Json(rows))
 }
 
-/// `POST /api/nodes`.
+/// Registers a node's address and token under a System.
+#[utoipa::path(
+    post,
+    path = "/api/nodes",
+    tag = "nodes",
+    request_body = NewNode,
+    responses(
+        (status = 200, description = "The node, with the id this registry minted for it and no `token` field (see the module doc)", body = NodeOut),
+        (status = 400, description = "An empty name, address or token, an unknown `class`, or a `system_id` naming no System", body = ErrorBody),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+    ),
+)]
 pub async fn create(
     State(shared): State<crate::State>,
     Json(body): Json<NewNode>,
@@ -207,7 +268,19 @@ pub async fn create(
     }))
 }
 
-/// `DELETE /api/nodes/{id}`.
+/// Forgets a node. Only this registry's address book entry — never the node's own
+/// configuration (SCOPE §3.8).
+#[utoipa::path(
+    delete,
+    path = "/api/nodes/{id}",
+    tag = "nodes",
+    params(("id" = i64, Path, description = "The node's id")),
+    responses(
+        (status = 204, description = "The node is gone from this registry"),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+        (status = 404, description = "No node with that id", body = ErrorBody),
+    ),
+)]
 pub async fn delete(
     State(shared): State<crate::State>,
     Path(id): Path<i64>,
@@ -222,10 +295,23 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /api/nodes/{id}/probe`: calls that node's `GET /node` (DAEMON §9), and on success
-/// refreshes `last_seen`, `capabilities` and `limits`. A node that cannot be reached, or that
-/// answers something this crate cannot parse, leaves the cache exactly as it was — there is
-/// nothing here worth refreshing *to*.
+/// Calls a node's own `GET /node` (DAEMON §9), and on success refreshes `last_seen`,
+/// `capabilities` and `limits`. A node that cannot be reached, or that answers something this
+/// crate cannot parse, leaves the cache exactly as it was — there is nothing here worth
+/// refreshing *to*.
+#[utoipa::path(
+    post,
+    path = "/api/nodes/{id}/probe",
+    tag = "nodes",
+    params(("id" = i64, Path, description = "The node's id")),
+    responses(
+        (status = 200, description = "The node, with `last_seen`, `capabilities` and `limits` refreshed", body = NodeOut),
+        (status = 400, description = "This node is leaf-class and serves no probe (DESIGNER §7)", body = ErrorBody),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+        (status = 404, description = "No node with that id", body = ErrorBody),
+        (status = 502, description = "The node could not be reached, or answered something this crate cannot use", body = ErrorBody),
+    ),
+)]
 pub async fn probe(
     State(shared): State<crate::State>,
     Path(id): Path<i64>,
@@ -445,5 +531,42 @@ mod tests {
         let rendered = format!("{body:?}");
         assert!(!rendered.contains("super-secret-token-value"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");
+    }
+
+    /// DESIGNER §3.1: `capabilities` and `limits` are **absent** until a probe succeeds, not
+    /// `null`. A node the Designer has recorded but never reached does not know its
+    /// capabilities, and `"capabilities": null` states that as a value — which the SPA's
+    /// `capabilities?` does not accept, and which contradicts the rule DAEMON §9.6 and ABI §11
+    /// keep everywhere else. Asserting on the serialized keys rather than on the struct,
+    /// because the struct is `None` either way and it is the wire that is the contract.
+    #[test]
+    fn an_unprobed_node_omits_capabilities_and_limits_rather_than_sending_null() {
+        let unprobed = NodeOut {
+            id: 1,
+            system_id: 2,
+            name: String::from("porch-sensor"),
+            class: String::from("daemon"),
+            address: String::from("http://10.0.0.7:7777"),
+            last_seen: None,
+            capabilities: None,
+            limits: None,
+        };
+        let json = serde_json::to_value(&unprobed).expect("NodeOut serializes");
+        let object = json.as_object().expect("an object");
+        assert!(
+            !object.contains_key("capabilities"),
+            "an unprobed node must omit `capabilities`, not report it as null: {json}"
+        );
+        assert!(
+            !object.contains_key("limits"),
+            "an unprobed node must omit `limits`, not report it as null: {json}"
+        );
+        // `last_seen` is the same question and already answered the same way by the field's own
+        // `Option` — checked here so all three stay consistent rather than only the two the
+        // amendment named.
+        assert!(
+            !object.contains_key("last_seen") || object["last_seen"].is_string(),
+            "last_seen must be a stamp or absent, never null: {json}"
+        );
     }
 }

@@ -5,26 +5,41 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 
 /// A system, as `GET /api/systems` and `POST /api/systems` both answer it.
-#[derive(Debug, Serialize)]
+///
+/// `id` is an **integer**: it is this registry's own SQLite rowid, minted by `INSERT` (§2), not
+/// a string a client should treat as opaque text. DESIGNER §3.1's amendment for eieio-m9s.20
+/// makes this explicit because a hand-written client type once declared it a string against a
+/// server that has only ever served an integer.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SystemOut {
-    /// This registry's own id for the System.
+    /// This registry's own id for the System — a SQLite rowid (§3).
     pub id: i64,
     /// A label for people.
     pub name: String,
 }
 
 /// `POST /api/systems`'s body.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct NewSystem {
     /// A label for people.
     pub name: String,
 }
 
-/// `GET /api/systems`.
+/// Every System this registry knows about.
+#[utoipa::path(
+    get,
+    path = "/api/systems",
+    tag = "systems",
+    responses(
+        (status = 200, description = "Every System, ordered by id", body = Vec<SystemOut>),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+    ),
+)]
 pub async fn list(State(shared): State<crate::State>) -> Result<Json<Vec<SystemOut>>, ApiError> {
     let rows = shared
         .db
@@ -42,7 +57,18 @@ pub async fn list(State(shared): State<crate::State>) -> Result<Json<Vec<SystemO
     Ok(Json(rows))
 }
 
-/// `POST /api/systems`.
+/// Registers a new System.
+#[utoipa::path(
+    post,
+    path = "/api/systems",
+    tag = "systems",
+    request_body = NewSystem,
+    responses(
+        (status = 200, description = "The System, with the id this registry minted for it", body = SystemOut),
+        (status = 400, description = "An empty name", body = ErrorBody),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+    ),
+)]
 pub async fn create(
     State(shared): State<crate::State>,
     Json(body): Json<NewSystem>,
@@ -63,9 +89,20 @@ pub async fn create(
     Ok(Json(SystemOut { id, name }))
 }
 
-/// `DELETE /api/systems/{id}`. Cascades to every node in it (DESIGNER §2's schema declares
-/// the foreign key `ON DELETE CASCADE`) — deleting a System's own entry in this address book
-/// deletes the addresses filed under it, not any node's own configuration (SCOPE §3.8).
+/// Deletes a System. Cascades to every node in it (DESIGNER §2's schema declares the foreign
+/// key `ON DELETE CASCADE`) — deleting a System's own entry in this address book deletes the
+/// addresses filed under it, not any node's own configuration (SCOPE §3.8).
+#[utoipa::path(
+    delete,
+    path = "/api/systems/{id}",
+    tag = "systems",
+    params(("id" = i64, Path, description = "The System's id")),
+    responses(
+        (status = 204, description = "The System, and every node filed under it, is gone"),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+        (status = 404, description = "No System with that id", body = ErrorBody),
+    ),
+)]
 pub async fn delete(
     State(shared): State<crate::State>,
     Path(id): Path<i64>,

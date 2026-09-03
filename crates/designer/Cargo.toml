@@ -65,6 +65,12 @@ time.workspace = true
 serde = { workspace = true, default-features = false, features = ["std", "derive"] }
 serde_json = { workspace = true, default-features = false, features = ["std"] }
 
+# This surface's own schema document, `/api/openapi.json` (DESIGNER §3.1, amended for
+# eieio-m9s.20) — the same crate, at the same workspace-pinned version and feature set
+# (`axum_extras`), as `eio-daemon`'s own `/openapi.json` (`crates/daemon/src/api/openapi.rs`'s
+# module doc): "the document is the product, not a by-product."
+utoipa.workspace = true
+
 # The session cookie and this node's own password (module doc: `src/password.rs`), and the
 # node id `provision_password` and `Sessions::mint` both draw from — the same source
 # `eio-daemon`'s own token and `eio-cli`'s id minting use, so a Designer instance's secrets

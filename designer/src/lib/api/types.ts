@@ -16,33 +16,47 @@ export type NodeClass = 'daemon' | 'leaf';
 
 /** GET /api/systems (DESIGNER §3.1).
  *
- *  **Known drift (found by eieio-m9s.17, reading `crates/designer/src/api/systems.rs` by hand —
- *  not by `response_shapes.rs`'s mechanism, which cannot reach `crates/designer`: it has no
- *  `utoipa` anywhere in it, unlike the daemon), not fixed here:** `SystemOut.id` is `i64` on the
- *  wire, not `string`. `crates/designer` is not owned by this bead, and neither is a real fix
- *  (retyping `id` as `number` and updating every caller that treats it as an opaque string). */
+ *  **Fixed by eieio-m9s.20** (found by eieio-m9s.17, reading `crates/designer/src/api/systems.rs`
+ *  by hand — not by `response_shapes.rs`'s mechanism, which cannot reach `crates/designer`: it
+ *  has no `utoipa` anywhere in it, unlike the daemon): `SystemOut.id` is `i64` on the wire — a
+ *  SQLite rowid the store mints (DESIGNER §3) — not `string`. Every caller that treated `id` as
+ *  an opaque string (`===`, `Map`/`Set` keys) was audited when this was fixed; see this bead's
+ *  final report for the list. */
 export interface SystemSummary {
-  id: string;
+  id: number;
   name: string;
 }
 
 /** GET /api/nodes (DESIGNER §3.1). Never carries a token — §3.1 is explicit
  * that there is no serialization in which one appears.
  *
- *  **Known drift (found by eieio-m9s.17, same caveat as {@link SystemSummary}'s), not fixed
- *  here:** `NodeOut.id`/`.system_id` are `i64`, not `string`; `NodeOut.capabilities`/`.limits`
- *  are `Option<serde_json::Value>` — absent until a probe (`POST /api/nodes/{id}/probe`)
- *  succeeds at least once, not the required, always-populated shapes declared below. */
+ *  **Fixed by eieio-m9s.20** (found by eieio-m9s.17, same caveat as {@link SystemSummary}'s):
+ *  `NodeOut.id`/`.system_id` are `i64` (same rowid rule as {@link SystemSummary.id}), not
+ *  `string`; `NodeOut.capabilities`/`.limits` are `Option<serde_json::Value>` — **absent until a
+ *  probe (`POST /api/nodes/{id}/probe`) succeeds at least once**, the same "absent is the answer,
+ *  never an empty default" rule DAEMON §9.6 and ABI §11 keep everywhere else (DESIGNER §3.1's
+ *  amendment). A node the Designer has recorded but never reached has neither field at all. */
 export interface NodeSummary {
-  id: string;
-  system_id: string;
+  id: number;
+  system_id: number;
   name: string;
   class: NodeClass;
   address: string;
   /** ISO 8601, or null if the node has never answered a probe. */
-  last_seen: string | null;
-  capabilities: Capability[];
-  limits: Record<string, number>;
+  /** When a probe last reached it, RFC 3339. **Absent**, not null, when it never has —
+   *  DESIGNER §3.1, the same rule as `capabilities` and `limits` below. This declared
+   *  `string | null` until eieio-m9s.20 found the server was sending `null` for all three;
+   *  the server now omits them, and "never reached" is the absence of a stamp rather than a
+   *  stamp whose value is null. */
+  last_seen?: string;
+  /** Absent means "not yet probed" — an *unknown* capability set, not an empty one. A caller
+   *  that needs a compatibility answer (missingCapabilities in derive/capabilities.ts) MUST NOT
+   *  default this to `[]`: that reads as "this node can run nothing", a claim nobody has made.
+   *  See that module's doc for what a caller shows instead. */
+  capabilities?: Capability[];
+  /** Same absent-means-unknown rule as {@link capabilities}, and for the same reason (one probe
+   *  populates both together). */
+  limits?: Record<string, number>;
 }
 
 /** A service's run state. DAEMON §9 gives start/stop/reload and

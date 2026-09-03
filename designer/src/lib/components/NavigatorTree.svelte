@@ -16,9 +16,9 @@
 
   interface Props {
     systems: SystemSummary[];
-    nodesBySystem: Map<string, NodeWithServices[]>;
-    selected: { nodeId: string; serviceName: string } | null;
-    onSelectService: (nodeId: string, serviceName: string) => void;
+    nodesBySystem: Map<number, NodeWithServices[]>;
+    selected: { nodeId: number; serviceName: string } | null;
+    onSelectService: (nodeId: number, serviceName: string) => void;
   }
 
   let { systems, nodesBySystem, selected, onSelectService }: Props = $props();
@@ -26,21 +26,27 @@
   // Systems default to expanded (there is rarely more than a handful), so
   // this tracks the exception set rather than seeding an "expanded" set
   // from the `systems` prop, which would only ever capture its first value.
-  let collapsedSystems = $state<Set<string>>(new Set());
-  let expandedNodes = $state<Set<string>>(new Set());
+  //
+  // eieio-m9s.20: keyed by `SystemSummary.id`/`NodeSummary.id`, both `number` now (a SQLite
+  // rowid, DESIGNER §3.1) — this was a `Set<string>` before, which type-checked fine only
+  // because both sides of every comparison below (`selected.nodeId`, `node.id`) were declared
+  // `string` too. Nothing here ever stringified an id in between, so this was never actually
+  // wrong at runtime; it is fixed anyway so the type says what is true.
+  let collapsedSystems = $state<Set<number>>(new Set());
+  let expandedNodes = $state<Set<number>>(new Set());
 
-  function isSystemExpanded(id: string): boolean {
+  function isSystemExpanded(id: number): boolean {
     return !collapsedSystems.has(id);
   }
 
-  function toggleSystem(id: string) {
+  function toggleSystem(id: number) {
     const next = new Set(collapsedSystems);
     if (next.has(id)) next.delete(id);
     else next.add(id);
     collapsedSystems = next;
   }
 
-  function toggleNode(id: string) {
+  function toggleNode(id: number) {
     const next = new Set(expandedNodes);
     if (next.has(id)) next.delete(id);
     else next.add(id);
@@ -109,7 +115,10 @@
                     {node.class === 'daemon' ? '⬡' : '◇'}
                   </span>
                   <span class="tree__label">{node.name}</span>
-                  {#if node.last_seen === null}
+                  <!-- `!node.last_seen`, not `=== null`: DESIGNER §3.1 makes the field
+                       ABSENT when a probe has never succeeded, so a strict null test missed
+                       every unprobed node and the badge never rendered (eieio-m9s.20). -->
+                  {#if !node.last_seen}
                     <span class="tree__unreachable" title="Never successfully probed">unreachable</span>
                   {/if}
                 </button>

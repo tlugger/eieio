@@ -7,13 +7,14 @@
 
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 
 /// A registry, as `GET /api/registries` answers it. No `auth` field — see module doc.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RegistryOut {
-    /// This registry's own id for the source.
+    /// This registry's own id for the source — a SQLite rowid (§3).
     pub id: i64,
     /// The registry's own address.
     pub url: String,
@@ -21,8 +22,10 @@ pub struct RegistryOut {
 
 /// `POST /api/registries`'s body. `auth` is opaque to this crate: it is attached to a future
 /// registry request exactly as given, never inspected or validated here (DESIGNER §3 leaves
-/// registry credential shapes to whatever the registry itself needs).
-#[derive(Deserialize)]
+/// registry credential shapes to whatever the registry itself needs) — hence `serde_json::Value`
+/// rather than a typed credential shape, the same reasoning `crate::api::nodes::NodeOut`'s own
+/// doc gives for `capabilities`/`limits`.
+#[derive(Deserialize, ToSchema)]
 pub struct NewRegistry {
     /// The registry's own address.
     pub url: String,
@@ -46,7 +49,17 @@ impl std::fmt::Debug for NewRegistry {
     }
 }
 
-/// `GET /api/registries`.
+/// Every block registry source this Designer knows about. No `auth` field — see the module
+/// doc.
+#[utoipa::path(
+    get,
+    path = "/api/registries",
+    tag = "registries",
+    responses(
+        (status = 200, description = "Every registry source, ordered by id", body = Vec<RegistryOut>),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+    ),
+)]
 pub async fn list(
     axum::extract::State(shared): axum::extract::State<crate::State>,
 ) -> Result<Json<Vec<RegistryOut>>, ApiError> {
@@ -66,7 +79,19 @@ pub async fn list(
     Ok(Json(rows))
 }
 
-/// `POST /api/registries`.
+/// Registers a block registry source. `auth`, if given, is never answered back — see the
+/// module doc.
+#[utoipa::path(
+    post,
+    path = "/api/registries",
+    tag = "registries",
+    request_body = NewRegistry,
+    responses(
+        (status = 200, description = "The registry, with the id this crate minted for it", body = RegistryOut),
+        (status = 400, description = "An empty url", body = ErrorBody),
+        (status = 401, description = "No session cookie, or one naming no live session", body = ErrorBody),
+    ),
+)]
 pub async fn create(
     axum::extract::State(shared): axum::extract::State<crate::State>,
     Json(body): Json<NewRegistry>,

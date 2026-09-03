@@ -60,11 +60,12 @@ use axum::response::{IntoResponse, Response};
 use eio_service::Error;
 use eio_service::edit::{Document, EditError};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::ApiError;
 
 /// `POST /api/service-edit`'s body (DESIGNER-SPEC §3.2).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct In {
     /// The service file's current text, exactly as a `GET` through the proxy returned it.
     pub toml: String,
@@ -73,7 +74,7 @@ pub struct In {
 }
 
 /// One `Document` mutation (SERVICE §9), named and shaped after the method it calls.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Operation {
     /// [`Document::add_block`]. `id` is minted when omitted — see the module doc.
@@ -159,7 +160,7 @@ pub enum Operation {
 }
 
 /// The success response: the edited file, and any ids this handler minted along the way.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct Out {
     /// The file, as `Document::render` produced it. What the caller `PUT`s next is this, byte
     /// for byte (DESIGNER §3.2).
@@ -176,7 +177,7 @@ pub struct Out {
 /// `eio-daemon`'s own `ApiError` convention. Everything else is structure the SPA maps onto an
 /// editor position (the plan's own words) — present only when the failure actually carries it,
 /// which is why every field past `message` is optional.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorOut {
     /// What went wrong, for a person.
     pub message: String,
@@ -200,7 +201,7 @@ pub struct ErrorOut {
 }
 
 /// A byte range, half-open (EXPR §8).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SpanOut {
     /// First byte of the span.
     pub start: u32,
@@ -241,12 +242,24 @@ impl IntoResponse for Failure {
 }
 
 /// The `422` envelope's shape (DESIGNER-SPEC §3.2): `{ errors }`, nothing else.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ErrorsBody {
     errors: Vec<ErrorOut>,
 }
 
-/// `POST /api/service-edit`.
+/// Applies a batch of structural edits to a service file's text, all-or-nothing — see the
+/// module doc.
+#[utoipa::path(
+    post,
+    path = "/api/service-edit",
+    tag = "service-edit",
+    request_body = In,
+    responses(
+        (status = 200, description = "Every operation applied and the result is a valid service file", body = Out),
+        (status = 422, description = "An operation did not apply, or the result would not validate; nothing was changed", body = ErrorsBody),
+        (status = 500, description = "This host had no randomness to mint an instance id from", body = crate::error::ErrorBody),
+    ),
+)]
 pub async fn edit(Json(body): Json<In>) -> Result<Json<Out>, Failure> {
     let mut document =
         Document::parse(&body.toml).map_err(|errors| service_errors(errors, None))?;

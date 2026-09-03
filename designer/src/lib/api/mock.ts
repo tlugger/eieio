@@ -17,13 +17,23 @@
 // shapes for `/api/service-edit` match what that backend landed with
 // (DESIGNER §3.2, amended commit dc83e98 — see the doc comment on
 // `ServiceEditOperation` in `./types`); systems/nodes/manifests below are
-// hand-verified against `crates/designer/src/api/systems.rs`/`nodes.rs` too,
-// though `SystemSummary`/`NodeSummary` (`./types`) diverge from what those
-// handlers actually serve in ways this mock's fixtures do not reproduce
-// (`id`/`system_id` as strings here, `i64` there; `capabilities`/`limits`
-// always present here, only after a successful probe there) — reported,
-// not fixed, since neither `crates/designer` nor a schema-generation path
-// into it is this bead's to build.
+// hand-verified against `crates/designer/src/api/systems.rs`/`nodes.rs` too.
+//
+// **`id`/`system_id`/`capabilities`/`limits` fixed by eieio-m9s.20.** `SystemSummary.id` and
+// `NodeSummary.id`/`.system_id` are `number` now, matching `i64` on the wire (a SQLite rowid,
+// DESIGNER §3); `NODE_FIXTURES` below assigns each node a small integer rather than reusing the
+// human-readable `slug` this file has always kept for the *proxied* per-node surface
+// (`getService`, `createTap`, `streamLogs`, …). Those two are deliberately different values now:
+// `mock-logs.test.ts`/`mock-taps.test.ts`/`mock-parity.test.ts` (none of them this bead's to
+// touch) call `listServices`/`createTap`/`streamLogs`/etc. directly with the slug
+// (`'node-porch'`, …), so that string had to keep meaning exactly what it always meant.
+// `normalizeNodeRouteKey` is the seam: it accepts either the slug (unchanged, for those tests)
+// or `String(node.id)` (what this shell's own components pass, having only the wire's numeric
+// id in hand) and resolves both to the same fixture. `NodeSummary.capabilities`/`.limits` are
+// `Capability[] | undefined`/`Record<string, number> | undefined` now — absent until a probe
+// succeeds — and `node-closet` below is fixed with neither, on purpose: the one fixture eieio-
+// m9s.20 asks for so "never probed" is something a developer actually sees, not only a branch
+// this file's tests reach.
 //
 // **What stands in for `eio-service` here, and why it is not a TOML writer.**
 // The real `/api/service-edit` calls `eio-service`'s preserving `Document`
@@ -181,47 +191,90 @@ export async function listBlockManifests(): Promise<BlockManifest[]> {
 
 // --- Systems / nodes (DESIGNER §3.1's own REST surface) ------------------
 
-const SYSTEMS: SystemSummary[] = [{ id: 'sys-home', name: 'Home' }];
+/** `NodeSummary` plus `slug` and `actualLimits` — two fixture-only fields that never reach the
+ *  wire (`NODES` below strips them). `slug` is this file's pre-existing route key for the
+ *  *proxied* per-node surface (`getService`, `createTap`, `streamLogs`, `getNodeInfo`, …) — kept
+ *  as `'node-porch'`/`'node-attic'`/`'node-closet'`, unchanged, because `mock-logs.test.ts`/
+ *  `mock-taps.test.ts`/`mock-parity.test.ts` (none of them this bead's) call those functions
+ *  directly with these exact strings. `actualLimits` is what a direct `GET /node` reports
+ *  (`NODE_INFO` below) — real numbers regardless of whether this listing's own `limits` has ever
+ *  been populated by a probe, since hitting the node directly is a different, independent fact
+ *  from whatever the Designer's own probe cache holds. */
+interface NodeFixture extends NodeSummary {
+  slug: string;
+  actualLimits: { max_payload: number; max_batch: number };
+}
 
-const NODES: NodeSummary[] = [
+const NODE_FIXTURES: NodeFixture[] = [
   {
-    id: 'node-porch',
-    system_id: 'sys-home',
+    id: 101,
+    slug: 'node-porch',
+    system_id: 1,
     name: 'porch-pi',
     class: 'daemon',
     address: 'https://porch-pi.lan:7890',
     last_seen: '2026-08-24T13:58:02Z',
     capabilities: ['state', 'timer', 'gpio', 'i2c', 'http'],
     limits: { max_payload: 65536, max_batch: 256 },
+    actualLimits: { max_payload: 65536, max_batch: 256 },
   },
   {
-    id: 'node-attic',
-    system_id: 'sys-home',
+    id: 102,
+    slug: 'node-attic',
+    system_id: 1,
     name: 'attic-esp32',
     class: 'leaf',
     address: 'https://attic-esp32.lan:7890',
     last_seen: '2026-08-24T09:12:47Z',
     capabilities: ['state', 'timer', 'gpio'],
     limits: { max_payload: 4096, max_batch: 16 },
+    actualLimits: { max_payload: 4096, max_batch: 16 },
   },
   {
-    id: 'node-closet',
-    system_id: 'sys-home',
+    id: 103,
+    slug: 'node-closet',
+    system_id: 1,
     name: 'closet-relay',
     class: 'leaf',
-    // Never successfully probed — exercises the "last_seen: null" case.
     address: 'https://closet-relay.lan:7890',
-    last_seen: null,
-    capabilities: ['state'],
-    limits: { max_payload: 4096, max_batch: 16 },
+    // Never successfully probed (DESIGNER §3.1's amendment, eieio-m9s.20): `last_seen` is
+    // `null`, and `capabilities`/`limits` are simply absent below — not `[]`/`{}`, which would
+    // claim "checked, and this node can run nothing" rather than the true "nobody has asked
+    // yet". This is the fixture eieio-m9s.20 asks for so that case is something a developer
+    // actually sees (`BlockCard`'s "?" badge, `BlockLibrary`'s muted note — see their own
+    // comments) rather than a branch only `capabilities.test.ts` exercises.
+    // `last_seen` omitted entirely, not null — see `NodeSummary.last_seen`'s doc.
+    actualLimits: { max_payload: 4096, max_batch: 16 },
   },
 ];
+
+const NODES: NodeSummary[] = NODE_FIXTURES.map(({ slug: _slug, actualLimits: _actualLimits, ...n }) => n);
+
+const SYSTEMS: SystemSummary[] = [{ id: 1, name: 'Home' }];
+
+/** `NodeSummary.id` (`number`) -> this file's pre-existing route-key `slug` (`string`) — see
+ *  {@link NodeFixture}'s doc for why the two are different values now. */
+const ROUTE_KEY_BY_NODE_ID = new Map<number, string>(NODE_FIXTURES.map((n) => [n.id, n.slug]));
+
+/** Resolves whatever a caller passes as a `nodeId` path parameter to this file's internal fixture
+ *  key. Accepts either shape: the pre-existing slug (`'node-porch'`, what `mock-logs.test.ts`/
+ *  `mock-taps.test.ts`/`mock-parity.test.ts` hard-code) passes through unchanged, since
+ *  `Number('node-porch')` is not finite; `String(node.id)` (what this shell's own components
+ *  pass — they hold a `NodeSummary`, not a slug) resolves through {@link ROUTE_KEY_BY_NODE_ID}.
+ *  Every proxied-surface function below (`listServices`, `getService`, `createTap`, `streamTap`,
+ *  `streamLogs`, `getNodeInfo`, …) normalizes through this before touching a fixture, so neither
+ *  caller has to know the other shape exists. */
+function normalizeNodeRouteKey(nodeId: string): string {
+  const asNumber = Number(nodeId);
+  if (!Number.isFinite(asNumber)) return nodeId;
+  return ROUTE_KEY_BY_NODE_ID.get(asNumber) ?? nodeId;
+}
 
 export async function listSystems(): Promise<SystemSummary[]> {
   return delay(SYSTEMS);
 }
 
-export async function listNodes(systemId: string): Promise<NodeSummary[]> {
+export async function listNodes(systemId: number): Promise<NodeSummary[]> {
   return delay(NODES.filter((n) => n.system_id === systemId));
 }
 
@@ -311,9 +364,14 @@ const SERVICES: Record<string, MockService[]> = {
   ],
   'node-closet': [
     {
-      // gpio-echo needs `gpio`, and closet-relay's capability list above
-      // does not include it — exercises the unmet-capability badge
-      // (DESIGNER §5).
+      // eieio-m9s.20: closet-relay has never been probed (no `capabilities` at all, above) —
+      // gpio-echo's block card exercises the *unknown*-compatibility badge here now, not the
+      // "confirmed missing" one, since there is no capability list to check `gpio` against.
+      // (`node-porch`'s `porch-pi` has every capability every fixture manifest needs, so a
+      // "confirmed missing capability" demo is not covered by any fixture service today — a gap
+      // this comment reports rather than quietly leaving unexplained, since it is a visible
+      // consequence of picking closet-relay as the "never probed" node instead of adding a
+      // fourth.)
       state: 'stopped',
       file: {
         name: 'relay-control',
@@ -347,11 +405,11 @@ function etagFor(text: string): string {
 }
 
 function findServiceRecord(nodeId: string, serviceName: string): MockService | undefined {
-  return (SERVICES[nodeId] ?? []).find((s) => s.file.name === serviceName);
+  return (SERVICES[normalizeNodeRouteKey(nodeId)] ?? []).find((s) => s.file.name === serviceName);
 }
 
 export async function listServices(nodeId: string): Promise<ServiceSummary[]> {
-  const services = SERVICES[nodeId] ?? [];
+  const services = SERVICES[normalizeNodeRouteKey(nodeId)] ?? [];
   return delay(
     services.map((s) => ({ name: s.file.name, state: s.state, autostart: s.file.autostart, error: s.error })),
   );
@@ -682,11 +740,19 @@ function connectionToString(c: Connection): string {
 
 // --- GET /node --------------------------------------------------------
 
+// Keyed by `slug`, not `NodeSummary.id` — `NodeInfo.id` (this endpoint's own, unrelated to
+// `NodeSummary.id`/eieio-m9s.20's fix) is a separate guessed `string` shape (this file's own
+// earlier doc, above `NodeInfo` in `./types`), and `getNodeInfo`'s `nodeId` argument is the same
+// slug-or-numeric-id path parameter every other proxied call takes — see
+// `normalizeNodeRouteKey`'s doc for why both shapes have to resolve to the same fixture.
+// `limits` comes from `actualLimits`, not the listing's own (possibly absent) `limits`: a direct
+// `GET /node` is a live hit on a reachable node, independent of whether the Designer's probe
+// cache has ever been populated for it (`NodeFixture`'s own doc).
 const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
-  NODES.map((n, i) => [
-    n.id,
+  NODE_FIXTURES.map((n, i) => [
+    n.slug,
     {
-      id: n.id,
+      id: n.slug,
       name: n.name,
       version: `0.${i + 1}.0`,
       abi: '1.0',
@@ -694,7 +760,7 @@ const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
       // three flat budget numbers, and `capabilities` — which DESIGNER §5's
       // design-time badge reads and which the earlier guessed shape omitted.
       capabilities: n.class === 'leaf' ? ['core', 'state'] : ['core', 'state', 'timer', 'gpio', 'i2c'],
-      limits: n.limits as { max_payload: number; max_batch: number },
+      limits: n.actualLimits,
       budgets: { fuel: 100_000_000, deadline_ms: 1000, expr_max_fuel: 100_000 },
       require_signed: false,
     },
@@ -702,7 +768,7 @@ const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
 );
 
 export async function getNodeInfo(nodeId: string): Promise<NodeInfo> {
-  const info = NODE_INFO[nodeId];
+  const info = NODE_INFO[normalizeNodeRouteKey(nodeId)];
   if (!info) throw new Error(`no such node: ${nodeId}`);
   return delay(info);
 }
@@ -732,7 +798,11 @@ const TAPS: Record<string, TapSummary & { nodeId: string }> = {};
 let tapCounter = 0;
 
 export async function createTap(nodeId: string, service: string, connection: string): Promise<TapSummary> {
-  const svc = findServiceRecord(nodeId, service);
+  // Normalized once, and the normalized key is what gets stored below — every comparison
+  // against `TAPS[...].nodeId` elsewhere in this section normalizes its own incoming `nodeId`
+  // too, so a slug and a `String(node.id)` naming the same node always agree here.
+  const key = normalizeNodeRouteKey(nodeId);
+  const svc = findServiceRecord(key, service);
   if (!svc) throw new Error(`no such service: ${nodeId}/${service}`);
   const parsed = parseConnectionString(connection);
   if (!parsed) throw new Error(`malformed connection "${connection}"`);
@@ -747,21 +817,23 @@ export async function createTap(nodeId: string, service: string, connection: str
   // `create` hands `Bus::tap` to build the daemon's own `Tap.instance`/`Tap.port` from.
   const instance = parsed.fromId;
   const port = parsed.fromPort;
-  TAPS[tap_id] = { tap_id, service, connection, instance, port, nodeId };
+  TAPS[tap_id] = { tap_id, service, connection, instance, port, nodeId: key };
   return delay({ tap_id, service, connection, instance, port }, 60);
 }
 
 export async function listTaps(nodeId: string): Promise<TapSummary[]> {
+  const key = normalizeNodeRouteKey(nodeId);
   return delay(
     Object.values(TAPS)
-      .filter((t) => t.nodeId === nodeId)
+      .filter((t) => t.nodeId === key)
       .map(({ tap_id, service, connection, instance, port }) => ({ tap_id, service, connection, instance, port })),
   );
 }
 
 export async function deleteTap(nodeId: string, tapId: string): Promise<void> {
+  const key = normalizeNodeRouteKey(nodeId);
   const tap = TAPS[tapId];
-  if (tap && tap.nodeId === nodeId) delete TAPS[tapId];
+  if (tap && tap.nodeId === key) delete TAPS[tapId];
   return delay(undefined, 40);
 }
 
@@ -835,13 +907,14 @@ function findFieldDependency(
  * unprompted, to exercise the panel's disconnect handling in the running
  * app (see this section's header doc). */
 export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHandlers): StreamHandle {
+  const key = normalizeNodeRouteKey(nodeId);
   const tap = TAPS[tapId];
-  if (!tap || tap.nodeId !== nodeId) {
+  if (!tap || tap.nodeId !== key) {
     const timer = setTimeout(() => handlers.onStatus('closed', { error: `no such tap: ${tapId}` }), 0);
     return { close: () => clearTimeout(timer) };
   }
 
-  const svc = findServiceRecord(nodeId, tap.service);
+  const svc = findServiceRecord(key, tap.service);
   const parsed = parseConnectionString(tap.connection);
   const sourceInstance = svc && parsed ? svc.file.blocks[parsed.fromId] : undefined;
   const destInstance = svc && parsed ? svc.file.blocks[parsed.toId] : undefined;
@@ -1017,7 +1090,7 @@ function matchesFilter(line: { service?: string; instance?: string; level: strin
  * multi-block service's log actually reads. */
 function instancesFor(nodeId: string): Array<{ service: string; instance: string }> {
   const out: Array<{ service: string; instance: string }> = [];
-  for (const svc of SERVICES[nodeId] ?? []) {
+  for (const svc of SERVICES[normalizeNodeRouteKey(nodeId)] ?? []) {
     for (const id of Object.keys(svc.file.blocks)) out.push({ service: svc.file.name, instance: id });
   }
   return out;

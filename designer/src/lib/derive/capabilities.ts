@@ -29,11 +29,24 @@ export function resolveManifest(
  *
  * An unknown block yields no badge rather than a false one: a manifest the cache
  * has not fetched yet says nothing about what the block needs, and rendering
- * "needs nothing" would be a claim this has not got. */
+ * "needs nothing" would be a claim this has not got.
+ *
+ * **`nodeCapabilities` is `undefined` for a node that has never answered a probe**
+ * (`NodeSummary.capabilities`, eieio-m9s.20 — DESIGNER §3.1's amendment: absent until a probe
+ * succeeds, never an empty default). This returns `undefined` right back in that case, on
+ * purpose: "unknown" and "missing every capability the block needs" are different claims, and
+ * defaulting to `[]` would silently turn the first into a version of the second — every
+ * manifest capability reported "missing" on a node nobody has actually checked, which reads as
+ * "this node can run nothing" rather than the true "we do not know yet". A `[]` return here
+ * means the opposite thing on purpose: *confirmed* compatible, nothing missing. Callers
+ * (`BlockLibrary.svelte`, `BlockCard.svelte` via `ServiceCanvas.svelte`) render a third, neutral
+ * state for `undefined` rather than folding it into either the "missing" badge or the "no
+ * badge" silence a `[]` produces. */
 export function missingCapabilities(
   manifest: BlockManifest | undefined,
-  nodeCapabilities: Capability[],
-): Capability[] {
+  nodeCapabilities: Capability[] | undefined,
+): Capability[] | undefined {
   if (!manifest) return [];
+  if (!nodeCapabilities) return undefined;
   return manifest.capabilities.filter((c) => !nodeCapabilities.includes(c));
 }

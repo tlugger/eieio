@@ -25,20 +25,27 @@
 
   interface Props {
     systems: SystemSummary[];
-    nodesBySystem: Map<string, NodeWithServices[]>;
+    nodesBySystem: Map<number, NodeWithServices[]>;
     onClose: () => void;
   }
 
   let { systems, nodesBySystem, onClose }: Props = $props();
 
-  let nodeInfo = $state<Record<string, NodeInfo | 'loading' | 'error'>>({});
+  // Keyed by `node.id` (`number`, DESIGNER §3.1 — eieio-m9s.20); `Record<string, …>`'s index
+  // signature accepts a numeric key the same way a plain JS object always has (property keys
+  // are strings at runtime regardless), so this needed no further change once `NodeSummary.id`
+  // stopped being declared `string`.
+  let nodeInfo = $state<Record<number, NodeInfo | 'loading' | 'error'>>({});
   let expanded = $state<Set<string>>(new Set());
 
-  async function loadNodeInfo(nodeId: string) {
+  async function loadNodeInfo(nodeId: number) {
     if (nodeInfo[nodeId]) return;
     nodeInfo = { ...nodeInfo, [nodeId]: 'loading' };
     try {
-      const info = await api.getNodeInfo(nodeId);
+      // `getNodeInfo` (like every other daemon-proxy call, DESIGNER §3.1) takes its `nodeId`
+      // path parameter as a string; App.svelte's own module doc explains why this is the one
+      // spot per call that renders the number rather than comparing it.
+      const info = await api.getNodeInfo(String(nodeId));
       nodeInfo = { ...nodeInfo, [nodeId]: info };
     } catch {
       nodeInfo = { ...nodeInfo, [nodeId]: 'error' };
@@ -55,7 +62,7 @@
 
   // No fetch: `service.error` is already in hand from the listing that
   // populated `nodesBySystem` (eieio-m9s.12). Toggling a row only reveals it.
-  function toggleErrors(nodeId: string, serviceName: string) {
+  function toggleErrors(nodeId: number, serviceName: string) {
     const key = `${nodeId}/${serviceName}`;
     const next = new Set(expanded);
     if (next.has(key)) {

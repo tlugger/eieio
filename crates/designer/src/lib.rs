@@ -72,7 +72,19 @@ impl Shared {
 /// The Designer's own state, as handlers receive it.
 pub type State = Arc<Shared>;
 
-/// The whole router: DESIGNER §3.1's surface, gated by a session except login, plus the SPA.
+/// The whole router: DESIGNER §3.1's surface, gated by a session except login and the
+/// document, plus the SPA.
+///
+/// Split into a `gated` router carrying `session::require_session` and an outer one that does
+/// not, matching `eio-daemon::api::router`'s own shape (`crates/daemon/src/api.rs`'s doc):
+/// "which routes are authenticated" is a security property, and a reader should be able to see
+/// it in the *shape* of this function rather than by checking each route for an opt-out.
+/// `route_layer` is what makes this safe to build this way — it wraps only the routes already
+/// added to `gated`, never a route added to the router it is later merged into (confirmed
+/// against `axum`'s own source: `Router::route_layer` maps `path_router` alone, leaving
+/// `fallback_router`/`catch_all_fallback` untouched) — so `/api/openapi.json` and
+/// `/api/session` merging in *after* `gated` is built is what keeps them outside the guard, not
+/// a per-route exemption inside it.
 pub fn router(shared: State, assets_dir: std::path::PathBuf) -> Router {
     let gated = Router::new()
         .route(
@@ -99,18 +111,29 @@ pub fn router(shared: State, assets_dir: std::path::PathBuf) -> Router {
             "/nodes/{id}/daemon/{*path}",
             axum::routing::any(api::proxy::forward),
         )
-        .fallback(error::not_routed)
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&shared),
             session::require_session,
         ));
 
-    Router::new()
+    // `/openapi.json`: eieio-m9s.20's amendment to DESIGNER §3.1, on the same reasoning DAEMON
+    // §9.1 gives for its own — a schema a client must already be authenticated to *discover* is
+    // one nobody can bootstrap against. Built here, in the merge, rather than as a route on
+    // `gated`: `gated` carries no `.fallback()` of its own for exactly this reason too — a
+    // second custom fallback set here would conflict with one already on `gated` when merged
+    // (`axum::Router::merge` panics if both sides have one), so `not_routed` is set once, after
+    // every route above and below it has landed.
+    let surface = Router::new()
+        .route("/openapi.json", get(api::openapi::document))
         .route(
-            "/api/session",
+            "/session",
             post(api::session::login).delete(api::session::logout),
         )
-        .nest("/api", gated)
+        .merge(gated)
+        .fallback(error::not_routed);
+
+    Router::new()
+        .nest("/api", surface)
         .fallback_service(assets::service(assets_dir))
         .with_state(shared)
 }
