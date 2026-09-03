@@ -64,5 +64,12 @@ eio-conformance.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# LEAF §9's suite 3: `tests/instruction_table.rs` reaches
+# `crates/conformance/tests/support/wasm3_instructions.rs` with `#[path]`, and that shared
+# module assembles its WAT fixtures with `wat::parse_str` — the same crate
+# `crates/conformance`'s own `wat` dependency uses for the identical purpose. Dev-only, the
+# same reason `eio-conformance` is: no leaf image has any business assembling WAT at runtime.
+wat.workspace = true
+
 [lints]
 workspace = true

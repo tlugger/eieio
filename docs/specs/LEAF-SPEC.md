@@ -146,7 +146,9 @@ Three suites, all of which already exist:
 
 1. **The ABI §13 scenario suite**, driven through `host-core`'s `Engine` trait exactly as the daemon and the reference harness drive it. A capability a leaf does not implement is reported **skipped by name**, never passed over.
 2. **`expr-tests/`** — the expression language, property types, and canonical CBOR. Run **at the leaf's own budget settings** (§4), not at the reference defaults: a budget floor that only holds on a generous host is not a floor.
-3. **The ABI §4.3 instruction checks**, against the engine as the leaf actually builds it (§3.1).
+3. **The ABI §4.3 instruction checks**, against the engine as the leaf actually builds it (§3.1). One table, shared — `crates/conformance/tests/support/wasm3_instructions.rs`, which the conformance wasm3 test and the leaf's own test both read. A second copy of the accepted set would be the divergence this whole section exists to prevent, written down twice.
+
+   **What this catches is narrower than "the leaf's engine is configured correctly", and the difference is worth knowing** (eieio-x7g.8). Every case calls its export, so a knob that only changes *load-time* behaviour is invisible to it: `CompilationMode::Eager` and `Lazy` both pass, because calling forces per-function compilation either way. Knobs that change behaviour under a call are caught — a deliberately tiny interpreter stack fails the suite naming `memory.copy`. So this suite pins what the engine *executes*, not how it got there, which is the right thing for a set defined by what the toolchain emits and the interpreter runs.
 
 ### 9.1 Canonical CBOR: a stock encoder is wrong for this platform
 
