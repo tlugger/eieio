@@ -5,6 +5,18 @@ import { defineConfig } from 'vite'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [svelte()],
+  // Svelte 5 ships two builds behind package.json export conditions:
+  // `browser` (the real client runtime, where `mount`/`unmount` work) and a
+  // `default` that falls back to the server-side rendering build, which
+  // resolves fine but silently no-ops `mount` in a component test. Vite's
+  // dev server and build already request the `browser` condition (it's a
+  // client-only SPA — DESIGNER §1), so this only changes what Vitest's
+  // Node-hosted test runner resolves. Gated on `process.env.VITEST` (set by
+  // Vitest itself) rather than applied unconditionally, so `vite build`'s
+  // module resolution — and therefore `designer/dist`, which
+  // `crates/designer` embeds byte for byte — cannot be touched by a change
+  // that exists only to make component tests possible.
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   build: {
     // The Rust backend (crates/designer, built by another agent) embeds
     // exactly this path via rust-embed. Do not change it (DESIGNER §1).
@@ -35,5 +47,6 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     include: ['src/**/*.{test,spec}.{js,ts}'],
+    setupFiles: ['./vitest-setup.ts'],
   },
 })
