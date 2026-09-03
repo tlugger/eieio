@@ -4,6 +4,18 @@
 // `sse.ts` guarantees a frame arrives at all, this guarantees a known frame
 // is read the same way every time, and an unknown one is dropped rather
 // than thrown.
+//
+// Every decoded event now carries the full wire field set — `service`,
+// `instance`, `at`, `port` beside whichever fields are the event's own —
+// because `designer/src/lib/api/schema-parity.test.ts` (eieio-m9s.13)
+// checks this decoder's output type against `crates/daemon/src/observe.rs`'s
+// live `Observation`/`What` schemas, field for field, and a field this
+// decoder never populated would be a field this file's own types lied
+// about carrying. See `types.ts`'s module doc, right above `TapSignalsEvent`,
+// for the `@wire` naming note: `timestamp` below is read from the wire's
+// `at`, kept under its existing name because `InspectorPanel.svelte` already
+// reads it that way. `ExprFailureEvent` carries the wire's numeric `prop`
+// index and no property *name* at all — the daemon has none to send.
 
 import type { SseFrame } from './sse';
 import type { TapStreamEvent, LogLineEvent } from './types';
@@ -20,23 +32,56 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
   } catch {
     return null;
   }
+
+  // DAEMON §9.6: every payload carries these, regardless of which event it is — read once here
+  // rather than at each `case` below.
+  const service = typeof payload.service === 'string' ? payload.service : undefined;
+  const instance = typeof payload.instance === 'string' ? payload.instance : undefined;
+  const at = typeof payload.at === 'string' ? payload.at : undefined;
+  const port = typeof payload.port === 'string' ? payload.port : undefined;
+
   switch (frame.event) {
     case 'signals':
-      return { type: 'signals', signals: Array.isArray(payload.signals) ? payload.signals : [] };
+      return {
+        type: 'signals',
+        service,
+        instance,
+        at,
+        port,
+        signals: Array.isArray(payload.signals) ? (payload.signals as string[]) : [],
+      };
     case 'expr_failure':
       if (typeof payload.code !== 'string' || typeof payload.message !== 'string') return null;
       return {
         type: 'expr_failure',
+        service,
+        instance,
+        at,
+        port,
         code: payload.code,
         span: parseSpan(payload.span),
         message: payload.message,
-        instance: typeof payload.instance === 'string' ? payload.instance : undefined,
-        property: typeof payload.property === 'string' ? payload.property : undefined,
+        signal: typeof payload.signal === 'number' ? payload.signal : undefined,
+        prop: typeof payload.prop === 'number' ? payload.prop : undefined,
       };
     case 'discarded':
-      return { type: 'discarded', reason: typeof payload.reason === 'string' ? payload.reason : 'unknown' };
+      return {
+        type: 'discarded',
+        service,
+        instance,
+        at,
+        port,
+        reason: typeof payload.reason === 'string' ? payload.reason : 'unknown',
+      };
     case 'lagged':
-      return { type: 'lagged', missed: typeof payload.missed === 'number' ? payload.missed : 0 };
+      return {
+        type: 'lagged',
+        service,
+        instance,
+        at,
+        port,
+        missed: typeof payload.missed === 'number' ? payload.missed : 0,
+      };
     default:
       return null;
   }
@@ -62,6 +107,7 @@ export function decodeLogFrame(frame: SseFrame): LogLineEvent | null {
     level: payload.level,
     service: typeof payload.service === 'string' ? payload.service : undefined,
     instance: typeof payload.instance === 'string' ? payload.instance : undefined,
+    port: typeof payload.port === 'string' ? payload.port : undefined,
     message: payload.message,
   };
 }

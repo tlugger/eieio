@@ -56,6 +56,13 @@ pub struct Observation {
     /// The instance's id (SERVICE §2).
     pub instance: String,
     /// The SSE event name this is published as (§9.6).
+    ///
+    /// Always [`What::event`] for the `what` beside it — every construction site sets
+    /// `event: what.event()`, so this can never name a different variant than the one that
+    /// actually travels with it. Stored rather than recomputed at serialize time because two
+    /// readers need the name *before* they have JSON to look inside: [`crate::api::sse::stream_of`]
+    /// names the SSE frame's `event:` line with it, and `crate::api::logs` filters on it — both
+    /// without reaching into `what` to re-derive what is already sitting right here.
     pub event: &'static str,
     /// When this was observed, RFC 3339 with milliseconds.
     ///
@@ -118,6 +125,26 @@ pub enum What {
         /// Exactly how many. The sampling report.
         missed: u64,
     },
+}
+
+impl What {
+    /// The SSE event name this variant is published as (DAEMON §9.6).
+    ///
+    /// The one definition of the variant→event-name mapping. Every construction site
+    /// (`Bus::log`, `observe`, and `api::sse::stream_of`'s own `Lagged`) calls this rather than
+    /// naming the event a second time, so [`Observation::event`] cannot drift from `what`, and a
+    /// checker (eieio-m9s.13's SSE schema-parity test) can read the mapping off this match rather
+    /// than a hand-typed table beside it. Exhaustive on purpose, with no wildcard arm: a variant
+    /// added to `What` without a matching arm here fails the build, not silently falls through.
+    pub fn event(&self) -> &'static str {
+        match self {
+            What::Signals { .. } => event::SIGNALS,
+            What::ExprFailure { .. } => event::EXPR_FAILURE,
+            What::Discarded { .. } => event::DISCARDED,
+            What::Log { .. } => event::LOG,
+            What::Lagged { .. } => event::LAGGED,
+        }
+    }
 }
 
 /// The per-node bus every observation passes through (DAEMON §11).
@@ -236,16 +263,19 @@ impl Bus {
 
     /// Publishes a log line (DAEMON §11).
     pub fn log(&self, service: &str, instance: &str, level: &str, message: &str) {
-        self.publish(|| Observation {
-            at: now_rfc3339(),
-            service: String::from(service),
-            instance: String::from(instance),
-            event: event::LOG,
-            port: None,
-            what: What::Log {
+        self.publish(|| {
+            let what = What::Log {
                 level: String::from(level),
                 message: String::from(message),
-            },
+            };
+            Observation {
+                at: now_rfc3339(),
+                service: String::from(service),
+                instance: String::from(instance),
+                event: what.event(),
+                port: None,
+                what,
+            }
         });
     }
 }
@@ -335,13 +365,8 @@ fn observe(bus: &Bus, service: &str, instance: &str, outputs: &[String], event: 
         } => {
             // Everything expensive — resolving the port's name, rendering the batch — happens
             // *inside* the closure, so an untapped node does none of it (DAEMON §6.3).
-            bus.publish(|| Observation {
-                at: now_rfc3339(),
-                service: String::from(service),
-                instance: String::from(instance),
-                event: event::SIGNALS,
-                port: Some(port_name(port)),
-                what: What::Signals {
+            bus.publish(|| {
+                let what = What::Signals {
                     // EXPR §7.6's canonical rendering, the same one `dev run-block` prints:
                     // a second definition of what a value looks like would be a second answer
                     // the conformance vectors do not pin.
@@ -349,33 +374,47 @@ fn observe(bus: &Bus, service: &str, instance: &str, outputs: &[String], event: 
                         .iter()
                         .map(|signal| eio_expr::render(signal.as_value()))
                         .collect(),
-                },
+                };
+                Observation {
+                    at: now_rfc3339(),
+                    service: String::from(service),
+                    instance: String::from(instance),
+                    event: what.event(),
+                    port: Some(port_name(port)),
+                    what,
+                }
             });
         }
-        Event::Failure(failure) => bus.publish(|| Observation {
-            at: now_rfc3339(),
-            service: String::from(service),
-            instance: String::from(instance),
-            event: event::EXPR_FAILURE,
-            port: None,
-            what: What::ExprFailure {
+        Event::Failure(failure) => bus.publish(|| {
+            let what = What::ExprFailure {
                 code: format!("{:?}", failure.error.code),
                 span: format!("{}..{}", failure.error.span.start, failure.error.span.end),
                 message: failure.error.to_string(),
                 prop: failure.prop_id,
                 signal: failure.signal,
-            },
-        }),
-        Event::Discarded(discard) => {
-            bus.publish(|| Observation {
+            };
+            Observation {
                 at: now_rfc3339(),
                 service: String::from(service),
                 instance: String::from(instance),
-                event: event::DISCARDED,
-                port: Some(port_name(discard.port)),
-                what: What::Discarded {
+                event: what.event(),
+                port: None,
+                what,
+            }
+        }),
+        Event::Discarded(discard) => {
+            bus.publish(|| {
+                let what = What::Discarded {
                     reason: String::from(reason_of(discard.reason)),
-                },
+                };
+                Observation {
+                    at: now_rfc3339(),
+                    service: String::from(service),
+                    instance: String::from(instance),
+                    event: what.event(),
+                    port: Some(port_name(discard.port)),
+                    what,
+                }
             });
         }
         // Statuses, details, refusals, deaths and stops are the log's (DAEMON §11) rather than
@@ -563,6 +602,71 @@ mod tests {
             What::Log { level, .. } => assert_eq!(level, "warn"),
             other => panic!("not a log: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn every_construction_site_stores_what_s_own_event_name() {
+        // `Observation::event` is documented to always be `what.event()` — this is the
+        // invariant that makes the mapping something a checker can read off the code (this
+        // file's `What::event`) rather than trust a second, hand-typed list beside it
+        // (eieio-m9s.13). Drives every reachable construction path and checks what actually
+        // came out the other end, not just what the code is supposed to do.
+        let bus = Arc::new(Bus::default());
+        let mut seen = published(&bus);
+
+        bus.log("kitchen", "t1", "info", "a log line");
+        observe(
+            &bus,
+            "kitchen",
+            "t1",
+            &[String::from("out")],
+            Event::Emitted {
+                callback: "process_signals",
+                emission: Emission {
+                    port: 0,
+                    batch: eio_signal::Batch::new(),
+                },
+            },
+        );
+        observe(
+            &bus,
+            "kitchen",
+            "t1",
+            &[String::from("out")],
+            Event::Failure(eio_host_core::PropFailure {
+                prop_id: 0,
+                signal: None,
+                error: eio_expr::Error::new(
+                    eio_expr::ErrorCode::Parse,
+                    eio_expr::Span::new(0, 1),
+                    "boom",
+                ),
+            }),
+        );
+        observe(
+            &bus,
+            "kitchen",
+            "t1",
+            &[String::from("out")],
+            Event::Discarded(crate::router::Discard {
+                port: 0,
+                reason: DiscardReason::Unrouted,
+            }),
+        );
+
+        let mut count = 0;
+        while let Ok(observation) = seen.try_recv() {
+            assert_eq!(
+                observation.event,
+                observation.what.event(),
+                "stored `event` drifted from `what.event()`: {observation:?}"
+            );
+            count += 1;
+        }
+        assert_eq!(
+            count, 4,
+            "expected one observation per construction path exercised above"
+        );
     }
 
     #[tokio::test]

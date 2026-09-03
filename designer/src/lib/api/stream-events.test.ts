@@ -24,7 +24,9 @@ describe('decodeTapFrame', () => {
           span: '3..8',
           message: 'key "temp" not present on this signal',
           instance: 'f3m9',
-          property: 'predicate',
+          // The descriptor's numeric property index. A name was never on the wire —
+          // `What::ExprFailure` has none to send.
+          prop: 1,
         }),
       ),
     ).toEqual({
@@ -33,8 +35,20 @@ describe('decodeTapFrame', () => {
       span: { start: 3, end: 8 },
       message: 'key "temp" not present on this signal',
       instance: 'f3m9',
-      property: 'predicate',
+      prop: 1,
     });
+  });
+
+  it('carries no property name, because the daemon has none to send', () => {
+    // The field this used to decode (`property`, a name) had no wire source at all, so it was
+    // `undefined` against every real node — and `InspectorPanel.svelte` prefixed its failure
+    // line with it, which is why that line silently never said which property failed. The
+    // wire's answer is `prop`, an index into the descriptor's property list.
+    const decoded = decodeTapFrame(
+      frame('expr_failure', { code: 'MISSING', message: 'x', prop: 2, property: 'predicate' }),
+    );
+    expect(decoded).toEqual(expect.objectContaining({ type: 'expr_failure', prop: 2 }));
+    expect(decoded).not.toHaveProperty('property');
   });
 
   it('decodes a lagged event, the exact-count sampling report', () => {
@@ -58,6 +72,35 @@ describe('decodeTapFrame', () => {
 
   it('rejects an expr_failure missing required fields rather than guessing', () => {
     expect(decodeTapFrame(frame('expr_failure', { message: 'no code' }))).toBeNull();
+  });
+
+  it('decodes the common Observation fields (service, instance, at, port) alongside a signals event', () => {
+    // DAEMON §9.6: "every payload carries service, instance, at... and event, plus port where
+    // the observation has one" — eieio-m9s.13's schema-parity check compares against all of
+    // these, not just an event's own fields, so this decoder has to actually read them.
+    expect(
+      decodeTapFrame(
+        frame('signals', {
+          service: 'kitchen',
+          instance: 't1',
+          at: '2026-09-02T00:00:00Z',
+          port: 'out',
+          signals: ['{temp: 21.5}'],
+        }),
+      ),
+    ).toEqual({
+      type: 'signals',
+      service: 'kitchen',
+      instance: 't1',
+      at: '2026-09-02T00:00:00Z',
+      port: 'out',
+      signals: ['{temp: 21.5}'],
+    });
+  });
+
+  it('decodes the per-signal `signal` index on an expr_failure event', () => {
+    const decoded = decodeTapFrame(frame('expr_failure', { code: 'MISSING', message: 'x', prop: 1, signal: 4 }));
+    expect(decoded).toEqual(expect.objectContaining({ type: 'expr_failure', signal: 4 }));
   });
 });
 
@@ -90,7 +133,11 @@ describe('decodeLogFrame', () => {
   });
 
   it('omits instance for a daemon subsystem line that carries none', () => {
-    const decoded = decodeLogFrame(frame('log', { timestamp: 't', level: 'INFO', message: 'booted' }));
+    // `at`, not `timestamp` — the wire's own field name (see the describe block below). A
+    // fixture that says `timestamp` here would fail to decode at all and this assertion would
+    // pass vacuously against `undefined`, which is what happened before eieio-m9s.13.
+    const decoded = decodeLogFrame(frame('log', { at: 't', level: 'INFO', message: 'booted' }));
+    expect(decoded).not.toBeNull();
     expect(decoded?.instance).toBeUndefined();
   });
 });

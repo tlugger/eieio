@@ -82,7 +82,12 @@
   }
 
   function tapEventToLine(event: TapStreamEvent, sourceLabel: string): PanelLine {
-    const timestamp = new Date().toISOString();
+    // The daemon's own stamp, never the reader's arrival time — DAEMON §9.6 says so
+    // normatively, and names the two cases it is wrong in: a reader told it `lagged` is
+    // reading events later than they happened, and a replayed backlog would be stamped as
+    // if it had just occurred. `new Date()` here was exactly that bug; the fallback only
+    // covers a frame that arrived without `at`.
+    const timestamp = event.at ?? new Date().toISOString();
     switch (event.type) {
       case 'signals':
         return { id: nextId(), timestamp, level: 'SIGNAL', label: sourceLabel, payload: JSON.stringify(event.signals), kind: 'signal' };
@@ -95,7 +100,12 @@
           // The one line this whole panel exists for (EXPR §6 / DAEMON §6.3):
           // which property, on which signal, and why - never buried among
           // ordinary traffic.
-          payload: `${event.property ? `${event.property}: ` : ''}${event.message} [${event.code}]`,
+          // `prop` is the descriptor's numeric property index; the daemon has no name to
+          // send (DAEMON §9.6). This used to read an invented `event.property` name, so the
+          // prefix was empty against every real node — the one line this panel exists for,
+          // silently missing its subject. Resolving the index to a name needs the block's
+          // manifest, which this component is not given: eieio-m9s.14.
+          payload: `${event.prop !== undefined ? `prop ${event.prop}: ` : ''}${event.message} [${event.code}]`,
           kind: 'error',
         };
       case 'lagged':

@@ -549,6 +549,18 @@ A conforming implementation MUST test that every route it serves is described in
 
 **Event names are the contract**, and a client dispatches on them: `signals` for a batch that travelled the tapped connection, `expr_failure` for a property expression that failed for a signal (EXPR §8: code, span and message), `discarded` for a batch that was routed and not delivered (§6.2), `lagged` for the paragraph below, and `log` on `/logs/stream`. A name not in that list is a name a client MAY ignore; adding one is not a breaking change, and changing what one means is.
 
+**The event name is the discriminant, and the payload is flat.** There is no type tag inside the JSON: the SSE frame's `event:` line names the variant, and the body is the observation's common fields with that variant's own fields merged in beside them — so a client dispatches on the name first and then reads a known shape, never sniffs one. Every payload carries `service`, `instance`, `at` (above) and `event`, plus `port` where the observation has one; on top of that:
+
+|`event:`|Adds|
+|---|---|
+|`signals`|`signals`: one EXPR §7.6 canonical rendering per signal in the batch, as strings|
+|`expr_failure`|`code` (EXPR §8), `span` (`"start..end"`, above), `message`, `prop` (the descriptor's property index), and `signal` (which signal of the batch) when the failure was per-signal|
+|`discarded`|`reason`|
+|`log`|`level` (`trace`..`error`) and `message`|
+|`lagged`|`missed`, the exact count|
+
+A field marked as present only sometimes is **absent**, not null — the same rule ABI §11 and EXPR §6 apply everywhere else, and a client that treats a missing `signal` as signal zero has invented a fact. This table is documentation; the enforcement is a parity check between the daemon's own schema and the Designer's decoder, because a shape described in prose and verified nowhere drifts exactly the way this one already did (eieio-m9s.13).
+
 **The ring buffer is bounded, and a slow reader is told exactly what it missed.** A tap holds a fixed number of observations for a client that is not keeping up, and the oldest go first — an operator watching a firehose through a browser should see recent signals, not a stalled node. What a tap MUST NOT do is skip silently: a debugging tool that quietly shows a subset is worse than one that shows less and says so. So a client that falls behind receives a `lagged` event carrying the exact number of observations it did not see, before the stream resumes. **That count is the sampling report**, and it is why "sampled" here needs no rate knob: the stream is complete until a reader cannot keep up, and precisely quantified from then on.
 
 **Teardown is either explicit or a disconnect.** `DELETE /taps/{id}` removes a tap; so does the client going away, detected when the stream's send fails. A tap holds a subscription and a ring and nothing else, so releasing it releases everything — there is no separate reclaim, and a tap that outlived its reader would be a leak of exactly the kind §11's drain exists to prevent.

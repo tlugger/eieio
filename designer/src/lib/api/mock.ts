@@ -781,18 +781,20 @@ function sampleSignal(manifest: BlockManifest | undefined, sourcePort: string, t
 /** The downstream property (if any) whose expression reads `$<field>` for
  * one of `sourceFields` — what makes an omitted field a realistic
  * `expr_failure` rather than an arbitrary one. Returns the field, the
- * property name, and the `$field`'s byte offset in that expression's
- * source, for `expr_failure`'s `span` (EXPR §8). */
+ * property's *index* (`expr_failure` carries `prop`, a number — the daemon
+ * has no name to send, DAEMON §9.6) and the `$field`'s byte offset in that
+ * expression's source, for `expr_failure`'s `span` (EXPR §8). */
 function findFieldDependency(
   toInstance: BlockInstance | undefined,
   sourceFields: string[],
-): { field: string; property: string; start: number } | null {
+): { field: string; prop: number; start: number } | null {
   if (!toInstance) return null;
-  for (const [property, expression] of Object.entries(toInstance.props)) {
+  const entries = Object.entries(toInstance.props);
+  for (const [prop, [, expression]] of entries.entries()) {
     for (const field of sourceFields) {
       const needle = `$${field}`;
       const start = expression.indexOf(needle);
-      if (start >= 0) return { field, property, start };
+      if (start >= 0) return { field, prop, start };
     }
   }
   return null;
@@ -845,10 +847,15 @@ export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHand
       dispatch(
         sseFrame('expr_failure', {
           code: 'MISSING',
-          span: { start: dependency.start, end: dependency.start + dependency.field.length + 1 },
+          // A STRING, `"start..end"` — DAEMON §9.6, and the shape `parseSpan` reads. This
+          // fixture emitted `{start, end}` until eieio-m9s.13: the same object-vs-string
+          // mistake `a36f7a7` fixed in the decoder, still live on the other side of it, so
+          // every mock failure decoded to no span at all.
+          span: `${dependency.start}..${dependency.start + dependency.field.length + 1}`,
           message: `key "${dependency.field}" not present on this signal (EXPR §6: missing data is an error, not null)`,
           instance: parsed!.toId,
-          property: dependency.property,
+          at: new Date().toISOString(),
+          prop: dependency.prop,
         }),
       );
       return;

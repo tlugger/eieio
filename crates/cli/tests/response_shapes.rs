@@ -73,29 +73,44 @@
 //!   or shipping a change with unreviewed collateral damage outside this worktree's remit. Both
 //!   are noted in `types.ts` at the point they matter, and reported to the driving agent as
 //!   follow-up work.
-//! - **The tap-stream and log-stream SSE event payloads (`Observation`/`What`).** These are not
-//!   even *in* the OpenAPI document — `taps::stream` and `logs::stream` declare only
-//!   `content_type = "text/event-stream"` with no `body`, so there is no schema for utoipa to
-//!   collect. Pulling `Observation`/`What`'s schema directly via `PartialSchema::schema()`
-//!   (both types are `pub`, via `eio_daemon::observe`) shows why a field-set diff against
-//!   `TapStreamEvent`/`LogLineEvent` would not be a fair test even if it were wired up: the wire
-//!   shape is `Observation`'s own fields (`service`, `instance`, `event`, `port?`) flattened
-//!   with whichever `What` variant applied (`#[serde(untagged)]`, so no tag field at all), and
-//!   the *SSE frame's `event:` line* — not a JSON field — is what names the variant. The
-//!   Designer's `decodeTapFrame`/`decodeLogFrame` (`stream-events.ts`, not owned by this bead)
-//!   know this and decode accordingly, but the decoded shape they produce differs from the wire
-//!   shape in ways a naive field-name diff cannot see through: `span` is a rendered `"12..34"`
-//!   string on the wire, decoded into a `{start,end}` object; `What::ExprFailure` carries `prop`
-//!   (a numeric index) where `ExprFailureEvent` expects `property` (a name) and decodes it as
-//!   `undefined` since the wire never has one; and neither `Observation` nor any `What` variant
-//!   carries a `timestamp` field at all, so `decodeLogFrame`'s requirement that `payload.timestamp`
-//!   be a string means **every real log line fails to decode** — `LogLineEvent.timestamp` has no
-//!   wire source. That last one is a genuine, live bug in the log-streaming path, found while
-//!   scoping this check; it is reported rather than fixed here because the fix is a decoder
-//!   change (`stream-events.ts`) outside this bead's owned files, and because CLAUDE.md's rule
-//!   for `crates/daemon/src` cuts the other way here too: the daemon's shape is the reasoned
-//!   one (`span` as a byte-offset string mirrors EXPR §8; `prop` as an index is what the
-//!   descriptor already numbers properties by) and it is the client's guess that is wrong.
+//! - **The service listing (`ServiceSummary`) and `/services/{s}/errors`**, exactly as above —
+//!   unchanged and still out of scope for this bead (eieio-m9s.13 owns the SSE side only).
+//!
+//! # The SSE payloads, covered as of eieio-m9s.13
+//!
+//! `taps::stream` and `logs::stream` are not *in* the OpenAPI document at all — both declare
+//! only `content_type = "text/event-stream"` with no `body`, so there is no schema for utoipa to
+//! collect from a `#[utoipa::path]`. And a plain field-set diff against `Observation`/`What`
+//! would not be a fair test even with a schema in hand: the wire shape is `Observation`'s own
+//! fields flattened with whichever `What` variant applied (`#[serde(untagged)]`, so no JSON tag
+//! names the variant), and it is the *SSE frame's `event:` line* that does — DAEMON §9.6's
+//! amendment, quoted in the sub-plan, spells this out as "the event name is the discriminant,
+//! and the payload is flat".
+//!
+//! So this file also emits an `"sse"` entry: one field set per event name, built by pulling
+//! `What::schema()`'s `oneOf` (one branch per variant, in the enum's declaration order — the
+//! same order [`What::event`] switches on, confirmed by printing both side by side while writing
+//! this, and re-checked every run below rather than trusted once) and `Observation::schema()`'s
+//! common fields (the `allOf` branch that is not the `$ref` to `What`), and pairing each `oneOf`
+//! branch with the event name a real value of that variant reports through `What::event` — never
+//! a name typed out by hand a second time, which is the whole reason `What::event` exists
+//! (`crates/daemon/src/observe.rs`'s module doc and the bead itself). `designer/src/lib/api/
+//! schema-parity.test.ts` derives its own side of the pairing the same way, from `types.ts`'s own
+//! AST — see its module doc.
+//!
+//! Two live bugs were found by hand before this check existed, and are now covered by it:
+//! `a36f7a7` fixed a required `timestamp` the daemon never sent (`decodeLogFrame` now reads the
+//! wire's `at`, keeping `LogLineEvent.timestamp` as the field's name for the panel that already
+//! reads it — an intentional rename, not a gap, and `schema-parity.test.ts`'s `@wire` tag is how
+//! it tells the checker so), and a `span` decoded as an object where the wire carries the string
+//! `"12..34"`. A third, not previously reported: `What::ExprFailure` carries `prop`, a numeric
+//! property index, where `ExprFailureEvent` had only ever invented `property`, a name with no
+//! wire source at all. Unlike the other two, this one could not be fixed by re-pointing the
+//! decoder at the real field under the existing name: `mock.ts` and `mock-taps.test.ts` (neither
+//! owned by this bead) already exercise `property` as a fabricated name string, so `types.ts`
+//! instead gained a real `prop` field alongside the untouched, `@legacy`-tagged `property` —
+//! excluded from the comparison rather than fixed, and reported as follow-up (see `types.ts`'s
+//! doc on `ExprFailureEvent.property` for the detail).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -203,6 +218,129 @@ fn fields_of(name: &str, components: &BTreeMap<String, RefOr<Schema>>) -> BTreeS
     out
 }
 
+/// One example value per [`What`] variant, in the enum's declaration order — the same order its
+/// `oneOf` schema lists them in (confirmed empirically by [`sse_shapes`]'s own subset check
+/// below, every run, not just once by eye).
+///
+/// This is the one place a variant is named by hand in this file, and unavoidably so: nothing
+/// short of a derive macro can enumerate an enum's variants at runtime, and something has to
+/// call [`What::event`] on *a value* to read off the mapping — schemas alone have no values.
+/// What is never hand-typed anywhere is which *event name* a variant corresponds to: that always
+/// comes from calling [`What::event`], never from a string written out to match it. Content of
+/// the example values does not matter (empty strings, zero); only their variant and the order
+/// they are listed in do.
+fn what_examples() -> Vec<What> {
+    vec![
+        What::Signals {
+            signals: Vec::new(),
+        },
+        What::ExprFailure {
+            code: String::new(),
+            span: String::new(),
+            message: String::new(),
+            prop: 0,
+            signal: None,
+        },
+        What::Discarded {
+            reason: String::new(),
+        },
+        What::Log {
+            level: String::new(),
+            message: String::new(),
+        },
+        What::Lagged { missed: 0 },
+    ]
+}
+
+/// [`Observation`]'s fields that every event carries, regardless of which `What` variant applied
+/// (DAEMON §9.6: "every payload carries `service`, `instance`, `at`... and `event`, plus `port`
+/// where the observation has one").
+///
+/// `Observation::schema()` is an `allOf` of `[$ref: What, {the plain fields}]` (utoipa's
+/// rendering of a struct with one `#[serde(flatten)]` field beside ordinary ones) — this walks
+/// that `allOf` and flattens everything that is *not* the `$ref` to `What`, since `What`'s own
+/// fields are per-variant and handled separately, per event, by [`sse_shapes`].
+fn common_observation_fields(components: &BTreeMap<String, RefOr<Schema>>) -> BTreeSet<String> {
+    let RefOr::T(Schema::AllOf(all_of)) = Observation::schema() else {
+        panic!(
+            "`Observation::schema()` is no longer an `allOf` of `[What, {{common fields}}]` — \
+             the SSE parity check's `common_observation_fields` assumed utoipa renders a \
+             `#[serde(flatten)]` field this way; find another route or STOP and report"
+        );
+    };
+    let mut out = BTreeSet::new();
+    for item in &all_of.items {
+        // The `$ref` branch is `What` itself — its fields are per-variant, not common, and
+        // `sse_shapes` adds them per event name rather than unioning them in here.
+        if matches!(item, RefOr::Ref(_)) {
+            continue;
+        }
+        flatten(item, "", components, MAX_DEPTH, &mut out);
+    }
+    out
+}
+
+/// Per-event field sets for the SSE payloads (DAEMON §9.6): `{"signals": [...], ...}`, one entry
+/// per [`What`] variant, keyed by the event name [`What::event`] reports for it — see this
+/// module's doc for the derivation and why a field-name diff needed this rather than the
+/// existing [`fields_of`].
+fn sse_shapes(
+    components: &BTreeMap<String, RefOr<Schema>>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let common = common_observation_fields(components);
+
+    let RefOr::T(Schema::OneOf(one_of)) = What::schema() else {
+        panic!(
+            "`What::schema()` is no longer a `oneOf` — the SSE parity check assumed \
+             `#[serde(untagged)]` on an enum of struct variants produces one schema branch per \
+             variant; find another route or STOP and report"
+        );
+    };
+
+    let examples = what_examples();
+    assert_eq!(
+        examples.len(),
+        one_of.items.len(),
+        "`What::schema()` has {} `oneOf` branches but `what_examples()` only names {} — a \
+         variant was added to `observe.rs`'s `What` without a matching entry in \
+         `what_examples()` above; add one so the SSE parity check covers it too, rather than \
+         silently skipping it",
+        one_of.items.len(),
+        examples.len(),
+    );
+
+    let mut out = serde_json::Map::new();
+    for (index, (branch, example)) in one_of.items.iter().zip(examples.iter()).enumerate() {
+        let mut fields = common.clone();
+        flatten(branch, "", components, MAX_DEPTH, &mut fields);
+
+        // The empirical check `what_examples()`'s own doc promises: this branch's declared
+        // fields had better actually describe the example paired with it, or `oneOf`'s
+        // declaration order does not match the enum's declaration order the way `What::event`'s
+        // match arms (and this pairing) assume it does.
+        if let serde_json::Value::Object(serialized) =
+            serde_json::to_value(example).expect("`What` serializes")
+        {
+            for key in serialized.keys() {
+                assert!(
+                    fields.contains(key.as_str()),
+                    "`what_examples()`'s {index}th example (`{}`) serialized a `{key}` field \
+                     that `What::schema()`'s {index}th `oneOf` branch does not declare — the \
+                     assumption that `oneOf` order matches `What`'s declaration order does not \
+                     hold; find another route or STOP and report",
+                    example.event(),
+                );
+            }
+        }
+
+        out.insert(
+            String::from(example.event()),
+            serde_json::Value::Array(fields.into_iter().map(serde_json::Value::String).collect()),
+        );
+    }
+    out
+}
+
 /// Where `schema-parity.test.ts` reads what this test just wrote.
 ///
 /// Generated, gitignored (`designer/.gitignore`), and overwritten on every run — see this
@@ -222,7 +360,7 @@ fn generated_path() -> PathBuf {
 #[test]
 fn emit_response_shapes() {
     let components = components();
-    let targets = ["NodeInfo", "TapRequest", "ApiError"];
+    let targets = ["NodeInfo", "TapRequest", "ApiError", "ServiceSummary"];
 
     let mut shapes = serde_json::Map::new();
     for name in targets {
@@ -237,6 +375,10 @@ fn emit_response_shapes() {
             serde_json::Value::Array(fields.into_iter().map(serde_json::Value::String).collect()),
         );
     }
+    shapes.insert(
+        String::from("sse"),
+        serde_json::Value::Object(sse_shapes(&components)),
+    );
 
     let path = generated_path();
     std::fs::create_dir_all(path.parent().expect("has a parent"))

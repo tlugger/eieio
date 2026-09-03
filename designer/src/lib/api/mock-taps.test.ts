@@ -73,7 +73,8 @@ describe('streamTap', () => {
     if (failure.type !== 'expr_failure') throw new Error('unreachable');
     expect(failure.code).toBe('MISSING');
     expect(failure.instance).toBe('f3m9'); // the downstream block whose `predicate` reads $temp
-    expect(failure.property).toBe('predicate');
+    expect(failure.prop).toBe(0); // `predicate`'s index — the wire sends a number, never a name
+    expect(failure.span).toEqual({ start: expect.any(Number), end: expect.any(Number) }); // a parsed `"a..b"` string
     expect(failure.message).toMatch(/temp/);
     handle.close();
   });

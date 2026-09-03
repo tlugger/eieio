@@ -398,54 +398,87 @@ export interface InstanceError {
 }
 
 /** DAEMON §9.6's event names — the contract a client dispatches on for
- * `/taps/{id}/stream`. "A name not in that list is a name a client MAY
- * ignore" — `decodeTapFrame` (`lib/api/stream-events.ts`) is where that
- * tolerance lives.
+ * `/taps/{id}/stream` and `/logs/stream`.
  *
- * **Not comparable to the wire shape field-for-field, and this is expected rather than a bug
- * in this check** (found while scoping eieio-m9s.11, reported here rather than fixed since it
- * lives in `stream-events.ts`, outside this bead's owned files): the daemon's actual SSE
- * payload for every one of these events is `crates/daemon/src/observe.rs`'s `Observation`,
- * flattened with whichever `What` variant applied — `#[serde(untagged)]`, so **no JSON field
- * ever carries the variant name**; the SSE frame's own `event:` line does that, which is why
- * `type` below is a `decodeTapFrame`-computed literal and never a wire field to diff against.
- * Two real, live mismatches this surfaced: `ExprFailureEvent.span` below is decoded as `{start,
- * end}`, but the wire's `span` is a rendered `"12..34"` string (`isSpan`'s check in
- * `stream-events.ts` never matches real data, so `span` silently renders as `{0,0}` against a
- * real node); and `ExprFailureEvent.property` has no wire source at all — `What::ExprFailure`
- * carries `prop`, a numeric property index, never a name. */
+ * **Now compared field-for-field against the wire, by eieio-m9s.13's schema-parity check**
+ * (`schema-parity.test.ts`, reading `crates/daemon/src/observe.rs`'s live `Observation`/`What`
+ * schemas): the daemon's actual payload for every one of these events is `Observation`'s own
+ * fields (`service`, `instance`, `event`, `at`, `port?`) flattened with whichever `What` variant
+ * applied — `#[serde(untagged)]`, so no JSON field is *named* as the discriminant, but
+ * `Observation.event` is an ordinary string field carrying the same name the SSE frame's
+ * `event:` line does, and the payload really does carry it. Every interface below therefore
+ * carries the full wire field set, including that common part, even where a value is not read by
+ * anything today (`port` is always structurally present, per §9.6: "plus port where the
+ * observation has one" — always in the schema, only sometimes populated).
+ *
+ * One field is named differently here than on the wire, on purpose, because
+ * `InspectorPanel.svelte` (not owned by this bead) already reads it by its existing name and
+ * this bead does not touch that file: `LogLineEvent.timestamp` is the wire's `at`. A
+ * `@wire <name>` JSDoc tag marks it with its real wire name, and `schema-parity.test.ts` reads
+ * the tag from this file's own AST rather than trusting a second, separate list of the rename —
+ * the same "derive it from the code" rule DAEMON §9.6's mapping itself is built on (eieio-
+ * m9s.13's bead: "the third source of truth this whole mechanism exists to prevent"). `type`'s
+ * wire name is `event` on every interface below, for the same reason: it is the discriminant
+ * `decodeTapFrame`/`decodeLogFrame` compute, not a field the wire spells `type`.
+ *
+ * There is deliberately **no opt-out tag**. An "exclude this field from the comparison"
+ * annotation is how a check like this one gets quietly defeated: the next invented field is
+ * one tag away from being tolerated, and the tag reads as a decision somebody made rather
+ * than as drift. `@wire` renames a field; nothing exempts one.
+ *
+ * Fixed by this bead, now that the check can see them: `span` was decoded as `{start, end}`
+ * where the wire carries the rendered string `"12..34"` (`a36f7a7`, already fixed); `timestamp`
+ * required a wire field (`timestamp`) the daemon never sends, rejecting every real log line
+ * (`a36f7a7`, already fixed, and now pinned by `@wire at` above); and `ExprFailureEvent` traded
+ * an invented `property` *name* — always `undefined` against a real daemon, because
+ * `What::ExprFailure` has no name to send — for the wire's own numeric `prop` index. */
 export interface TapSignalsEvent {
+  /** @wire event */
   type: 'signals';
-  /** GUESS: DAEMON §9.6 says a `signals` event carries "a batch that
-   * travelled the tapped connection" but not its JSON encoding. Batches are
-   * canonical CBOR on the wire (ABI §6.3.1) and an SSE `data:` field is
-   * text, so the daemon must render each value — this shell assumes EXPR
-   * §7.6's canonical rendering, the same one `dev run-block` already uses
-   * for emitted batches (DAEMON §12), since it is the one canonical
-   * text form this repository has for a signal value. */
-  signals: unknown[];
+  service?: string;
+  instance?: string;
+  at?: string;
+  port?: string;
+  /** DAEMON §9.6: "a batch that travelled the tapped connection", rendered — batches are
+   * canonical CBOR on the wire (ABI §6.3.1) and an SSE `data:` field is text, so the daemon
+   * renders each value with EXPR §7.6's canonical rendering, the same one `dev run-block`
+   * already uses for emitted batches (DAEMON §12). */
+  signals: string[];
 }
 
-/** EXPR §8's own three fields, plus which instance/property the daemon
- * says failed — DAEMON §6.3: "a property that failed for a signal is the
- * most useful thing a tap can show." This is the annotation this whole
- * panel exists to not bury. */
+/** EXPR §8's own three fields, plus which instance/property the daemon says failed — DAEMON
+ * §6.3: "a property that failed for a signal is the most useful thing a tap can show." This is
+ * the annotation this whole panel exists to not bury. */
 export interface ExprFailureEvent {
+  /** @wire event */
   type: 'expr_failure';
+  service?: string;
+  instance?: string;
+  at?: string;
+  port?: string;
   code: string;
   /** `undefined` when the daemon's `"start..end"` string did not parse — a caller
    *  renders no span rather than pointing confidently at the first character. */
   span?: { start: number; end: number };
   message: string;
-  instance?: string;
-  property?: string;
+  /** Which signal of the batch, when the failure was per-signal (EXPR §8, DAEMON §9.6);
+   * `undefined` for a failure that is not per-signal. */
+  signal?: number;
+  /** `What::ExprFailure`'s own field (DAEMON §9.6): the descriptor's numeric property index —
+   * the same index `manifest.schema.json`'s property list already numbers by, never a name. */
+  prop?: number;
 }
 
 /** A batch routed and not delivered (§6.2: drop-oldest, a full
  * self-connection, an unrouted error emission, a gone receiver). GUESS:
  * §6.2 names the causes; the field carrying which one is not spelled. */
 export interface DiscardedEvent {
+  /** @wire event */
   type: 'discarded';
+  service?: string;
+  instance?: string;
+  at?: string;
+  port?: string;
   reason: string;
 }
 
@@ -453,7 +486,12 @@ export interface DiscardedEvent {
  * observations a slow reader did not see, before the stream resumes. This
  * is the one number that makes "sampled" precise rather than a vibe. */
 export interface LaggedEvent {
+  /** @wire event */
   type: 'lagged';
+  service?: string;
+  instance?: string;
+  at?: string;
+  port?: string;
   missed: number;
 }
 
@@ -463,19 +501,19 @@ export type TapStreamEvent = TapSignalsEvent | ExprFailureEvent | DiscardedEvent
  * instance) from the span the lifecycle driver has entered." `instance` is
  * absent for the daemon's own subsystem lines, which carry no instance.
  *
- * **Live bug, found while scoping eieio-m9s.11 (not fixed here — `stream-events.ts` is outside
- * this bead's owned files):** neither `Observation` nor `What::Log` (`crates/daemon/src/
- * observe.rs`) carries a `timestamp` field at all. `decodeLogFrame` requires
- * `typeof payload.timestamp === 'string'` and returns `null` otherwise — so against a real
- * daemon, **every log line fails to decode** and nothing streams into the log panel. Filed as
- * follow-up; the fix belongs either in the daemon (add a `timestamp`) or in the decoder
- * (stamp receipt time client-side), a call this bead does not make. */
+ * `timestamp` is named for `InspectorPanel.svelte` (not owned by this bead), which already
+ * reads it under that name, but it is the wire's `at` (see the `@wire` tag) — `a36f7a7` already
+ * repointed `decodeLogFrame` at the real field; this interface now says so in a way
+ * `schema-parity.test.ts` can check rather than only a doc comment asserting it. */
 export interface LogLineEvent {
+  /** @wire event */
   type: 'log';
+  /** @wire at */
   timestamp: string;
-  level: string;
   service?: string;
   instance?: string;
+  port?: string;
+  level: string;
   message: string;
 }
 

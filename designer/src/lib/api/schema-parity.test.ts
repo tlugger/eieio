@@ -14,6 +14,26 @@
 // directive and this bead's own brief warn against; the daemon's schema and `types.ts` are the
 // only two sources this file reads.
 //
+// # eieio-m9s.13: the SSE payloads (`describe('SSE payloads...')` below)
+//
+// The `PAIRS` loop above only ever compared *named, statically-known* schemas. The SSE stream
+// bodies (`Observation`/`What`, `crates/daemon/src/observe.rs`) cannot be compared the same way:
+// `#[serde(untagged)]` means no JSON field names which `What` variant applied, so a field-set
+// diff needs to know, event by event, which one it is comparing — and *that* mapping has to come
+// from the daemon's own code (`What::event()`) rather than a hand-typed table, which is this
+// bead's entire point (see its own module doc in `response_shapes.rs` for the derivation on the
+// Rust side).
+//
+// This file's half of the derivation: `types.ts`'s `TapStreamEvent` union and `LogLineEvent` are
+// parsed from the AST, and each member's own event name is read off a `type: '<literal>'`
+// property tagged `@wire event` in a JSDoc comment — never a second list beside `PAIRS`. A
+// `@wire <name>` tag on any property marks that TypeScript field as representing a *differently
+// named* wire field (`LogLineEvent.timestamp` is the wire's `at`; `ExprFailureEvent.property` is
+// the wire's `prop`) — both kept under their existing names because `InspectorPanel.svelte` (not
+// owned by this bead) already reads them that way, and this file has no reason to invent a
+// third naming scheme just for the check. `types.ts`'s module doc, at `TapSignalsEvent`, has the
+// full explanation.
+//
 // # Why this file regenerates the Rust side itself, rather than trusting `just ci`'s ordering
 //
 // `just ci` runs its stages in parallel background jobs (see the `justfile`'s `ci` recipe), so
@@ -43,16 +63,29 @@ const PAIRS: ReadonlyArray<readonly [daemonSchema: string, tsInterface: string]>
   ['NodeInfo', 'NodeInfo'],
   ['TapRequest', 'TapRequest'],
   ['ApiError', 'ApiError'],
+  ['ServiceSummary', 'ServiceSummary'],
 ];
 
+/** `ServiceDetail` is deliberately absent, and for a reason that is not an exemption: the
+ * Designer has no wire mirror of it. `GET /services/{s}` answers `{name, state, definition,
+ * autostart, error?}`, and this shell's `ServiceDefinition` is the *parsed* model it builds
+ * from that text — blocks, connections, `ui`, an `etag` — so a field-set diff between them
+ * would compare two different kinds of thing. `ServiceSummary` has a real mirror and is
+ * checked; if `ServiceDefinition` ever grows a wire twin, that twin belongs above. */
+
 let daemonShapes: Record<string, string[]>;
+/** `daemonShapes.sse`, typed for what it actually is: one field-name array per SSE event name,
+ * rather than the flat `string[]` every other entry in `daemonShapes` holds. */
+let daemonSse: Record<string, string[]>;
 
 beforeAll(() => {
   execSync('cargo test -p eio-cli --test response_shapes', {
     cwd: REPO_ROOT,
     stdio: 'pipe',
   });
-  daemonShapes = JSON.parse(readFileSync(GENERATED_PATH, 'utf-8')) as Record<string, string[]>;
+  const parsed = JSON.parse(readFileSync(GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
+  daemonShapes = parsed as Record<string, string[]>;
+  daemonSse = (parsed.sse as Record<string, string[]> | undefined) ?? {};
 }, 120_000);
 
 /** Parses `types.ts` once and indexes every top-level `interface` by name, so a property whose
@@ -145,6 +178,87 @@ function fieldsOfInterface(name: string, interfaces: Map<string, ts.InterfaceDec
   return out;
 }
 
+// --- eieio-m9s.13: the SSE payloads ---------------------------------------------------------
+
+/** A property's real wire field name — the argument of a `@wire <name>` JSDoc tag, when present,
+ * or the property's own name otherwise. `LogLineEvent.timestamp` (`@wire at`) and
+ * `ExprFailureEvent.property` (`@wire prop`) are the two properties that need this today; see
+ * `types.ts`'s module doc, at `TapSignalsEvent`, for why they are named differently from the
+ * wire on purpose. Reading the tag from the AST, rather than a second list mapping property
+ * names to wire names kept beside this function, is what keeps the rename itself from becoming
+ * a third source of truth. */
+function wireNameOf(member: ts.PropertySignature): string {
+  const own = ts.isIdentifier(member.name) ? member.name.text : '';
+  const alias = ts.getJSDocTags(member).find((tag) => tag.tagName.text === 'wire');
+  if (!alias || !alias.comment) return own;
+  const text = typeof alias.comment === 'string' ? alias.comment : ts.getTextOfJSDocComment(alias.comment);
+  return text?.trim() || own;
+}
+
+/** The flat field set (never dotted — DAEMON §9.6's SSE payloads are flat, so there is nothing
+ * to recurse into) of one SSE interface, wire names resolved via [`wireNameOf`]. Deliberately not [`flattenInterface`]: that function
+ * descends into a nested type literal (`span?: {start, end}` would contribute `span.start`/
+ * `span.end`), which would be wrong here — the wire's `span` is a plain string, not an object,
+ * so only the top-level name `span` should ever be compared. */
+function fieldsOfSseInterface(node: ts.InterfaceDeclaration): Set<string> {
+  const out = new Set<string>();
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    out.add(wireNameOf(member));
+  }
+  return out;
+}
+
+/** The event name a `TapStreamEvent`/`LogLineEvent` union member decodes for — read off its own
+ * `type: '<literal>'` property (the one tagged `@wire event`), never hand-paired with the
+ * interface's name in a list beside this function. This is the Designer-side half of the
+ * event-name-to-variant derivation the bead requires; `crates/cli/tests/response_shapes.rs`'s
+ * `what_examples()` plus `What::event()` is the daemon-side half. */
+function eventNameOf(node: ts.InterfaceDeclaration): string {
+  for (const member of node.members) {
+    if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
+    if (wireNameOf(member) !== 'event') continue;
+    const type = member.type;
+    if (type && ts.isLiteralTypeNode(type) && ts.isStringLiteral(type.literal)) {
+      return type.literal.text;
+    }
+  }
+  throw new Error(
+    `\`${node.name.text}\` has no property tagged \`@wire event\` with a string-literal type — ` +
+      'the SSE parity check needs one to know which event name this union member decodes',
+  );
+}
+
+/** Every event name the Designer knows how to decode, and the union member that decodes it —
+ * derived entirely from `types.ts`'s own AST: `TapStreamEvent`'s union members, plus
+ * `LogLineEvent` (which is not itself part of that union, but is `/logs/stream`'s payload the
+ * same way each `TapStreamEvent` member is one of `/taps/{id}/stream`'s). Nothing here is a
+ * hand-typed list of "this interface is this event" — `TapStreamEvent`'s member list comes from
+ * parsing the union type, and each member's event name comes from `eventNameOf` reading its own
+ * code, so a union member added without exporting one from `TapStreamEvent` (or without a
+ * `@wire event` tag) is invisible here rather than silently right by luck. */
+function sseInterfacesByEvent(
+  interfaces: Map<string, ts.InterfaceDeclaration>,
+  source: ts.SourceFile,
+): Map<string, ts.InterfaceDeclaration> {
+  const out = new Map<string, ts.InterfaceDeclaration>();
+  source.forEachChild((node) => {
+    if (!ts.isTypeAliasDeclaration(node) || node.name.text !== 'TapStreamEvent') return;
+    if (!ts.isUnionTypeNode(node.type)) {
+      throw new Error("`TapStreamEvent` is no longer a union type — update `sseInterfacesByEvent`");
+    }
+    for (const member of node.type.types) {
+      if (!ts.isTypeReferenceNode(member) || !ts.isIdentifier(member.typeName)) continue;
+      const iface = interfaces.get(member.typeName.text);
+      if (!iface) continue;
+      out.set(eventNameOf(iface), iface);
+    }
+  });
+  const log = interfaces.get('LogLineEvent');
+  if (log) out.set(eventNameOf(log), log);
+  return out;
+}
+
 describe('daemon response shapes vs. designer/src/lib/api/types.ts (eieio-m9s.11)', () => {
   for (const [daemonSchema, tsInterface] of PAIRS) {
     it(`\`${tsInterface}\` matches the daemon's \`${daemonSchema}\``, () => {
@@ -163,6 +277,61 @@ describe('daemon response shapes vs. designer/src/lib/api/types.ts (eieio-m9s.11
           : null,
         onlyInTheDesigner.length > 0
           ? `Fields \`${tsInterface}\` invents that the daemon never serves: ${JSON.stringify(onlyInTheDesigner)}`
+          : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join('\n');
+
+      expect(onlyOnTheDaemon.length === 0 && onlyInTheDesigner.length === 0, message).toBe(true);
+    });
+  }
+});
+
+describe('SSE payloads (Observation + What) vs. designer/src/lib/api/types.ts (eieio-m9s.13)', () => {
+  // The set of `it()`s below is itself derived from `types.ts`'s own AST at collection time —
+  // `sseInterfacesByEvent` needs nothing from `daemonSse` to know which events the Designer
+  // claims to decode, only `beforeAll`'s `cargo test` run (which populates `daemonSse`) has to
+  // finish before any `it()` *body* below reads it, which vitest's ordering already guarantees.
+  const source = ts.createSourceFile(TYPES_PATH, readFileSync(TYPES_PATH, 'utf-8'), ts.ScriptTarget.Latest, true);
+  const interfaces = parseInterfaces();
+  const designerByEvent = sseInterfacesByEvent(interfaces, source);
+
+  it("covers exactly the events `What::event()` produces — no daemon event this file doesn't know, and no name it invents", () => {
+    const daemonEvents = new Set(Object.keys(daemonSse));
+    const designerEvents = new Set(designerByEvent.keys());
+
+    const onlyOnTheDaemon = [...daemonEvents].filter((event) => !designerEvents.has(event)).sort();
+    const onlyInTheDesigner = [...designerEvents].filter((event) => !daemonEvents.has(event)).sort();
+
+    expect(
+      onlyOnTheDaemon,
+      `event name(s) \`What::event()\` produces that no \`TapStreamEvent\`/\`LogLineEvent\` member decodes: ${JSON.stringify(onlyOnTheDaemon)}`,
+    ).toEqual([]);
+    expect(
+      onlyInTheDesigner,
+      `event name(s) the Designer decodes that \`What::event()\` never produces: ${JSON.stringify(onlyInTheDesigner)}`,
+    ).toEqual([]);
+  });
+
+  for (const [event, iface] of designerByEvent) {
+    it(`\`${iface.name.text}\` (event \`${event}\`) matches the daemon's wire fields`, () => {
+      const daemonFields = new Set(daemonSse[event] ?? []);
+      expect(
+        daemonFields.size,
+        `no daemon fields recorded for event \`${event}\` — check crates/daemon/src/observe.rs and crates/cli/tests/response_shapes.rs`,
+      ).toBeGreaterThan(0);
+      const designerFields = fieldsOfSseInterface(iface);
+
+      const onlyOnTheDaemon = [...daemonFields].filter((field) => !designerFields.has(field)).sort();
+      const onlyInTheDesigner = [...designerFields].filter((field) => !daemonFields.has(field)).sort();
+
+      const message = [
+        `\`${iface.name.text}\` (designer/src/lib/api/types.ts) disagrees with the daemon's live \`${event}\` payload.`,
+        onlyOnTheDaemon.length > 0
+          ? `Fields the daemon sends for \`${event}\` that \`${iface.name.text}\` is missing: ${JSON.stringify(onlyOnTheDaemon)}`
+          : null,
+        onlyInTheDesigner.length > 0
+          ? `Fields \`${iface.name.text}\` invents that the daemon never sends for \`${event}\`: ${JSON.stringify(onlyInTheDesigner)}`
           : null,
       ]
         .filter((line): line is string => line !== null)
