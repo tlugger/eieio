@@ -72,6 +72,65 @@ impl Shared {
 /// The Designer's own state, as handlers receive it.
 pub type State = Arc<Shared>;
 
+/// One gated route: the methods it answers, its path (relative to `/api`, before [`router`]
+/// mounts it there), and its handlers.
+pub type Route = (
+    &'static [&'static str],
+    &'static str,
+    axum::routing::MethodRouter<State>,
+);
+
+/// Every route DESIGNER §3.1's surface serves *behind* the session guard — everything except
+/// `/openapi.json` and `/session` themselves, which [`router`] merges in afterwards.
+///
+/// A table rather than a chain of `.route(...)` calls, matching `eio-daemon::api::routes()`
+/// (`crates/daemon/src/api.rs`'s own doc) for exactly its reason: `tests/openapi.rs`'s
+/// auth-boundary test has to enumerate what `gated` serves *from the thing that serves it*, or
+/// it is comparing the guard against a second hand-maintained list and proving nothing about a
+/// route added here and forgotten there. [`router`] folds this into `gated`, so a route added
+/// to this table is served and guard-probed by construction, and a route added anywhere else
+/// (in particular, to `surface` after `gated` is merged in) is not — which is exactly the case
+/// the auth-boundary test must catch.
+pub fn routes() -> Vec<Route> {
+    vec![
+        (
+            &["GET", "POST"],
+            "/systems",
+            get(api::systems::list).post(api::systems::create),
+        ),
+        (&["DELETE"], "/systems/{id}", delete(api::systems::delete)),
+        (
+            &["GET", "POST"],
+            "/nodes",
+            get(api::nodes::list).post(api::nodes::create),
+        ),
+        (&["DELETE"], "/nodes/{id}", delete(api::nodes::delete)),
+        (&["POST"], "/nodes/{id}/probe", post(api::nodes::probe)),
+        (
+            &["GET", "POST"],
+            "/registries",
+            get(api::registries::list).post(api::registries::create),
+        ),
+        (&["GET"], "/blocks", get(api::blocks::list)),
+        // `{*reference}` and not `{reference}`: a block reference contains slashes
+        // (`ghcr.io/tlugger/temp-sensor:1.0.0`), and §2 keys the cache by the whole of it.
+        (
+            &["PUT", "DELETE"],
+            "/blocks/{*reference}",
+            axum::routing::put(api::blocks::put).delete(api::blocks::delete),
+        ),
+        (&["POST"], "/service-edit", post(api::service_edit::edit)),
+        // `any()`: every method reaches the same handler, so one representative method is
+        // enough for the auth-boundary test to probe — the guard sits in front of dispatch and
+        // does not care which method matched it.
+        (
+            &["GET"],
+            "/nodes/{id}/daemon/{*path}",
+            axum::routing::any(api::proxy::forward),
+        ),
+    ]
+}
+
 /// The whole router: DESIGNER §3.1's surface, gated by a session except login and the
 /// document, plus the SPA.
 ///
@@ -86,35 +145,14 @@ pub type State = Arc<Shared>;
 /// `/api/session` merging in *after* `gated` is built is what keeps them outside the guard, not
 /// a per-route exemption inside it.
 pub fn router(shared: State, assets_dir: std::path::PathBuf) -> Router {
-    let gated = Router::new()
-        .route(
-            "/systems",
-            get(api::systems::list).post(api::systems::create),
-        )
-        .route("/systems/{id}", delete(api::systems::delete))
-        .route("/nodes", get(api::nodes::list).post(api::nodes::create))
-        .route("/nodes/{id}", delete(api::nodes::delete))
-        .route("/nodes/{id}/probe", post(api::nodes::probe))
-        .route(
-            "/registries",
-            get(api::registries::list).post(api::registries::create),
-        )
-        .route("/blocks", get(api::blocks::list))
-        // `{*reference}` and not `{reference}`: a block reference contains slashes
-        // (`ghcr.io/tlugger/temp-sensor:1.0.0`), and §2 keys the cache by the whole of it.
-        .route(
-            "/blocks/{*reference}",
-            axum::routing::put(api::blocks::put).delete(api::blocks::delete),
-        )
-        .route("/service-edit", post(api::service_edit::edit))
-        .route(
-            "/nodes/{id}/daemon/{*path}",
-            axum::routing::any(api::proxy::forward),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            Arc::clone(&shared),
-            session::require_session,
-        ));
+    let mut gated = Router::new();
+    for (_, path, handlers) in routes() {
+        gated = gated.route(path, handlers);
+    }
+    let gated = gated.route_layer(axum::middleware::from_fn_with_state(
+        Arc::clone(&shared),
+        session::require_session,
+    ));
 
     // `/openapi.json`: eieio-m9s.20's amendment to DESIGNER §3.1, on the same reasoning DAEMON
     // §9.1 gives for its own — a schema a client must already be authenticated to *discover* is

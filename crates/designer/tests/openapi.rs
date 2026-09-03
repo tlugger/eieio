@@ -95,35 +95,37 @@ impl Harness {
     }
 }
 
-/// Every route `lib.rs::router`'s `gated` sub-router serves, with the method a real client
-/// would use on it. Probed with placeholder path segments (`1`, `nope`, `x`) — none of them
-/// need to *resolve* to anything, because the assertion is that the session guard answers
-/// before any handler logic (SQLite lookup, a proxied dial, ...) ever runs.
+/// Every route `eio_designer::routes()` lists, with the method a real client would use on it,
+/// probed with placeholder path segments (`1`, `nope`, `x`) substituted for `axum`'s
+/// extractors — none of them need to *resolve* to anything, because the assertion is that the
+/// session guard answers before any handler logic (SQLite lookup, a proxied dial, ...) ever
+/// runs.
 ///
-/// A table, deliberately, rather than one call per route: the point of this test is exactly
-/// "every route besides the two known exemptions", and a hand-maintained list here that missed
-/// a route added later to `lib.rs` would prove nothing about that route. There is no live
-/// introspection of the router to check this list against (unlike `eio-daemon`'s own
-/// `api::routes()`, which this crate's `router()` has no equivalent of) — see the final report
-/// for that gap.
-fn guarded_routes() -> Vec<(reqwest::Method, &'static str)> {
-    use reqwest::Method;
-    vec![
-        (Method::GET, "/api/systems"),
-        (Method::POST, "/api/systems"),
-        (Method::DELETE, "/api/systems/1"),
-        (Method::GET, "/api/nodes"),
-        (Method::POST, "/api/nodes"),
-        (Method::DELETE, "/api/nodes/1"),
-        (Method::POST, "/api/nodes/1/probe"),
-        (Method::GET, "/api/registries"),
-        (Method::POST, "/api/registries"),
-        (Method::GET, "/api/blocks"),
-        (Method::PUT, "/api/blocks/nope"),
-        (Method::DELETE, "/api/blocks/nope"),
-        (Method::POST, "/api/service-edit"),
-        (Method::GET, "/api/nodes/1/daemon/x"),
-    ]
+/// Read from `eio_designer::routes()` rather than hand-copied, matching `eio-daemon`'s own
+/// `api::tests::every_route_is_documented_and_every_documented_path_is_served`
+/// (`crates/daemon/src/api/tests.rs`): that table is exactly what `lib.rs::router` folds into
+/// its `gated` sub-router, so a route added to it is guard-probed here by construction, and a
+/// route added anywhere else in `router()` — in particular to `surface` after `gated` is
+/// merged in, which is the direction that would actually escape the session guard — is not in
+/// this list and so is not accounted for by this test at all. `every_gated_route_is_served`
+/// below is what catches *that* half: it fails if the table and the live router ever disagree
+/// about what `/api` serves.
+fn guarded_routes() -> Vec<(reqwest::Method, String)> {
+    eio_designer::routes()
+        .into_iter()
+        .flat_map(|(methods, path, _)| {
+            let probe = path
+                .replace("{id}", "1")
+                .replace("{*reference}", "nope")
+                .replace("{*path}", "x");
+            methods.iter().map(move |method| {
+                (
+                    reqwest::Method::from_bytes(method.as_bytes()).expect("a valid HTTP method"),
+                    format!("/api{probe}"),
+                )
+            })
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -163,7 +165,7 @@ async fn every_other_api_route_still_requires_a_session() {
     for (method, path) in guarded_routes() {
         let response = harness
             .client
-            .request(method.clone(), harness.url(path))
+            .request(method.clone(), harness.url(&path))
             .send()
             .await
             .unwrap_or_else(|error| panic!("{method} {path}: request failed: {error}"));
