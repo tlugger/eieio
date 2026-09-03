@@ -214,7 +214,11 @@ const NODE_FIXTURES: NodeFixture[] = [
     class: 'daemon',
     address: 'https://porch-pi.lan:7890',
     last_seen: '2026-08-24T13:58:02Z',
-    capabilities: ['state', 'timer', 'gpio', 'i2c', 'http'],
+    // eieio-m9s.24: honest, not aspirational — `crates/daemon/src/instance.rs`'s
+    // IMPLEMENTED_CAPABILITIES is exactly `[state, timer]`; gpio/i2c/http are specified (ABI
+    // §7.4-7.6) but hosted by no daemon in this repository, so this is what a real `porch-pi`
+    // would actually answer, not the every-capability fixture this used to be.
+    capabilities: ['state', 'timer'],
     limits: { max_payload: 65536, max_batch: 256 },
     actualLimits: { max_payload: 65536, max_batch: 256 },
   },
@@ -222,11 +226,22 @@ const NODE_FIXTURES: NodeFixture[] = [
     id: 102,
     slug: 'node-attic',
     system_id: 1,
-    name: 'attic-esp32',
-    class: 'leaf',
-    address: 'https://attic-esp32.lan:7890',
+    name: 'attic-pi',
+    // `daemon`, not `leaf`, and DESIGNER §3.1 is why in as many words: a leaf "answers no
+    // probe, because it serves no management API at all", so `POST /api/nodes/{id}/probe` and
+    // the proxy both refuse one by name — which "would make `last_seen` mean two different
+    // things depending on class". A leaf carrying a `last_seen` and a probed capability list
+    // is therefore a fixture the spec forbids, and this one also carries the service, tap and
+    // log fixtures every proxy-driven suite reads: all of them reach a node through the
+    // catch-all, which refuses a leaf. `closet-relay` below is the mock's leaf, and it is
+    // coherent precisely because it has never been probed and never can be.
+    class: 'daemon',
+    address: 'http://attic-pi.lan:7777',
     last_seen: '2026-08-24T09:12:47Z',
-    capabilities: ['state', 'timer', 'gpio'],
+    // eieio-m9s.24: honest — `crates/daemon/src/instance.rs`'s IMPLEMENTED_CAPABILITIES is
+    // exactly these two, and ABI §7's opening paragraphs say gpio, i2c and http are specified
+    // but hosted by no node in this repository.
+    capabilities: ['state', 'timer'],
     limits: { max_payload: 4096, max_batch: 16 },
     actualLimits: { max_payload: 4096, max_batch: 16 },
   },
@@ -264,9 +279,15 @@ const NODE_FIXTURES: NodeFixture[] = [
     // IMPLEMENTED_CAPABILITIES is `[state, timer]` and nothing else, and ABI §7 now says so in
     // as many words: gpio, i2c and http are specified but hosted by no node. Paired with
     // `gpio-echo:1.0.0` (needs `gpio`, MANIFESTS above) this reaches
-    // `missingCapabilities`'s third state — a populated array — which nothing reached before,
-    // because every other node fixture here claims capabilities no daemon implements. That is
-    // its own problem and is filed separately; this fixture is the honest one.
+    // `missingCapabilities`'s third state — a populated array.
+    //
+    // eieio-m9s.24 made `porch-pi`/`attic-pi` (above) honest too, so this is no longer the
+    // *only* fixture that reaches that state — every probed node does now, because none of them
+    // has ever had gpio. `cellar-pi` stays anyway: it is the one node nothing else touches
+    // (`node-porch`/`node-attic` also carry the service/tap/log fixtures those suites mutate),
+    // so `mock.test.ts`'s capability-badge assertions read a value nothing else in this file can
+    // perturb. That is a test-isolation reason, not a coverage one — do not read its survival as
+    // "this is the only honest node".
     capabilities: ['state', 'timer'],
     limits: { max_payload: 2048, max_batch: 8 },
     actualLimits: { max_payload: 2048, max_batch: 8 },
@@ -392,12 +413,12 @@ const SERVICES: Record<string, MockService[]> = {
       // eieio-m9s.20: closet-relay has never been probed (no `capabilities` at all, above) —
       // gpio-echo's block card exercises the *unknown*-compatibility badge here now, not the
       // "confirmed missing" one, since there is no capability list to check `gpio` against.
-      // (`node-porch`'s `porch-pi` has every capability every fixture manifest needs, so a
-      // "confirmed missing capability" demo needed a fourth node rather than a service here —
-      // eieio-m9s.23 added `cellar-pi` (`node-cellar`, above) for exactly that: probed,
-      // confirmed to have only `state`, so gpio-echo's own `gpio` requirement is a confirmed
-      // miss there. No service references `node-cellar` — the palette's capability filter reads
-      // `NodeSummary.capabilities` directly and has no need of one.)
+      // (Every *probed* node fixture reaches "confirmed missing" for gpio-echo since eieio-
+      // m9s.24 made them all honest — none of them has ever had `gpio`. eieio-m9s.23 added
+      // `cellar-pi` (`node-cellar`, above) before that fix, specifically so a "confirmed missing
+      // capability" demo existed at all; see its own comment for why it is kept now that it is
+      // no longer unique. No service references `node-cellar` — the palette's capability filter
+      // reads `NodeSummary.capabilities` directly and has no need of one.)
       state: 'stopped',
       file: {
         name: 'relay-control',
@@ -785,7 +806,14 @@ const NODE_INFO: Record<string, NodeInfo> = Object.fromEntries(
       // The shape `crates/daemon/src/api/node.rs` actually serves, not a guess:
       // three flat budget numbers, and `capabilities` — which DESIGNER §5's
       // design-time badge reads and which the earlier guessed shape omitted.
-      capabilities: n.class === 'leaf' ? ['core', 'state'] : ['core', 'state', 'timer', 'gpio', 'i2c'],
+      //
+      // eieio-m9s.24: not branched on `n.class`. `IMPLEMENTED_CAPABILITIES`
+      // (`crates/daemon/src/instance.rs`) is `[state, timer]` for a daemon; the leaf runtime
+      // (`crates/leaf/src/lib.rs`'s `spawn`) refuses anything else too, so a leaf's list is not
+      // a smaller version of a daemon's — it is the same list, not a separate question (ABI §7's
+      // opening paragraphs). And no `'core'`: `eio:core` requires no manifest capability at all
+      // (ABI §7.0), so it never appears in a real capabilities list.
+      capabilities: ['state', 'timer'],
       limits: n.actualLimits,
       budgets: { fuel: 100_000_000, deadline_ms: 1000, expr_max_fuel: 100_000 },
       require_signed: false,

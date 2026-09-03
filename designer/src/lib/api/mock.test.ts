@@ -260,10 +260,14 @@ describe('listBlockManifests / listSystems / listNodes — the palette and topol
 
   // eieio-m9s.23: before this bead, no fixture reached `missingCapabilities`'s third answer — a
   // populated array, "confirmed, missing X" — because no *probed* node's capability list fell
-  // short of what a cached manifest declares. `closet-relay` covers `undefined` (never probed);
-  // every other node/manifest pair here resolves to `[]` (confirmed, nothing missing). This is
-  // the one case that was simply unreachable, not merely untested.
-  it('cellar-pi is probed with exactly what a real daemon reports, and gpio-echo is a confirmed miss there', async () => {
+  // short of what a cached manifest declares. At the time, `closet-relay` covered `undefined`
+  // (never probed) and every other node/manifest pair here resolved to `[]` (confirmed, nothing
+  // missing); this was the one case that was simply unreachable, not merely untested. eieio-
+  // m9s.24 then found that "confirmed, nothing missing" was only reachable because every other
+  // fixture claimed capabilities no daemon implements — with those fixed, gpio-echo is a
+  // confirmed miss against *every* probed node here, `cellar-pi` included, and this test's own
+  // assertions below reflect that.
+  it('cellar-pi is probed with exactly what a real daemon reports, and gpio-echo is a confirmed miss everywhere honest', async () => {
     const [system] = await listSystems();
     const nodes = await listNodes(system!.id);
     const cellar = nodes.find((n) => n.name === 'cellar-pi');
@@ -284,12 +288,28 @@ describe('listBlockManifests / listSystems / listNodes — the palette and topol
     // compatible) — the state eieio-m9s.20's fixtures could not reach on their own.
     expect(missing).toEqual(['gpio']);
 
-    // And the other two states stay reachable from the same manifest, against the fixtures that
-    // already covered them — this fourth node adds the missing state, it does not replace either.
+    // And the unknown state stays reachable from the same manifest, against the fixture that
+    // already covered it — this fourth node adds the missing state, it does not replace it.
     const closet = nodes.find((n) => n.name === 'closet-relay');
     expect(missingCapabilities(gpioEcho, closet?.capabilities)).toBeUndefined();
+
+    // eieio-m9s.24: this used to also assert `porch-pi` was a confirmed *fit* for gpio-echo —
+    // true only because `porch-pi`'s fixture used to claim `gpio`, which no daemon implements
+    // (`crates/daemon/src/instance.rs`'s IMPLEMENTED_CAPABILITIES is `[state, timer]`). Now that
+    // `porch-pi` is honest it is a confirmed *miss* too, the same as `cellar-pi` above — every
+    // probed node in this fixture set is, because none of them has ever had `gpio`. That is not
+    // a gap in the fixtures; it is what a real System without a GPIO-capable node looks like.
     const porch = nodes.find((n) => n.name === 'porch-pi');
-    expect(missingCapabilities(gpioEcho, porch?.capabilities)).toEqual([]);
+    expect(missingCapabilities(gpioEcho, porch?.capabilities)).toEqual(['gpio']);
+
+    // The third state — `[]`, confirmed and nothing missing — still needs a fixture that
+    // reaches it honestly: a block whose only requirement (`timer`) is one of the two
+    // capabilities every real node here actually has. `porch-pi`'s old fixture reached `[]` for
+    // every manifest by claiming everything; this reaches it for the one thing it is actually
+    // true of.
+    const tempSensor = resolveManifest('ghcr.io/tlugger/temp-sensor:1.0.0', manifests);
+    expect(tempSensor).toBeDefined();
+    expect(missingCapabilities(tempSensor, porch?.capabilities)).toEqual([]);
   });
 });
 
@@ -314,11 +334,18 @@ describe('startService / stopService / reloadService — the lifecycle App.svelt
 });
 
 describe('getNodeInfo — actual field values, not just the field names mock-parity.test.ts checks (eieio-m9s.17)', () => {
-  it('a daemon-class node reports capabilities a leaf does not', async () => {
+  // eieio-m9s.24: this used to assert the opposite — that a daemon reports capabilities a leaf
+  // does not — which was only true because the fixture handed `porch-pi` (`daemon`) `gpio`/`i2c`
+  // no daemon implements. Honestly, `crates/daemon/src/instance.rs`'s IMPLEMENTED_CAPABILITIES
+  // and `crates/leaf/src/lib.rs`'s `spawn` refuse the identical set beyond `state`/`timer`, so a
+  // daemon and a leaf report the *same* list today — device class is not what a capability list
+  // varies on in this repository. (A leaf gaining a device namespace later would make this
+  // diverge again; nothing here assumes it stays this way forever.)
+  it('a daemon-class node and a leaf-class node report the same capabilities', async () => {
     const daemonNode = await getNodeInfo('node-porch'); // class: 'daemon'
     const leafNode = await getNodeInfo('node-attic'); // class: 'leaf'
-    expect(daemonNode.capabilities).toEqual(expect.arrayContaining(['timer', 'gpio', 'i2c']));
-    expect(leafNode.capabilities).not.toEqual(expect.arrayContaining(['timer']));
+    expect(daemonNode.capabilities).toEqual(['state', 'timer']);
+    expect(leafNode.capabilities).toEqual(['state', 'timer']);
   });
 
   it('rejects an unknown node id rather than resolving to something empty', async () => {

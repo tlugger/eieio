@@ -1,0 +1,3 @@
+This file exists so designer/dist/ does — crates/designer embeds it with rust-embed,
+and #[derive(RustEmbed)] is a compile error when the folder is absent. An empty dist is a
+valid build that serves no UI; the contents are gitignored, the directory is not.
