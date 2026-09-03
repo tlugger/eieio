@@ -278,6 +278,10 @@ A service file addresses it as `err`, and §11.1 reserves that name in both `inp
 
 Import namespaces, with signatures. `-> i32` follows the status/size convention of §8 unless stated.
 
+**Three of these namespaces have no host today, and a block author has to be told so here.** `eio:core` (§7.0), `eio:state` (§7.2) and `eio:timer` (§7.3) are implemented by every host in this repository. `eio:gpio`, `eio:i2c` and `eio:http` (§7.4–§7.6) are implemented by none of them: a daemon lists exactly `state` and `timer` in its `GET /node` capabilities and **refuses at validation** a block declaring any other (DAEMON §3 step 2, SCOPE §3.3), and the leaf runtime implements the same two. The only code answering those imports anywhere is two test fixtures — the conformance harness's scriptable stand-in and `test-host`'s.
+
+That is a deliberate state rather than a gap, and the reason is architectural: a daemon runs on a server, which has no pins and no bus, so the tier those namespaces belong to is the leaf (LEAF §1). **Their specification here is what makes a leaf implementable, not a promise that a node will run them now.** The rest of the vertical is built and honest about this: `manifest` validates their import signatures, `block-sdk` ships `Gpio`/`I2c`/`Http` wrappers, `examples/blocks/gpio-echo` is one of §13.2's golden blocks, and §13's suite has scenarios for all three — so a block using them compiles, passes conformance against the reference harness, and is refused by every node that exists. The Designer says so before a deploy rather than after: it compares a block's manifest capabilities against the target node's reported list and marks the block in both the library and on the canvas, naming the missing capability — so an author meets SCOPE §3.3's check when choosing a block, not when a service fails to start.
+
 ### 7.0 `eio:core` — always available, requires no manifest capability
 
 |Import|Signature|Notes|
