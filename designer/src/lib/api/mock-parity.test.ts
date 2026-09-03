@@ -78,10 +78,14 @@
 //
 // **Reached** (driven at least once, every captured frame/response checked against both rules):
 // `listServices` (`ServiceSummary`, including a service whose `error` is populated — DAEMON §9's
-// eieio-m9s.12 amendment), `getNodeInfo` (`NodeInfo`), `getService`'s `.error` (`ApiError`), and
+// eieio-m9s.12 amendment), `getNodeInfo` (`NodeInfo`), `getService`'s `.error` and
+// `getServiceErrors` (`ApiError`, eieio-m9s.18: both now read the *same* fixture value —
+// `MockService.error` — that a real daemon would answer identically for `GET /services`'s
+// listing, `GET /services/{s}` and `GET /services/{s}/errors`, so checking all three against one
+// generated target is checking that they stay identical, not just that each is shaped right), and
 // `streamTap`'s `signals`, `expr_failure`, `discarded` and `lagged` frames, and `streamLogs`'s
 // `log` frame. `discarded` (eieio-m9s.17) was the one of the five SSE event names `mock.ts` never
-// dispatched anywhere until this bead — see `mock.ts`'s own comment on the `tick % 7 === 0`
+// dispatched anywhere until that bead — see `mock.ts`'s own comment on the `tick % 7 === 0`
 // branch in `streamTap`'s `tickOnce` for which `DiscardReason` it manufactures and why.
 //
 // **Not reached, and why:**
@@ -91,24 +95,39 @@
 //   is the *parsed* model built from that text, so a field-set diff between them would compare
 //   two different kinds of thing. Its `.error` sub-object *is* reached, above, because that one
 //   really is an `ApiError`.
-// - **`createTap`/`listTaps` (`TapSummary`) and the `TapRequest` schema.** `TapRequest` is a
-//   *request* body (`POST /taps`'s `{service, connection}`) — the mock's `createTap` takes those
-//   as function parameters, not something it emits back, so there is nothing of this shape to
-//   check. `TapSummary`'s own known drift (`tap_id` vs. the daemon's `id`, and the missing
-//   `instance`/`port`) predates this bead and has no generated-schema counterpart in
-//   `response_shapes.rs`'s target list to check it against; see `TapSummary`'s doc comment in
-//   `./types` for that gap, already reported.
-// - **`getServiceErrors` (`ServiceErrorReport`).** Same reasoning as `TapSummary`: a known,
-//   already-reported shape mismatch (the daemon answers one `ApiError`, not
-//   `{service, errors: [...]}`) with no generated-schema target to compare against here.
+// - **`createTap`/`listTaps` (`Tap`, eieio-m9s.17).** `response_shapes.rs` gained a `Tap` target
+//   this bead, and `schema-parity.test.ts`'s `PAIRS` checks `TapSummary` against it — but *this*
+//   file's mechanism cannot: [`wireFields`] reads a value's own runtime JSON keys, with no
+//   equivalent of `schema-parity.test.ts`'s `wireNameOf`/`@wire` tag to say "this key stands for a
+//   differently-named wire field." `createTap`/`listTaps` return `{tap_id, ...}` directly — there
+//   is no earlier, pre-rename wire representation to intercept the way `vi.mock('./stream-events')`
+//   captures an SSE frame's raw JSON *before* `decodeTapFrame` renames anything, because nothing
+//   here plays that decoder's role: `client.ts`'s own doc says a real backend swap means
+//   *rewriting* `createTap`/`listTaps`' bodies, so the `id`→`tap_id` translation `TapSummary`'s
+//   doc comment describes is work a real implementation would still have to do, not something the
+//   current mock skips by mistake. Tried directly and confirmed to fail exactly this way (`tap_id`
+//   reported as an invented field) before being reverted — see the final report for the
+//   transcript. Teaching this file the same rename mechanism `schema-parity.test.ts` has is future
+//   work, not a gap silently left uncovered here.
+// - **`POST /taps`'s own `TapRequest` schema.** A *request* body (`{service, connection}`) — the
+//   mock's `createTap` takes those as function parameters, not something it emits back, so there
+//   is nothing of this shape to check.
 // - **`serviceEdit`/`putService`'s own result shapes** (`ServiceEditResult`, `PutServiceResult`)
 //   and **`listBlockManifests`/`listSystems`/`listNodes`** (`BlockManifest`, `SystemSummary`,
-//   `NodeSummary`) — none of these has a daemon schema in `response_shapes.rs`'s target list
-//   either (the first pair because DESIGNER §3.2's landed shape was hand-verified against the
-//   real `crates/designer` backend when it was added, not generated from a live schema; the
-//   second because DESIGNER-SPEC gives no schema for its own backend's systems/nodes/manifest
-//   endpoints at all yet — see `types.ts`'s own "GUESS" callouts on each). Extending
-//   `response_shapes.rs`'s target list is future work, not this bead's.
+//   `NodeSummary`) — none of these has a daemon schema in `response_shapes.rs`'s target list, and
+//   eieio-m9s.17 found real, distinct reasons each one still can't (see that file's module doc for
+//   the full detail, including a correction: `crates/designer` is not unbuilt the way `CLAUDE.md`
+//   says — it has real handlers for all five of these, this bead just isn't the one that owns
+//   that crate). `serviceEdit`/`putService` are parsed client-side models regardless of whether
+//   the backend exists; `listBlockManifests`' `BlockManifest` is a parsed model too, *and* even a
+//   wire mirror of `CachedBlock` alone could not check its `manifest` field, which has no
+//   `ToSchema` derive to generate one from; `listSystems`/`listNodes` name real
+//   `crates/designer/src/api/systems.rs`/`nodes.rs` handlers with no `utoipa` anywhere in that
+//   crate to generate a schema from — and reading them by hand turned up real drift
+//   (`response_shapes.rs`'s doc has the specifics) this file cannot check for the same reason.
+//   None of these is a gap this file could have closed by trying harder against what it already
+//   reads — each is reported in `response_shapes.rs`'s module doc, in place, rather than repeated
+//   here as a second copy of the same reasoning.
 
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -173,7 +192,7 @@ vi.mock('./stream-events', async (importOriginal) => {
 // Imported after the `vi.mock` above only for readability — `vi.mock` calls are hoisted above
 // every import in this file regardless of source position, so this already sees the mocked
 // `./stream-events` no matter where it is written.
-import { createTap, getNodeInfo, getService, listServices, streamLogs, streamTap } from './mock';
+import { createTap, getNodeInfo, getService, getServiceErrors, listServices, streamLogs, streamTap } from './mock';
 
 // --- Rule 1 / rule 2, applied to one flattened field set ---------------------------------------
 
@@ -264,7 +283,7 @@ describe('mock.ts response shapes vs. the daemon\'s own schemas (eieio-m9s.15)',
     }
   });
 
-  it('an errored service\'s structured error, on both the listing and the detail, matches ApiError', async () => {
+  it('an errored service\'s structured error, on the listing, the detail and /errors, matches ApiError', async () => {
     const listed = await listServices('node-attic');
     const atticFan = listed.find((s) => s.name === 'attic-fan');
     expect(atticFan?.error, 'the attic-fan fixture is supposed to be errored with a structured reason').toBeDefined();
@@ -272,9 +291,16 @@ describe('mock.ts response shapes vs. the daemon\'s own schemas (eieio-m9s.15)',
     const detail = await getService('node-attic', 'attic-fan');
     expect(detail.error).toBeDefined();
 
+    // eieio-m9s.18: `getServiceErrors` used to answer a fabricated `{service, errors: [...]}`
+    // wrapper unrelated to `ApiError` — it now answers the same value `.error` above does, so
+    // this is checked here rather than only in `mock.test.ts`'s behavioural suite, which does
+    // not compare against the live daemon schema at all.
+    const viaErrorsEndpoint = await getServiceErrors('node-attic', 'attic-fan');
+
     for (const [label, error] of [
       [`listServices("node-attic")'s "attic-fan".error`, atticFan?.error],
       [`getService("node-attic", "attic-fan").error`, detail.error],
+      [`getServiceErrors("node-attic", "attic-fan")`, viaErrorsEndpoint],
     ] as const) {
       const fields = wireFields(error, daemonShapes.ApiError ?? []);
       assertNoInventedFields(label, fields, daemonShapes.ApiError ?? []);

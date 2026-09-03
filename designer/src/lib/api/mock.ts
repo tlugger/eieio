@@ -1,18 +1,29 @@
-// Mock data + implementation, standing in for the backend
-// (crates/designer, an axum binary another agent is building in a
-// parallel worktree and which does not exist here).
+// Mock data + implementation, standing in for the backend (crates/designer,
+// an axum binary this worktree does not own or build against directly —
+// see below for what that does and does not mean).
 //
 // Every function here has the exact signature client.ts exports, so
 // swapping this file for one that calls `fetch('/api/...')` is the single
 // change DESIGNER §3.1's proxy design calls for. Nothing outside this
 // module and client.ts should import from here directly.
 //
-// The request/response shapes for `/api/service-edit` match what the real
-// `crates/designer` backend landed with (DESIGNER §3.2, amended commit
-// dc83e98 — see the doc comment on `ServiceEditOperation` in `./types`);
-// everything else below (systems/nodes/manifests, and the mock's own
-// storage shape) is still a GUESS, since DESIGNER §3.1 gives only an
-// endpoint table for those.
+// **`crates/designer` is real, not absent.** It exists in this repository
+// (`crates/designer/src/api/{systems,nodes,service_edit,proxy}.rs`), just
+// not in this bead's owned-file list, and — unlike `eio-daemon` — it has no
+// `utoipa` dependency anywhere in it, so `crates/cli/tests/response_shapes.rs`'s
+// generated-schema mechanism cannot reach it the way it reaches the daemon
+// (see that file's module doc for the detail, including drift found by
+// reading `crates/designer`'s own structs by hand). The request/response
+// shapes for `/api/service-edit` match what that backend landed with
+// (DESIGNER §3.2, amended commit dc83e98 — see the doc comment on
+// `ServiceEditOperation` in `./types`); systems/nodes/manifests below are
+// hand-verified against `crates/designer/src/api/systems.rs`/`nodes.rs` too,
+// though `SystemSummary`/`NodeSummary` (`./types`) diverge from what those
+// handlers actually serve in ways this mock's fixtures do not reproduce
+// (`id`/`system_id` as strings here, `i64` there; `capabilities`/`limits`
+// always present here, only after a successful probe there) — reported,
+// not fixed, since neither `crates/designer` nor a schema-generation path
+// into it is this bead's to build.
 //
 // **What stands in for `eio-service` here, and why it is not a TOML writer.**
 // The real `/api/service-edit` calls `eio-service`'s preserving `Document`
@@ -44,7 +55,6 @@ import type {
   ServiceDefinition,
   ServiceEditOperation,
   ServiceEditResult,
-  ServiceErrorReport,
   ServiceState,
   ServiceSummary,
   StreamHandle,
@@ -699,32 +709,21 @@ export async function getNodeInfo(nodeId: string): Promise<NodeInfo> {
 
 // --- GET /services/{s}/errors ------------------------------------------
 
-/** Per (node, service), a restart count that only ever goes up while the
- * service is `errored` — enough to make the dashboard's "restart counts"
- * column show something that isn't always zero, without pretending to
- * model §7's actual backoff/circuit-breaker timing. */
-const RESTART_COUNTS: Record<string, number> = {};
-
-export async function getServiceErrors(nodeId: string, serviceName: string): Promise<ServiceErrorReport> {
+/** eieio-m9s.18: answers exactly what the real endpoint does — the same {@link ApiError} a
+ *  `state: 'errored'` fixture already carries on `MockService.error` (the one `listServices`/
+ *  `getService` already read for `ServiceSummary.error`/`ServiceDefinition.error`, DAEMON §9's
+ *  eieio-m9s.12 amendment) — rather than a fabricated `{service, errors: [...]}` wrapper no
+ *  daemon has ever served. A service that is not errored (or does not exist) rejects, matching
+ *  `crates/daemon/src/api/services.rs`'s `errors` handler: "a service that is running or stopped
+ *  has no errors and answers 404... an empty 200 would make 'no errors' and 'no such service'
+ *  the same answer." This dropped the old handler's fabricated per-instance restart count along
+ *  with the wrapper shape it lived in — nothing here modelled DAEMON §7's actual backoff/circuit
+ *  breaker either way, and `ApiError` has no field for one. */
+export async function getServiceErrors(nodeId: string, serviceName: string): Promise<ApiError> {
   const svc = findServiceRecord(nodeId, serviceName);
   if (!svc) throw new Error(`no such service: ${nodeId}/${serviceName}`);
-  if (svc.state !== 'errored') return delay({ service: serviceName, errors: [] });
-  const key = `${nodeId}/${serviceName}`;
-  RESTART_COUNTS[key] = (RESTART_COUNTS[key] ?? 2) + 0; // stable across repeated reads
-  const firstInstance = Object.keys(svc.file.blocks)[0];
-  if (!firstInstance) return delay({ service: serviceName, errors: [] });
-  return delay({
-    service: serviceName,
-    errors: [
-      {
-        instance: firstInstance,
-        code: 'restart_limit',
-        message: `instance "${firstInstance}" exceeded its restart budget (DAEMON §7) and the service was stopped`,
-        restarts: RESTART_COUNTS[key]!,
-        last_error_at: new Date(Date.now() - 60_000).toISOString(),
-      },
-    ],
-  });
+  if (!svc.error) throw new Error(`"${serviceName}" is ${svc.state}, and has no errors`);
+  return delay(svc.error);
 }
 
 // --- Taps: POST /taps, GET /taps, DELETE /taps/{id}, GET /taps/{id}/stream
@@ -743,15 +742,20 @@ export async function createTap(nodeId: string, service: string, connection: str
   if (!exists) throw new Error(`no such connection "${connection}" on service "${service}"`);
   tapCounter += 1;
   const tap_id = `tap-${tapCounter}`;
-  TAPS[tap_id] = { tap_id, service, connection, nodeId };
-  return delay({ tap_id, service, connection }, 60);
+  // DAEMON §6.3: "a tap observes the connection's source endpoint" — `instance`/`port` are the
+  // `from` side of the parsed connection, the same pair `crates/daemon/src/api/taps.rs`'s
+  // `create` hands `Bus::tap` to build the daemon's own `Tap.instance`/`Tap.port` from.
+  const instance = parsed.fromId;
+  const port = parsed.fromPort;
+  TAPS[tap_id] = { tap_id, service, connection, instance, port, nodeId };
+  return delay({ tap_id, service, connection, instance, port }, 60);
 }
 
 export async function listTaps(nodeId: string): Promise<TapSummary[]> {
   return delay(
     Object.values(TAPS)
       .filter((t) => t.nodeId === nodeId)
-      .map(({ tap_id, service, connection }) => ({ tap_id, service, connection })),
+      .map(({ tap_id, service, connection, instance, port }) => ({ tap_id, service, connection, instance, port })),
   );
 }
 

@@ -273,25 +273,28 @@ describe('getNodeInfo — actual field values, not just the field names mock-par
   });
 });
 
-// Known, already-reported shape drift (see `ServiceErrorReport`'s doc comment in `./types`,
-// found by `schema-parity.test.ts`, not this bead): the real daemon's `GET /services/{s}/errors`
-// answers one `ApiError`, not `{service, errors: [...]}`. Not fixed here — the fix belongs to
-// whoever owns `types.ts`/`NodeDashboard.svelte`, which are outside this bead's file list. These
-// tests pin the mock's own (guessed) contract as it exists today, since nothing did before.
-describe('getServiceErrors (eieio-m9s.17; the guessed {service, errors} shape is a known drift, not fixed here)', () => {
-  it('a healthy service reports no errors', async () => {
-    const report = await getServiceErrors('node-porch', 'kitchen');
-    expect(report.errors).toEqual([]);
+// eieio-m9s.18: `getServiceErrors` answers exactly what `GET /services/{s}/errors` does — one
+// `ApiError`, and a rejection (the mock's stand-in for the real endpoint's 404) for a service
+// that is not errored — rather than the `{service, errors: [...]}` wrapper eieio-m9s.17's mock
+// half pinned as "a known drift, not fixed here" (that comment, and these tests, predate this
+// bead owning `types.ts`; see `ApiError`'s and the old `ServiceErrorReport`'s doc comments in
+// `./types` for the full history).
+describe('getServiceErrors (eieio-m9s.18: answers one ApiError, matching GET /services/{s}/errors)', () => {
+  it('a healthy service has no errors to report, the same way the real endpoint 404s', async () => {
+    await expect(getServiceErrors('node-porch', 'kitchen')).rejects.toThrow(/no errors/);
   });
 
-  it('an errored service names the failing instance with a restart count and a sensible message', async () => {
-    const report = await getServiceErrors('node-attic', 'attic-fan');
-    expect(report.errors).toHaveLength(1);
-    const [error] = report.errors;
-    expect(error?.instance).toBe('s1');
-    expect(error?.code).toBe('restart_limit');
-    expect(error?.message).toMatch(/restart budget/);
-    expect(error?.restarts).toBeGreaterThan(0);
-    expect(() => new Date(error!.last_error_at).toISOString()).not.toThrow();
+  it('an unknown service rejects rather than resolving to something empty', async () => {
+    await expect(getServiceErrors('node-porch', 'no-such-service')).rejects.toThrow();
+  });
+
+  it('an errored service answers the same structured ApiError its listing entry already carries', async () => {
+    const [listed] = await listServices('node-attic');
+    expect(listed?.error, 'the attic-fan fixture is supposed to be errored with a structured reason').toBeDefined();
+
+    const error = await getServiceErrors('node-attic', 'attic-fan');
+    expect(error).toEqual(listed?.error);
+    expect(error.error).toBe('unresolvable');
+    expect(error.message).toMatch(/restart budget/);
   });
 });

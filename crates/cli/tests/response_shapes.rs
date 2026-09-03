@@ -40,7 +40,8 @@
 //!
 //! # Scope: which bodies, and which do not compare cleanly
 //!
-//! Three schema pairs are asserted, byte for byte, field for field:
+//! Five schema pairs are asserted, byte for byte, field for field, required-ness and kind
+//! included:
 //!
 //! - **`NodeInfo`** (`GET /node`) — the historical bug's own schema. The proof this file exists
 //!   to satisfy — reintroducing `b00f430`'s drift into `types.ts` and watching
@@ -50,31 +51,68 @@
 //! - **`TapRequest`** (`POST /taps`'s body) — already an exact match; kept in the asserted set
 //!   so the mechanism is proven on more than one schema, not just the one it was built for.
 //! - **`ApiError`** (DAEMON §9.2's failure envelope, and the *actual* 200 body of
-//!   `GET /services/{s}/errors` — see below) — matched against a **new** `ApiError` interface
-//!   added to `types.ts` by this bead. Nothing in `designer/src/` reads it yet (see next
-//!   paragraph), so nothing breaks by adding it; it exists so a future `crates/designer` fetch
-//!   has the right shape waiting rather than another guess to discover the hard way.
+//!   `GET /services/{s}/errors` — DESIGNER's `getServiceErrors` points there directly as of
+//!   eieio-m9s.18, rather than at a guessed wrapper shape; see that bead's report for the fix).
+//! - **`ServiceSummary`** (`GET /services`'s listing entries, and the 200 body of `PUT`/`POST
+//!   .../start`/`.../stop`/`.../reload`) — added by eieio-m9s.13; `designer/src/lib/api/types.ts`'s
+//!   `ServiceSummary` matches it field for field.
+//! - **`Tap`** (`POST /taps`'s response and `GET /taps`'s listing entries) — added by
+//!   eieio-m9s.17. `designer/src/lib/api/types.ts`'s `TapSummary` is compared against it under
+//!   its own field names by *wire* name, not local name: `TapSummary.tap_id` carries an
+//!   `@wire id` JSDoc tag (`schema-parity.test.ts`'s `wireNameOf`, previously used only for the
+//!   SSE payloads below, now shared by this pairing too) because `InspectorPanel.svelte` — not
+//!   owned by this bead — already reads `.tap_id`, the same reasoning `LogLineEvent.timestamp`'s
+//!   `@wire at` already established. `instance` and `port`, the two fields `TapSummary` omitted
+//!   entirely, are now real fields the mock populates from the tapped connection's source
+//!   endpoint (DAEMON §6.3), the same value the daemon derives `Tap.instance`/`Tap.port` from.
 //!
 //! **What this deliberately does not cover, and why:**
 //!
-//! - **The service listing (`ServiceSummary`) and `/services/{s}/errors`.** The daemon serves
-//!   `ServiceSummary { name, state, error? }` for `GET /services`, and literally an `ApiError`
-//!   (not a list of anything) for `GET /services/{s}/errors`. `designer/src/lib/api/types.ts`'s
-//!   existing `ServiceSummary` has `autostart: boolean` instead of `error` — a field the wire
-//!   response never carries, sourced today only from `mock.ts`'s fabricated fixture — and its
-//!   `ServiceErrorReport`/`InstanceError` pair for the errors endpoint has no relationship to
-//!   `ApiError` at all. Both are **real, currently-existing drift this check would catch**, but
-//!   fixing either one cleanly touches `NodeDashboard.svelte`, `Toolbar.svelte` and `App.svelte`
-//!   (all of which read `.autostart` off a `ServiceSummary`) or `NodeDashboard.svelte` again
-//!   (which reads `.errors`/`.instance`/`.restarts` off a `ServiceErrorReport`) — none of which
-//!   this bead owns (`designer/src/lib/api/types.ts`, `mock.ts`, and new test files only).
-//!   Forcing them into the strict, asserted set would mean either quietly weakening the check
-//!   (an allowlist of "known-okay" mismatches — the exact third list this bead exists to avoid)
-//!   or shipping a change with unreviewed collateral damage outside this worktree's remit. Both
-//!   are noted in `types.ts` at the point they matter, and reported to the driving agent as
-//!   follow-up work.
-//! - **The service listing (`ServiceSummary`) and `/services/{s}/errors`**, exactly as above —
-//!   unchanged and still out of scope for this bead (eieio-m9s.13 owns the SSE side only).
+//! - **`listBlockManifests` (`BlockManifest`).** The daemon's actual `GET /blocks` answers
+//!   `Vec<CachedBlock>` (`crates/daemon/src/api/blocks.rs`) — `{name, version, reference,
+//!   manifest}`, where `manifest` is `serde_json::Value`. `designer/src/lib/api/types.ts`'s
+//!   `BlockManifest` is not that shape at all: it flattens `CachedBlock.manifest`'s own fields
+//!   up to the top level and renames `CachedBlock.reference` to `block_ref` — a parsed,
+//!   client-side model of two nested wire shapes, not a mirror of either one (the same relation
+//!   `ServiceDefinition` has to `ServiceDetail`'s `definition` text, below). And even a mirror of
+//!   `CachedBlock` alone could not check `manifest`'s own fields: `eio_manifest::schema::Manifest`
+//!   (the real Rust type ABI §11's schema names) has no `#[derive(ToSchema)]` — it is a `no_std`
+//!   crate with no `utoipa` dependency, by `crates/manifest`'s own ★-crate rule (this repository's
+//!   `CLAUDE.md`) — so `manifest` renders in the live OpenAPI document as untyped `AnyValue` and
+//!   this file's `types_of`/`schema_kind` already leave that out of the emitted map on purpose
+//!   (see their own doc above). A real Rust counterpart exists; it is simply unreachable through
+//!   the mechanism this file uses. Extending manifest schema generation to `utoipa` (or teaching
+//!   this file to read `manifest.schema.json` instead) is future work, not this bead's.
+//! - **`serviceEdit` (`ServiceEditResult`) and `putService` (`PutServiceResult`).** Both are
+//!   synthesized discriminated unions the Designer backend would produce by folding an HTTP
+//!   status code, an `ETag`/`If-Match` header, and a JSON body into one `{ok, ...}` value — not a
+//!   body any single endpoint serves verbatim, the same relation `ServiceDefinition` has to the
+//!   daemon's `ServiceDetail`. `crates/designer` (`crates/designer/src/api/service_edit.rs`,
+//!   `proxy.rs`) turns out to already exist — `CLAUDE.md`'s "not built yet" list is stale, not
+//!   ours to fix (docs are outside this bead's file list) — and its `PUT /services/{service}`
+//!   handling is the plain catch-all proxy (`proxy.rs`'s module doc: "no path is special-cased
+//!   here"), so `PutServiceResult`'s `ok: true`/`ok: false` branches really are built from the
+//!   *same* `ServiceSummary`/`ApiError` bodies already covered above, just wrapped — not a shape
+//!   this file needs a fourth target for. `serviceEdit`'s own `Out`/`ErrorOut`/`SpanOut`
+//!   (`service_edit.rs`) are real, hand-verified-against structs with fields that do line up with
+//!   `ServiceEditResult`/`ServiceEditError` (DESIGNER §3.2, amended commit dc83e98) — but
+//!   `crates/designer` has no `utoipa` dependency anywhere in it (checked: no `ToSchema`, no
+//!   `#[derive(OpenApi)]`), so there is no live schema this file's mechanism — which only ever
+//!   reads `eio_daemon::api::openapi::Document` — can reach, the same "real Rust type, unreachable
+//!   through this mechanism" situation `listBlockManifests` is in above.
+//! - **`listSystems` (`SystemSummary`) and `listNodes` (`NodeSummary`).** DESIGNER §3.1's own
+//!   endpoints (`GET /api/systems`, `GET /api/nodes`), served by `crates/designer/src/api/
+//!   systems.rs`/`nodes.rs` — real handlers, not absent (see the correction above). Reading them
+//!   by hand surfaces drift this file cannot check for the same "no `utoipa` in `crates/designer`"
+//!   reason: `SystemOut.id`/`NodeOut.id`/`NodeOut.system_id` are `i64` on the wire where
+//!   `SystemSummary.id`/`NodeSummary.id`/`NodeSummary.system_id` are declared `string`, and
+//!   `NodeOut.capabilities`/`NodeOut.limits` are `Option<serde_json::Value>` (absent until a probe
+//!   succeeds) where `NodeSummary.capabilities`/`.limits` are required, non-optional. Real,
+//!   currently-existing drift, found by manual inspection rather than this mechanism, and not
+//!   fixed here: `crates/designer` is not in this bead's owned-file list, and closing the gap
+//!   properly means either giving that crate a `utoipa` document of its own (mirroring the
+//!   daemon's) or teaching this file a second, non-`utoipa` introspection path — real design work,
+//!   reported as follow-up rather than decided here.
 //!
 //! # The SSE payloads, covered as of eieio-m9s.13
 //!
@@ -730,7 +768,13 @@ fn generated_path() -> PathBuf {
 #[test]
 fn emit_response_shapes() {
     let components = components();
-    let targets = ["NodeInfo", "TapRequest", "ApiError", "ServiceSummary"];
+    let targets = [
+        "NodeInfo",
+        "TapRequest",
+        "ApiError",
+        "ServiceSummary",
+        "Tap",
+    ];
 
     let mut shapes = serde_json::Map::new();
     let mut required = serde_json::Map::new();

@@ -14,14 +14,25 @@ export type Capability = 'state' | 'timer' | 'gpio' | 'i2c' | 'http';
 
 export type NodeClass = 'daemon' | 'leaf';
 
-/** GET /api/systems (DESIGNER §3.1) */
+/** GET /api/systems (DESIGNER §3.1).
+ *
+ *  **Known drift (found by eieio-m9s.17, reading `crates/designer/src/api/systems.rs` by hand —
+ *  not by `response_shapes.rs`'s mechanism, which cannot reach `crates/designer`: it has no
+ *  `utoipa` anywhere in it, unlike the daemon), not fixed here:** `SystemOut.id` is `i64` on the
+ *  wire, not `string`. `crates/designer` is not owned by this bead, and neither is a real fix
+ *  (retyping `id` as `number` and updating every caller that treats it as an opaque string). */
 export interface SystemSummary {
   id: string;
   name: string;
 }
 
 /** GET /api/nodes (DESIGNER §3.1). Never carries a token — §3.1 is explicit
- * that there is no serialization in which one appears. */
+ * that there is no serialization in which one appears.
+ *
+ *  **Known drift (found by eieio-m9s.17, same caveat as {@link SystemSummary}'s), not fixed
+ *  here:** `NodeOut.id`/`.system_id` are `i64`, not `string`; `NodeOut.capabilities`/`.limits`
+ *  are `Option<serde_json::Value>` — absent until a probe (`POST /api/nodes/{id}/probe`)
+ *  succeeds at least once, not the required, always-populated shapes declared below. */
 export interface NodeSummary {
   id: string;
   system_id: string;
@@ -59,10 +70,9 @@ export interface ServiceSummary {
 /** DAEMON §9.2's failure envelope — every non-2xx body, and (per `crates/daemon/src/api/
  *  services.rs`'s `errors` handler) the literal 200 body of `GET /services/{s}/errors` too:
  *  that endpoint answers one `ApiError`, not a list of anything. Added by eieio-m9s.11 as the
- *  shape a real fetch of that endpoint should use; nothing in `designer/src/` reads it yet
- *  (the existing {@link ServiceErrorReport}/{@link InstanceError} pair below is a different,
- *  unrelated guess that predates this check and does not match what the daemon serves — see
- *  their own doc comment). */
+ *  shape a real fetch of that endpoint should use, and as of eieio-m9s.18 it is: `getServiceErrors`
+ *  (`mock.ts`) returns `Promise<ApiError>` directly, replacing the guessed `ServiceErrorReport`
+ *  wrapper that used to sit where `GET /services/{s}/errors`'s doc comment now is, below. */
 export interface ApiError {
   /** DAEMON §9.2's stable slug, `snake_case` (`crates/daemon/src/api/error.rs`'s `Kind`):
    *  `unauthorized`, `not_found`, `bad_request`, `invalid`, `unresolvable`, `unstartable`,
@@ -185,15 +195,17 @@ export interface ServiceDefinition {
    * unread through `serviceEdit` and back through `putService`; nothing in
    * `designer/src/` parses or writes it as TOML (SERVICE §9's one-editor
    * rule — see mock.ts's module doc for what stands in for `eio-service`
-   * here, since that crate has no browser build and the real Designer
-   * backend that would call it does not exist in this worktree).
+   * here, since that crate compiles to a native binary — `crates/designer`,
+   * the real Designer backend, calls it directly — and has no WASM/browser
+   * build this SPA could call the same way instead).
    */
   text: string;
 }
 
 /** SERVICE-SPEC §9 / DESIGNER §3.2 (amended commit dc83e98, landed in
- * `crates/designer` outside this worktree): the operations `Document`
- * accepts, batched, applied in order, all-or-nothing.
+ * `crates/designer`'s `service_edit.rs` — a real backend this bead does not
+ * own or generate a schema from; see `response_shapes.rs`'s module doc):
+ * the operations `Document` accepts, batched, applied in order, all-or-nothing.
  *
  * `add_block`'s `id` is OPTIONAL: a batch that wires up the block it just
  * added (the canvas's normal "drop and connect" gesture) MUST supply the id
@@ -318,17 +330,29 @@ export interface TapRequest {
   connection: string;
 }
 
-/** `POST /taps`'s `-> tap_id` and `GET /taps`'s listing, per entry.
+/** `POST /taps`'s `-> tap_id` and `GET /taps`'s listing, per entry — now checked field for
+ *  field against the daemon's live `Tap` schema (eieio-m9s.17, `crates/cli/tests/
+ *  response_shapes.rs`'s `Tap` target).
  *
- *  **Known drift (found by eieio-m9s.11's schema-parity check, not fixed here):** the daemon's
- *  actual `Tap` (`crates/daemon/src/observe.rs`) is `{ id, service, connection, instance, port
- *  }` — the id field is `id`, not `tap_id`, and the source instance/port are not modelled here
- *  at all. `tap_id` is read by `InspectorPanel.svelte` and `mock-taps.test.ts`, neither of
- *  which this bead owns, so it is reported rather than renamed out from under them. */
+ *  The daemon's actual `Tap` (`crates/daemon/src/observe.rs`) is `{ id, service, connection,
+ *  instance, port }`, all five required. This interface carries the same five fields, but
+ *  `id` keeps its pre-existing local name `tap_id` — an `@wire id` JSDoc tag tells
+ *  `schema-parity.test.ts` to compare it against the wire's `id` rather than treating it as an
+ *  invented field, the same mechanism `LogLineEvent.timestamp`'s `@wire at` already uses.
+ *  `InspectorPanel.svelte`, `mock-taps.test.ts` and `mock-parity.test.ts` — the first not owned
+ *  by this bead, the other two owned but already exercising `tap.tap_id` as a fixture value, not
+ *  a shape assertion — all read this field under its existing name, so renaming it outright
+ *  would be a cross-file change this bead's remit does not cover; `@wire` gets the same
+ *  correctness without one. `instance` and `port` were previously missing entirely; `mock.ts`'s
+ *  `createTap`/`listTaps` now populate both from the tapped connection's source endpoint, the
+ *  same value DAEMON §6.3 says the daemon derives them from. */
 export interface TapSummary {
+  /** @wire id */
   tap_id: string;
   service: string;
   connection: string;
+  instance: string;
+  port: string;
 }
 
 /** `GET /node` (DAEMON §9): "identity, limits, budgets, versions" — §2.1's
@@ -361,41 +385,26 @@ export interface NodeInfo {
   require_signed: boolean;
 }
 
-/** `GET /services/{s}/errors` (DAEMON §9): "why a service is errored,
- * structured." GUESS: DAEMON §9 gives no field list. This shape follows
- * §7's restart-policy paragraph directly — "per-instance restart with
- * exponential backoff and a restart-count circuit breaker escalating to
- * service-errored" is the mechanism this endpoint would be reporting on,
- * so a report is per failing instance and carries the count that
- * mechanism keeps. A service with nothing wrong answers an empty array,
- * the same "no entries" shape §9's state-inspection endpoint already uses
- * for "nothing to report" rather than 404ing a healthy service.
+/** `GET /services/{s}/errors` (DAEMON §9): "why a service is errored, structured" — answers a
+ * single {@link ApiError} on 200 (`crates/daemon/src/api/services.rs`'s `errors` handler:
+ * `{ error, message, detail? }`), never a list of anything, and 404s a service that is not
+ * errored rather than answering an empty something — "there is nothing to report, and an empty
+ * 200 would make 'no errors' and 'no such service' the same answer." `getServiceErrors`
+ * (`mock.ts`) returns `Promise<ApiError>` for exactly this reason; see {@link ApiError}'s own doc
+ * comment.
  *
- * **Known drift (found by eieio-m9s.11's schema-parity check, not fixed here):** the daemon's
- * actual `GET /services/{s}/errors` (`crates/daemon/src/api/services.rs`'s `errors` handler)
- * answers a single {@link ApiError} on 200 — `{ error, message, detail? }` — not `{ service,
- * errors: [...] }`. This guess predates that discovery and is read by `NodeDashboard.svelte`
- * (`.errors`, `.instance`, `.code`, `.restarts`, `.last_error_at`), which this bead does not
- * own, so it is reported rather than replaced out from under that component. */
-export interface ServiceErrorReport {
-  service: string;
-  errors: InstanceError[];
-}
-
-export interface InstanceError {
-  instance: string;
-  /** EXPR §8's codes when the failure was an expression's; a restart/trap
-   * reason otherwise (`"trap"`, `"restart_limit"`, …) — this shell does not
-   * invent a closed set for the non-expression case, since DAEMON-SPEC
-   * does not enumerate one either (§8 ABI status codes are the closest
-   * normative list, and even those are the guest's, not the supervisor's). */
-  code: string;
-  message: string;
-  /** §7's restart-count circuit breaker: how many times this instance has
-   * been re-instantiated since the service last started. */
-  restarts: number;
-  last_error_at: string;
-}
+ * **Fixed by eieio-m9s.18.** This interface used to be `ServiceErrorReport { service, errors:
+ * InstanceError[] }` — a guessed wrapper-and-array shape with no relationship to what the daemon
+ * actually serves, discovered wrong by eieio-m9s.11's schema-parity check (no target existed to
+ * compare it against until eieio-m9s.17 added `ApiError` to the covered set) but left unfixed
+ * because the earlier bead that found it did not own this file. Its doc claimed
+ * `NodeDashboard.svelte` read `.errors`/`.instance`/`.code`/`.restarts`/`.last_error_at` off it;
+ * that stopped being true at eieio-m9s.12, when the structured error moved onto
+ * `ServiceSummary.error` itself and that component switched to reading it from there —
+ * `NodeDashboard.svelte`'s own comment says as much, and grepping the rest of `designer/src/`
+ * confirms nothing calls `getServiceErrors` at all today, so nothing needed to change to fix
+ * this. See the final report for the transcript that reintroduces the old shape and confirms
+ * `schema-parity.test.ts`'s `ApiError` pairing rejects it. */
 
 /** DAEMON §9.6's event names — the contract a client dispatches on for
  * `/taps/{id}/stream` and `/logs/stream`.

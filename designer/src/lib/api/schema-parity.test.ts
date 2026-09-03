@@ -4,15 +4,15 @@
 // `crates/cli/tests/response_shapes.rs` is this check's other half. Its own module doc explains
 // the approach and its scope in full; the short version, since both halves need to be read to
 // understand either: that Rust test reads the daemon's *live* `utoipa` schemas the same way
-// `crates/cli/tests/openapi_surface.rs` already reads its live *paths*, flattens three of them
-// (`NodeInfo`, `TapRequest`, `ApiError` — chosen because they are the ones with a clean,
-// field-for-field TypeScript counterpart; see that file's doc for what is deliberately excluded
-// and why) to a generated JSON file, and this file compares that JSON's field sets against the
-// *actual* TypeScript interfaces of the same names in `./types.ts` — extracted by parsing that
-// file with the `typescript` package's own compiler API, not by a second hand-copied list. A
-// hand-copied "expected fields" list is exactly the third source of truth CLAUDE.md's prime
-// directive and this bead's own brief warn against; the daemon's schema and `types.ts` are the
-// only two sources this file reads.
+// `crates/cli/tests/openapi_surface.rs` already reads its live *paths*, flattens `PAIRS`' daemon
+// side (`NodeInfo`, `TapRequest`, `ApiError`, `ServiceSummary`, `Tap` — chosen because they are
+// the ones with a clean, field-for-field TypeScript counterpart; see that file's doc for what is
+// deliberately excluded and why) to a generated JSON file, and this file compares that JSON's
+// field sets against the *actual* TypeScript interfaces of the same names in `./types.ts` —
+// extracted by parsing that file with the `typescript` package's own compiler API, not by a
+// second hand-copied list. A hand-copied "expected fields" list is exactly the third source of
+// truth CLAUDE.md's prime directive and this bead's own brief warn against; the daemon's schema
+// and `types.ts` are the only two sources this file reads.
 //
 // # eieio-m9s.13: the SSE payloads (`describe('SSE payloads...')` below)
 //
@@ -28,11 +28,12 @@
 // parsed from the AST, and each member's own event name is read off a `type: '<literal>'`
 // property tagged `@wire event` in a JSDoc comment — never a second list beside `PAIRS`. A
 // `@wire <name>` tag on any property marks that TypeScript field as representing a *differently
-// named* wire field (`LogLineEvent.timestamp` is the wire's `at`; `ExprFailureEvent.property` is
-// the wire's `prop`) — both kept under their existing names because `InspectorPanel.svelte` (not
-// owned by this bead) already reads them that way, and this file has no reason to invent a
-// third naming scheme just for the check. `types.ts`'s module doc, at `TapSignalsEvent`, has the
-// full explanation.
+// named* wire field (`LogLineEvent.timestamp` is the wire's `at`) — kept under its existing name
+// because `InspectorPanel.svelte` (not owned by this bead) already reads it that way, and this
+// file has no reason to invent a third naming scheme just for the check. `types.ts`'s module doc,
+// at `TapSignalsEvent`, has the full explanation. `PAIRS`' own comparison (`flattenInterface`,
+// `requiredFieldsOfInterface`, `collectKinds`) reads the same tag now too, for the same reason on
+// the non-SSE side (`TapSummary.tap_id`, `@wire id`, eieio-m9s.17).
 //
 // # Why this file regenerates the Rust side itself, rather than trusting `just ci`'s ordering
 //
@@ -64,14 +65,20 @@ const PAIRS: ReadonlyArray<readonly [daemonSchema: string, tsInterface: string]>
   ['TapRequest', 'TapRequest'],
   ['ApiError', 'ApiError'],
   ['ServiceSummary', 'ServiceSummary'],
+  ['Tap', 'TapSummary'],
 ];
 
-/** `ServiceDetail` is deliberately absent, and for a reason that is not an exemption: the
- * Designer has no wire mirror of it. `GET /services/{s}` answers `{name, state, definition,
+/** `ServiceDetail` and `CachedBlock` are deliberately absent, and not as an exemption: the
+ * Designer has no wire mirror of either. `GET /services/{s}` answers `{name, state, definition,
  * autostart, error?}`, and this shell's `ServiceDefinition` is the *parsed* model it builds
  * from that text — blocks, connections, `ui`, an `etag` — so a field-set diff between them
- * would compare two different kinds of thing. `ServiceSummary` has a real mirror and is
- * checked; if `ServiceDefinition` ever grows a wire twin, that twin belongs above. */
+ * would compare two different kinds of thing. `GET /blocks` answers `Vec<CachedBlock>`
+ * (`{name, version, reference, manifest}`), and this shell's `BlockManifest` flattens
+ * `manifest`'s own fields to the top level and renames `reference` to `block_ref` — the same
+ * kind of parsed reshaping, and `manifest` itself has no live schema to check regardless (see
+ * `crates/cli/tests/response_shapes.rs`'s module doc for why: `eio_manifest::schema::Manifest`
+ * has no `ToSchema` derive). `ServiceSummary` and `Tap` have real mirrors and are checked; if
+ * `ServiceDefinition` or `BlockManifest` ever grow a wire twin, that twin belongs above. */
 
 let daemonShapes: Record<string, string[]>;
 /** `daemonShapes.sse`, typed for what it actually is: one field-name array per SSE event name,
@@ -137,7 +144,13 @@ const MAX_DEPTH = 3;
  * another interface declared in the same file, so `limits.max_payload` diffs the same way on
  * both sides of the check. A property typed as anything else (a primitive, an array, a union, a
  * reference to a type alias rather than an interface) is a leaf — this mirrors the Rust side
- * skipping `Schema::Array` and stopping at a non-`Object` schema. */
+ * skipping `Schema::Array` and stopping at a non-`Object` schema.
+ *
+ * A path segment is [`wireNameOf`]'s result, not the property's own name (eieio-m9s.17):
+ * `TapSummary.tap_id` carries an `@wire id` tag for exactly the reason `LogLineEvent.timestamp`'s
+ * `@wire at` already does below — a consumer outside this bead's file list reads it under its
+ * existing name — so this needed the same rename mechanism the SSE side already had, rather than
+ * a second one invented beside it. */
 function flattenInterface(
   node: ts.InterfaceDeclaration,
   prefix: string,
@@ -148,7 +161,7 @@ function flattenInterface(
   if (depth === 0) return;
   for (const member of node.members) {
     if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
-    const path = prefix ? `${prefix}.${member.name.text}` : member.name.text;
+    const path = prefix ? `${prefix}.${wireNameOf(member)}` : wireNameOf(member);
     out.add(path);
     const type = member.type;
     if (!type) continue;
@@ -176,7 +189,7 @@ function flattenInterfaceLikeMembers(
   if (depth === 0) return;
   for (const member of members) {
     if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
-    const path = `${prefix}.${member.name.text}`;
+    const path = `${prefix}.${wireNameOf(member)}`;
     out.add(path);
     const type = member.type;
     if (!type) continue;
@@ -218,12 +231,14 @@ function interfaceNode(name: string, interfaces: Map<string, ts.InterfaceDeclara
  * *possibly absent*, which is the same design choice `required`/`sseRequired`
  * (`response_shapes.rs`) record on the daemon side. Top-level only for the `PAIRS` interfaces,
  * mirroring `required_of`'s own "top-level only" scope (see that function's doc for why nothing
- * here needs a nested-object's own required set). */
+ * here needs a nested-object's own required set). Named by [`wireNameOf`], the same rule
+ * [`flattenInterface`] applies, so a renamed-but-required field (`TapSummary.tap_id`, tagged
+ * `@wire id`) is recorded under the wire name the daemon's own `required` set uses. */
 function requiredFieldsOfInterface(node: ts.InterfaceDeclaration): Set<string> {
   const out = new Set<string>();
   for (const member of node.members) {
     if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
-    if (!member.questionToken) out.add(member.name.text);
+    if (!member.questionToken) out.add(wireNameOf(member));
   }
   return out;
 }
@@ -281,12 +296,15 @@ const REQUIRED_BUT_OPTIONAL_EXCEPTIONS: ReadonlyArray<readonly [event: string, f
 // --- eieio-m9s.13: the SSE payloads ---------------------------------------------------------
 
 /** A property's real wire field name — the argument of a `@wire <name>` JSDoc tag, when present,
- * or the property's own name otherwise. `LogLineEvent.timestamp` (`@wire at`) and
- * `ExprFailureEvent.property` (`@wire prop`) are the two properties that need this today; see
- * `types.ts`'s module doc, at `TapSignalsEvent`, for why they are named differently from the
- * wire on purpose. Reading the tag from the AST, rather than a second list mapping property
- * names to wire names kept beside this function, is what keeps the rename itself from becoming
- * a third source of truth. */
+ * or the property's own name otherwise. `LogLineEvent.timestamp` (`@wire at`) is the SSE side's
+ * example; `TapSummary.tap_id` (`@wire id`, eieio-m9s.17) is the `PAIRS` side's — see
+ * `types.ts`'s module doc, at `TapSignalsEvent`, and `TapSummary`'s own doc comment, for why each
+ * is named differently from the wire on purpose. Originally written for the SSE-only functions
+ * below ([`fieldsOfSseInterface`] and friends); [`flattenInterface`], [`requiredFieldsOfInterface`]
+ * and [`collectKinds`] read it too, so a renamed field is retargeted at its real wire name however
+ * it is compared, not just in the SSE payloads. Reading the tag from the AST, rather than a second
+ * list mapping property names to wire names kept beside this function, is what keeps the rename
+ * itself from becoming a third source of truth. */
 function wireNameOf(member: ts.PropertySignature): string {
   const own = ts.isIdentifier(member.name) ? member.name.text : '';
   const alias = ts.getJSDocTags(member).find((tag) => tag.tagName.text === 'wire');
@@ -461,7 +479,8 @@ const TYPE_KIND_EXCEPTIONS: ReadonlyArray<readonly [event: string, field: string
  * honestly one of the five kinds (or, per [`kindOfTypeNode`]'s doc, a reference this check
  * deliberately does not resolve), and the comparison below simply has nothing to check it
  * against, symmetric with how the daemon side leaves unguessable fields out of `types`/
- * `sseTypes` entirely. */
+ * `sseTypes` entirely. Path segments are [`wireNameOf`]'s result, the same rename mechanism
+ * [`flattenInterface`] uses, so a renamed field's kind is recorded under its wire name too. */
 function collectKinds(
   node: ts.InterfaceDeclaration,
   prefix: string,
@@ -472,7 +491,7 @@ function collectKinds(
   if (depth === 0) return;
   for (const member of node.members) {
     if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
-    const path = prefix ? `${prefix}.${member.name.text}` : member.name.text;
+    const path = prefix ? `${prefix}.${wireNameOf(member)}` : wireNameOf(member);
     const type = member.type;
     const stripped = type ? stripOptionality(type) : undefined;
     if (stripped && ts.isTypeLiteralNode(stripped)) {
@@ -495,7 +514,7 @@ function collectKindsFromMembers(
   if (depth === 0) return;
   for (const member of members) {
     if (!ts.isPropertySignature(member) || !member.name || !ts.isIdentifier(member.name)) continue;
-    const path = `${prefix}.${member.name.text}`;
+    const path = `${prefix}.${wireNameOf(member)}`;
     const type = member.type;
     const stripped = type ? stripOptionality(type) : undefined;
     if (stripped && ts.isTypeLiteralNode(stripped)) {
