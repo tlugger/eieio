@@ -10,7 +10,20 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, beforeAll } from 'vitest';
 import { initSync } from '../../../../crates/expr-wasm/pkg/eio_expr_wasm.js';
-import { getService, listServices, putService, serviceEdit } from './mock';
+import {
+  getNodeInfo,
+  getService,
+  getServiceErrors,
+  listBlockManifests,
+  listNodes,
+  listServices,
+  listSystems,
+  putService,
+  reloadService,
+  serviceEdit,
+  startService,
+  stopService,
+} from './mock';
 
 beforeAll(async () => {
   const wasmPath = path.resolve(process.cwd(), '../crates/expr-wasm/pkg/eio_expr_wasm_bg.wasm');
@@ -179,5 +192,106 @@ describe('putService', () => {
     if (!edit.ok) throw new Error('unreachable');
     const put = await putService('node-porch', 'greenhouse', edit.toml, '*');
     expect(put.ok).toBe(true);
+  });
+});
+
+// --- Surfaces with no test at all until eieio-m9s.17 ----------------------------------------
+//
+// `mock-parity.test.ts`'s own module doc lists which `mock.ts` exports it reaches; everything
+// below was reachable by nothing, anywhere in this repository, before this bead — the same
+// state `streamLogs` was in when it turned out to have silently never worked (see this file's
+// header and `mock-logs.test.ts`'s). These drive each surface and read what a consumer actually
+// gets back, not just its shape.
+//
+// Placed at the end of this file, after `serviceEdit`/`putService`'s own tests, because those
+// mutate the shared `SERVICES` fixture's `autostart`/text in place — this section additionally
+// mutates `state` via `startService`/`stopService`, and restores it before returning, so test
+// order within this file still does not matter to anything that runs after it.
+
+describe('listBlockManifests / listSystems / listNodes — the palette and topology data (eieio-m9s.17)', () => {
+  it('every manifest carries the fields the palette and ConfigModal read, and a fixture block instance actually resolves', async () => {
+    const manifests = await listBlockManifests();
+    expect(manifests.length).toBeGreaterThan(0);
+    for (const manifest of manifests) {
+      expect(manifest.block_ref).toBeTruthy();
+      expect(manifest.name).toBeTruthy();
+      expect(Array.isArray(manifest.inputs)).toBe(true);
+      expect(Array.isArray(manifest.outputs)).toBe(true);
+      expect(Array.isArray(manifest.properties)).toBe(true);
+    }
+    const refs = new Set(manifests.map((m) => m.block_ref));
+    // `kitchen`'s own `b7k2` instance (SERVICES fixture) names this block — if the palette's
+    // data source could not resolve it, `ConfigModal` would have nothing to describe its ports.
+    expect(refs.has('ghcr.io/tlugger/temp-sensor:1.0.0')).toBe(true);
+  });
+
+  it('every listed node actually belongs to the system it was listed under', async () => {
+    const systems = await listSystems();
+    expect(systems.length).toBeGreaterThan(0);
+    for (const system of systems) {
+      const nodes = await listNodes(system.id);
+      expect(nodes.length).toBeGreaterThan(0);
+      for (const node of nodes) expect(node.system_id).toBe(system.id);
+    }
+  });
+
+  it('listNodes answers an empty list for an unknown system, not an error', async () => {
+    expect(await listNodes('no-such-system')).toEqual([]);
+  });
+});
+
+describe('startService / stopService / reloadService — the lifecycle App.svelte actually drives (eieio-m9s.17)', () => {
+  it('startService moves a stopped service to running, and stopService reverses it', async () => {
+    const before = await listServices('node-porch');
+    expect(before.find((s) => s.name === 'greenhouse')?.state).toBe('stopped');
+
+    await startService('node-porch', 'greenhouse');
+    expect((await listServices('node-porch')).find((s) => s.name === 'greenhouse')?.state).toBe('running');
+
+    await stopService('node-porch', 'greenhouse');
+    expect((await listServices('node-porch')).find((s) => s.name === 'greenhouse')?.state).toBe('stopped');
+  });
+
+  it('reloadService resolves without throwing and leaves state untouched', async () => {
+    const before = (await listServices('node-porch')).find((s) => s.name === 'kitchen')?.state;
+    await expect(reloadService('node-porch', 'kitchen')).resolves.toBeUndefined();
+    const after = (await listServices('node-porch')).find((s) => s.name === 'kitchen')?.state;
+    expect(after).toBe(before);
+  });
+});
+
+describe('getNodeInfo — actual field values, not just the field names mock-parity.test.ts checks (eieio-m9s.17)', () => {
+  it('a daemon-class node reports capabilities a leaf does not', async () => {
+    const daemonNode = await getNodeInfo('node-porch'); // class: 'daemon'
+    const leafNode = await getNodeInfo('node-attic'); // class: 'leaf'
+    expect(daemonNode.capabilities).toEqual(expect.arrayContaining(['timer', 'gpio', 'i2c']));
+    expect(leafNode.capabilities).not.toEqual(expect.arrayContaining(['timer']));
+  });
+
+  it('rejects an unknown node id rather than resolving to something empty', async () => {
+    await expect(getNodeInfo('no-such-node')).rejects.toThrow();
+  });
+});
+
+// Known, already-reported shape drift (see `ServiceErrorReport`'s doc comment in `./types`,
+// found by `schema-parity.test.ts`, not this bead): the real daemon's `GET /services/{s}/errors`
+// answers one `ApiError`, not `{service, errors: [...]}`. Not fixed here — the fix belongs to
+// whoever owns `types.ts`/`NodeDashboard.svelte`, which are outside this bead's file list. These
+// tests pin the mock's own (guessed) contract as it exists today, since nothing did before.
+describe('getServiceErrors (eieio-m9s.17; the guessed {service, errors} shape is a known drift, not fixed here)', () => {
+  it('a healthy service reports no errors', async () => {
+    const report = await getServiceErrors('node-porch', 'kitchen');
+    expect(report.errors).toEqual([]);
+  });
+
+  it('an errored service names the failing instance with a restart count and a sensible message', async () => {
+    const report = await getServiceErrors('node-attic', 'attic-fan');
+    expect(report.errors).toHaveLength(1);
+    const [error] = report.errors;
+    expect(error?.instance).toBe('s1');
+    expect(error?.code).toBe('restart_limit');
+    expect(error?.message).toMatch(/restart budget/);
+    expect(error?.restarts).toBeGreaterThan(0);
+    expect(() => new Date(error!.last_error_at).toISOString()).not.toThrow();
   });
 });

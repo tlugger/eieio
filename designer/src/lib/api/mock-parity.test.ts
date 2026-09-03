@@ -79,13 +79,12 @@
 // **Reached** (driven at least once, every captured frame/response checked against both rules):
 // `listServices` (`ServiceSummary`, including a service whose `error` is populated — DAEMON §9's
 // eieio-m9s.12 amendment), `getNodeInfo` (`NodeInfo`), `getService`'s `.error` (`ApiError`), and
-// `streamTap`'s `signals`, `expr_failure` and `lagged` frames, and `streamLogs`'s `log` frame.
+// `streamTap`'s `signals`, `expr_failure`, `discarded` and `lagged` frames, and `streamLogs`'s
+// `log` frame. `discarded` (eieio-m9s.17) was the one of the five SSE event names `mock.ts` never
+// dispatched anywhere until this bead — see `mock.ts`'s own comment on the `tick % 7 === 0`
+// branch in `streamTap`'s `tickOnce` for which `DiscardReason` it manufactures and why.
 //
 // **Not reached, and why:**
-// - **`discarded`.** `mock.ts` has no `dispatch(sseFrame('discarded', ...))` call anywhere — the
-//   mock never manufactures a discard, so there is no frame for this file to inspect. This is a
-//   real gap in this check's reach (an invented or missing field on a `discarded` frame would
-//   pass unnoticed, because no such frame exists to fail), not a claim that one would pass.
 // - **`getService`'s own top-level shape (`ServiceDefinition`).** Not one of
 //   `response_shapes.rs`'s targets, and deliberately so — see that file's module doc: the daemon
 //   answers `{name, state, definition, autostart, error?}` and this shell's `ServiceDefinition`
@@ -291,9 +290,9 @@ describe('mock.ts SSE frames vs. the daemon\'s own Observation/What wire shapes 
     vi.useFakeTimers();
     const tapHandle = streamTap('node-porch', tap.tap_id, { onEvent: () => {}, onStatus: () => {} });
     // Long enough to cross the mock's own scripted disconnect/resume (8500ms + 2500ms after
-    // "open") and reach a tick count divisible by both 5 (signals + expr_failure, the missing-
-    // field case) and 11 (lagged) at least once each — proven empirically here by asserting
-    // `reachedEvents` below rather than trusted from the arithmetic alone.
+    // "open") and reach a tick count divisible by 5 (signals + expr_failure, the missing-field
+    // case), 7 (discarded) and 11 (lagged) at least once each — proven empirically here by
+    // asserting `reachedEvents` below rather than trusted from the arithmetic alone.
     for (let i = 0; i < 20; i++) {
       await vi.advanceTimersByTimeAsync(1000);
     }
@@ -316,15 +315,14 @@ describe('mock.ts SSE frames vs. the daemon\'s own Observation/What wire shapes 
     for (const frame of [...captured.tap, ...captured.log]) reachedEvents.add(frame.event);
   }, 30_000);
 
-  it('reaches signals, expr_failure and lagged on the tap stream and log on the log stream — and names the one SSE event mock.ts never emits at all', () => {
-    // `discarded` is never dispatched anywhere in `mock.ts` (no `sseFrame('discarded', ...)`
-    // call exists) — this is the gap this file's own module doc reports rather than hides: a
-    // wrong or missing field on a `discarded` frame would pass unnoticed today, because no such
-    // frame exists for this check to look at.
-    expect([...reachedEvents].sort()).toEqual(['expr_failure', 'lagged', 'log', 'signals']);
+  it('reaches signals, expr_failure, discarded and lagged on the tap stream, and log on the log stream', () => {
+    // eieio-m9s.17: `discarded` used to be the one SSE event name `mock.ts` never dispatched
+    // anywhere; `mock.ts`'s `streamTap` now manufactures one on the same tap connection, so this
+    // is the proof it is genuinely reachable rather than only present in the source.
+    expect([...reachedEvents].sort()).toEqual(['discarded', 'expr_failure', 'lagged', 'log', 'signals']);
   });
 
-  for (const event of ['signals', 'expr_failure', 'lagged'] as const) {
+  for (const event of ['signals', 'expr_failure', 'discarded', 'lagged'] as const) {
     it(`every captured "${event}" tap frame: no invented field, every daemon-required field present`, () => {
       const frames = captured.tap.filter((frame) => frame.event === event);
       expect(frames.length, `no "${event}" frame was captured`).toBeGreaterThan(0);

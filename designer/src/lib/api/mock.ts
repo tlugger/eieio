@@ -886,6 +886,34 @@ export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHand
       );
       return;
     }
+    // eieio-m9s.17: `discarded` (DAEMON §9.6, §6.2) was the one of the five event names
+    // `mock.ts` never dispatched anywhere — no test exercised it either, so a wrong or missing
+    // field there would have passed unnoticed the same way `streamLogs`'s `timestamp`/`at`
+    // mismatch did. `crates/daemon/src/observe.rs`'s `observe()` constructs `Observation` for
+    // `Event::Discarded` with `instance`/`port` from the *emitting* side (the same as every
+    // other event on this tap, not the receiver that refused it) and `what: What::Discarded
+    // { reason }`, where `reason` is one of `reason_of`'s four slugs (`unrouted`, `overflow`,
+    // `self_full`, `gone` — `crates/daemon/src/router.rs`'s `DiscardReason`). This tap's own
+    // service (the `SERVICES` fixture above) declares `overflow: 'drop-oldest'` when that is
+    // so, and `DiscardReason::Overflow` — "a newer batch replaced it on a drop-oldest
+    // connection" — is exactly the discard a real node running *this* service could produce on
+    // *this* connection, unlike `"gone"` (needs a dead receiver this fixture never models) or
+    // `"unrouted"`/`"self_full"` (need a different connection shape). A `backpressure` service
+    // has no drop-oldest slot to overflow, so its plausible cause is instead a receiver that
+    // is simply gone.
+    if (tick % 7 === 0) {
+      dispatch(
+        sseFrame('discarded', {
+          service: tap.service,
+          instance,
+          event: 'discarded',
+          at,
+          port: parsed?.fromPort ?? 'out',
+          reason: svc?.file.overflow === 'drop-oldest' ? 'overflow' : 'gone',
+        }),
+      );
+      return;
+    }
     if (tick % 11 === 0) {
       dispatch(
         sseFrame('lagged', {
@@ -1016,14 +1044,19 @@ export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStrea
     })}\n\n`;
   }
 
-  if (instances.length === 0 && nodeId) {
-    // No services on this node: still a valid, empty stream - not an error.
-  }
-
   handlers.onStatus('connecting');
   const openTimer = setTimeout(() => {
     if (stopped) return;
     handlers.onStatus('open');
+    // eieio-m9s.17: a node with no services used to fall into this same path anyway — the
+    // "still a valid, empty stream" comment that used to sit here was never wired to anything
+    // (`instances.length === 0 && nodeId` guarded an empty `if` body), so `lineAt` still ran
+    // with `instances[0]` undefined and dispatched lines whose `service`/`instance` were
+    // simply absent, rather than dispatching nothing. A behavioural test for `streamLogs`
+    // (`mock-logs.test.ts`) against an unknown node id is what surfaced this: the stream
+    // "opened" but was not actually empty. `return` here is the fix: open, and stay open with
+    // nothing to say, exactly what the removed comment already promised.
+    if (instances.length === 0) return;
     // "historical-then-streaming" (DESIGNER §6): backlog first, oldest to
     // newest, all as ordinary `log` frames through the same parser path.
     for (let i = 5; i >= 1; i--) dispatch(lineAt(i * 4000, 5 - i));
