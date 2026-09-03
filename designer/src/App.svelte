@@ -26,6 +26,7 @@
   import * as api from './lib/api/client';
   import { resolveManifest } from './lib/derive/capabilities';
   import { makePropertyNameResolver } from './lib/derive/props';
+  import { revalidateBeforeAct, type RevalidationOutcome } from './lib/api/manifests';
   import {
     addBlockOperations,
     connectOperations,
@@ -158,6 +159,55 @@
     }
   }
 
+  // --- Manifest-cache freshness (DESIGNER §3.3's amendment, eieio-m9s.22) -------------------
+  //
+  // Nothing in the cache invalidates itself: a reference pinned by digest never needs to, and
+  // a reference with a mutable tag is "unverified" from the moment it is stored, so a reader
+  // about to *act* on a cached manifest revalidates first (§3.3). `revalidateBeforeAct`
+  // (`lib/api/manifests.ts`) is the pure decision; this is where it is given a node to ask,
+  // through `client.ts`'s `getNodeCachedBlocks` — the catch-all proxy and nothing else,
+  // DESIGNER §3.3's absolute rule.
+  //
+  // A **display** never calls this — `manifests` as loaded by `loadAll` and rendered by
+  // `BlockLibrary`'s palette is untouched. The three sites that do are the ones §3.3 names as
+  // claims about a block that is running or about to run: `handleConfigure` (the config
+  // modal's ports and properties), `handleStart` (the capability check a deploy makes, which
+  // `ServiceCanvas`'s badge renders once `manifests` here is updated), and
+  // `handleTapConnection` (so `resolvePropName`, below, has the freshest manifest available by
+  // the time a tapped connection's `expr_failure` events start arriving — eieio-m9s.14's
+  // fallback stays in place regardless, see this bead's final report for why).
+  async function ensureFreshManifest(reference: string): Promise<void> {
+    if (!selectedNode || selectedNode.class === 'leaf') return; // DESIGNER §3.1: a leaf serves no management API to ask.
+    const cached = manifests.find((m) => m.block_ref === reference);
+    if (!cached) return; // Nothing cached for this reference — the palette's browse flow owns fetching it, not this one.
+    const nodeId = String(selectedNode.id);
+    let outcome: RevalidationOutcome;
+    try {
+      outcome = await revalidateBeforeAct({
+        reference,
+        cachedManifest: cached,
+        fetchInstalled: () => api.getNodeCachedBlocks(nodeId),
+      });
+    } catch (error) {
+      // `revalidateBeforeAct` itself never throws (its own `fetchInstalled` call is caught),
+      // but a defensive fallback keeps a bug in this wiring from blocking the act it wraps —
+      // §3.3's whole point is that a failed revalidation must not do that.
+      outcome = { status: 'unreachable', reason: error instanceof Error ? error.message : String(error) };
+    }
+    if (outcome.status !== 'updated') return;
+    const refreshed = { ...(outcome.manifest as object), block_ref: reference } as BlockManifest;
+    manifests = manifests.map((m) => (m.block_ref === reference ? refreshed : m));
+    // Best-effort: the in-memory palette is already corrected regardless of whether this
+    // write lands, and a failed re-cache is not a reason to have skipped the correction above.
+    await api.putCachedManifest(reference, outcome.manifest).catch(() => {});
+  }
+
+  /** Every distinct block reference a service actually uses — the set `handleStart` and
+   *  `handleTapConnection` revalidate before their respective acts. */
+  function serviceBlockRefs(def: ServiceDefinition): string[] {
+    return [...new Set(Object.values(def.blocks).map((b) => b.block))];
+  }
+
   // --- The one path every canvas edit takes (DESIGNER §3.2, §4) ----------
 
   // `applyEdit` calls are chained through this rather than fired
@@ -226,8 +276,13 @@
   // --- Lifecycle (Toolbar) -------------------------------------------------
 
   async function handleStart() {
-    if (!selected) return;
+    if (!selected || !currentService) return;
     await withBusy(async () => {
+      // DESIGNER §3.3's amendment: "checking its capabilities against a node before a deploy"
+      // is one of the three claims a stale manifest can get wrong, and starting a service is
+      // exactly that check's moment — `ServiceCanvas`'s capability badges re-render off the
+      // same `manifests` this refreshes.
+      await Promise.all(serviceBlockRefs(currentService!).map((ref) => ensureFreshManifest(ref)));
       await api.startService(String(selected!.nodeId), selected!.serviceName);
       currentService = await api.getService(String(selected!.nodeId), selected!.serviceName);
       await refreshServiceList(selected!.nodeId);
@@ -292,9 +347,14 @@
   // resolver and hands it down as a single function prop.
   const resolvePropName = $derived(makePropertyNameResolver(currentService?.blocks ?? {}, manifests));
 
-  function handleConfigure(id: string) {
+  async function handleConfigure(id: string) {
     editErrorMessage = null;
     editErrorBlockId = null;
+    // DESIGNER §3.3's amendment: the config modal renders a block's ports and properties,
+    // one of the three claims a stale manifest can get wrong — revalidate before showing it,
+    // not after.
+    const blockRef = currentService?.blocks[id]?.block;
+    if (blockRef) await ensureFreshManifest(blockRef);
     configuringInstanceId = id;
   }
 
@@ -336,7 +396,15 @@
       return;
     }
     tappedConnection = connection;
-    if (connection) inspectorOpen = true;
+    if (connection) {
+      inspectorOpen = true;
+      // DESIGNER §3.3's amendment + §6: a tap's `expr_failure` events resolve a `prop` index
+      // to a property name off `resolvePropName`, above — one of the three claims a stale
+      // manifest gets wrong. Fired without awaiting: opening the tap must not wait on a
+      // network round trip, and eieio-m9s.14's index fallback covers whatever arrives before
+      // this resolves.
+      if (currentService) void Promise.all(serviceBlockRefs(currentService).map((ref) => ensureFreshManifest(ref)));
+    }
   }
 
   function handleReleaseTap() {

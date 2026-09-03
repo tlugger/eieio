@@ -14,6 +14,7 @@
   import ExpressionField from './ExpressionField.svelte';
   import type { BlockInstance, BlockManifest, Connection } from '../api/types';
   import { ERROR_PORT } from '../api/types';
+  import { describeVerification } from '../api/manifests';
 
   interface Props {
     instance: BlockInstance;
@@ -97,6 +98,14 @@
     fields: string[] | undefined;
   }
 
+  // DESIGNER §3.3's amendment: say "unverified" rather than imply a freshness the cache
+  // cannot back up. `App.svelte` revalidates a mutable-tag reference's manifest before this
+  // modal opens (`handleConfigure`) — this label is what tells the operator that already
+  // happened and what it did *not* rule out: the reference can still move again before this
+  // block runs, which a digest pin never can (no label needed there — pinned is the case
+  // §3.3 says to steer toward).
+  const verification = $derived(describeVerification(instance.block));
+
   const upstream = $derived.by((): UpstreamField[] => {
     const inputs = manifest?.inputs ?? [];
     const rows: UpstreamField[] = [];
@@ -150,6 +159,13 @@
         />
         <div class="modal__type">
           {manifest?.name ?? instance.block} · <code>{instance.id}</code>
+          {#if verification === 'unverified'}
+            <span
+              class="modal__verification"
+              title="This block's reference uses a mutable tag rather than a digest. It was just revalidated against the node, but a tag can move again before this block runs."
+              >unverified</span
+            >
+          {/if}
         </div>
       </div>
       <button
@@ -294,6 +310,17 @@
   .modal__type {
     font-size: 11px;
     color: var(--chrome-text-muted);
+  }
+
+  .modal__verification {
+    margin-left: 0.4em;
+    padding: 0.05em 0.4em;
+    border-radius: 3px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--chrome-text-muted);
+    border: 1px solid var(--chrome-border);
   }
 
   .modal__docs-toggle {
