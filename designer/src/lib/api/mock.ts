@@ -246,6 +246,31 @@ const NODE_FIXTURES: NodeFixture[] = [
     // `last_seen` omitted entirely, not null — see `NodeSummary.last_seen`'s doc.
     actualLimits: { max_payload: 4096, max_batch: 16 },
   },
+  {
+    id: 104,
+    slug: 'node-cellar',
+    system_id: 1,
+    name: 'cellar-pi',
+    // `daemon`, not `leaf`, and the distinction is not cosmetic: a leaf serves no HTTP at all
+    // (LEAF §7) and DESIGNER §3.1 has the Designer refuse one by name rather than dial it, so
+    // `POST /api/nodes/{id}/probe` can never succeed against one. A leaf carrying `last_seen`
+    // and a probed capability list would be a fixture depicting something that cannot happen —
+    // and the whole point of a fixture is that a developer sees the real thing.
+    class: 'daemon',
+    address: 'http://cellar-pi.lan:7777',
+    last_seen: '2026-08-24T11:03:19Z',
+    // eieio-m9s.23: **confirmed**, not absent — probed successfully, and the probe answered
+    // exactly what a real daemon answers. `crates/daemon/src/instance.rs`'s
+    // IMPLEMENTED_CAPABILITIES is `[state, timer]` and nothing else, and ABI §7 now says so in
+    // as many words: gpio, i2c and http are specified but hosted by no node. Paired with
+    // `gpio-echo:1.0.0` (needs `gpio`, MANIFESTS above) this reaches
+    // `missingCapabilities`'s third state — a populated array — which nothing reached before,
+    // because every other node fixture here claims capabilities no daemon implements. That is
+    // its own problem and is filed separately; this fixture is the honest one.
+    capabilities: ['state', 'timer'],
+    limits: { max_payload: 2048, max_batch: 8 },
+    actualLimits: { max_payload: 2048, max_batch: 8 },
+  },
 ];
 
 const NODES: NodeSummary[] = NODE_FIXTURES.map(({ slug: _slug, actualLimits: _actualLimits, ...n }) => n);
@@ -368,10 +393,11 @@ const SERVICES: Record<string, MockService[]> = {
       // gpio-echo's block card exercises the *unknown*-compatibility badge here now, not the
       // "confirmed missing" one, since there is no capability list to check `gpio` against.
       // (`node-porch`'s `porch-pi` has every capability every fixture manifest needs, so a
-      // "confirmed missing capability" demo is not covered by any fixture service today — a gap
-      // this comment reports rather than quietly leaving unexplained, since it is a visible
-      // consequence of picking closet-relay as the "never probed" node instead of adding a
-      // fourth.)
+      // "confirmed missing capability" demo needed a fourth node rather than a service here —
+      // eieio-m9s.23 added `cellar-pi` (`node-cellar`, above) for exactly that: probed,
+      // confirmed to have only `state`, so gpio-echo's own `gpio` requirement is a confirmed
+      // miss there. No service references `node-cellar` — the palette's capability filter reads
+      // `NodeSummary.capabilities` directly and has no need of one.)
       state: 'stopped',
       file: {
         name: 'relay-control',

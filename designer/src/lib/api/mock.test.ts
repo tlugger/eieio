@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, beforeAll } from 'vitest';
 import { initSync } from '../../../../crates/expr-wasm/pkg/eio_expr_wasm.js';
+import { missingCapabilities, resolveManifest } from '../derive/capabilities';
 import {
   getNodeInfo,
   getService,
@@ -255,6 +256,40 @@ describe('listBlockManifests / listSystems / listNodes — the palette and topol
     // And it is not alone in the mix — at least one node in the same fixture set has been
     // probed, so "absent" reads as this node's own fact, not a global default gone missing.
     expect(nodes.some((n) => n.capabilities !== undefined)).toBe(true);
+  });
+
+  // eieio-m9s.23: before this bead, no fixture reached `missingCapabilities`'s third answer — a
+  // populated array, "confirmed, missing X" — because no *probed* node's capability list fell
+  // short of what a cached manifest declares. `closet-relay` covers `undefined` (never probed);
+  // every other node/manifest pair here resolves to `[]` (confirmed, nothing missing). This is
+  // the one case that was simply unreachable, not merely untested.
+  it('cellar-pi is probed with exactly what a real daemon reports, and gpio-echo is a confirmed miss there', async () => {
+    const [system] = await listSystems();
+    const nodes = await listNodes(system!.id);
+    const cellar = nodes.find((n) => n.name === 'cellar-pi');
+    expect(cellar).toBeDefined();
+    // Confirmed, not unknown — and exactly what a real daemon reports:
+    // `crates/daemon/src/instance.rs`'s IMPLEMENTED_CAPABILITIES is `[state, timer]` and
+    // nothing more (ABI §7). Asserted against that constant's real value rather than a shorter
+    // list picked to make the arithmetic work, because a fixture is only useful if it is the
+    // thing a developer would actually meet.
+    expect(cellar?.capabilities).toEqual(['state', 'timer']);
+
+    const manifests = await listBlockManifests();
+    const gpioEcho = resolveManifest('gpio-echo:1.0.0', manifests);
+    expect(gpioEcho).toBeDefined();
+
+    const missing = missingCapabilities(gpioEcho, cellar?.capabilities);
+    // Confirmed-missing: a populated array, not `undefined` (unknown) and not `[]` (confirmed
+    // compatible) — the state eieio-m9s.20's fixtures could not reach on their own.
+    expect(missing).toEqual(['gpio']);
+
+    // And the other two states stay reachable from the same manifest, against the fixtures that
+    // already covered them — this fourth node adds the missing state, it does not replace either.
+    const closet = nodes.find((n) => n.name === 'closet-relay');
+    expect(missingCapabilities(gpioEcho, closet?.capabilities)).toBeUndefined();
+    const porch = nodes.find((n) => n.name === 'porch-pi');
+    expect(missingCapabilities(gpioEcho, porch?.capabilities)).toEqual([]);
   });
 });
 

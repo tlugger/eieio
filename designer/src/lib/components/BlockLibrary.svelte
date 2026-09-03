@@ -15,8 +15,8 @@
   // that does not cover the canvas, which is a bigger change than this
   // issue's scope of "the palette, with capability badges".
   import { deriveAbbreviation } from '../derive/abbreviation';
-  import { missingCapabilities } from '../derive/capabilities';
-  import type { BlockManifest, Capability, NodeSummary } from '../api/types';
+  import { filterPalette } from '../derive/palette';
+  import type { BlockManifest, NodeSummary } from '../api/types';
 
   interface Props {
     manifests: BlockManifest[];
@@ -29,22 +29,18 @@
   let { manifests, node, onSelect, onClose }: Props = $props();
 
   let query = $state('');
+  /** "Only what this node can run" — disabled in the template when `node` is `null`, since there
+   *  is nothing to check compatibility against. */
+  let onlyRunnable = $state(false);
 
-  const filtered = $derived(
-    manifests.filter((m) => {
-      const q = query.trim().toLowerCase();
-      if (q.length === 0) return true;
-      return m.name.toLowerCase().includes(q) || (m.description ?? '').toLowerCase().includes(q);
-    }),
-  );
-
-  /** `undefined` means `node` has never answered a probe (`NodeSummary.capabilities`,
-   *  eieio-m9s.20) — compatibility is unknown, not "this node can run nothing". The template
-   *  below renders that as its own neutral note, never as the red warning `unmet.length > 0`
-   *  gets. */
-  function missing(manifest: BlockManifest): Capability[] | undefined {
-    return node ? missingCapabilities(manifest, node.capabilities) : [];
-  }
+  // eieio-m9s.21: derived from `manifests` — the manifest cache this component is handed — on
+  // every read, never copied into this component's own state (DESIGNER §2 makes the cache the
+  // source; a filtered duplicate would be a second thing to keep in step with it). The search
+  // rule and the capability-filter's unknown-compatibility decision both live in
+  // `lib/derive/palette.ts`, tested there as pure functions — see that module's doc for why
+  // "only what this node can run" excludes a block whose compatibility is merely unconfirmed,
+  // and why `hiddenUnknownCount` exists so this component never renders that silently.
+  const filtered = $derived(filterPalette(manifests, node, { query, onlyRunnable }));
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') onClose();
@@ -77,14 +73,35 @@
         aria-label="Search blocks"
         class="library__search"
       />
+      <label
+        class="library__runnable-toggle"
+        title={node ? undefined : 'Select a node to filter by what it can run'}
+      >
+        <input type="checkbox" bind:checked={onlyRunnable} disabled={!node} aria-label="Only what this node can run" />
+        Only what this node can run
+      </label>
       <button class="library__close" title="Close block library" aria-label="Close block library" onclick={onClose}>
         ✕
       </button>
     </div>
 
+    <!-- eieio-m9s.21: "only runnable" excludes a block whose compatibility with `node` is merely
+         unconfirmed, not only one confirmed missing (see `filterPalette`'s doc for why). That
+         choice can hide blocks with no comment on *why* they vanished, which would silently read
+         as "this node can run nothing" when the truth is "nobody has probed it" — this note is
+         what keeps that from being silent. -->
+    {#if onlyRunnable && filtered.hiddenUnknownCount > 0}
+      <div class="library__unknown-filtered">
+        {filtered.hiddenUnknownCount}
+        {filtered.hiddenUnknownCount > 1 ? 'blocks' : 'block'} hidden — compatibility with {node?.name} is unknown (it
+        has never been probed), not confirmed incompatible.
+      </div>
+    {/if}
+
     <ul class="library__list">
-      {#each filtered as manifest (manifest.block_ref)}
-        {@const unmet = missing(manifest)}
+      {#each filtered.entries as entry (entry.manifest.block_ref)}
+        {@const manifest = entry.manifest}
+        {@const unmet = entry.missing}
         <li>
           <button type="button" class="library__row" onclick={() => onSelect(manifest.block_ref)}>
             <div class="library__swatch">{deriveAbbreviation(manifest.name)}</div>
@@ -111,7 +128,7 @@
                 <div class="library__unknown">
                   {node?.name} has never been probed — capability compatibility is unknown.
                 </div>
-              {:else if unmet.length > 0}
+              {:else if unmet && unmet.length > 0}
                 <div class="library__warning" role="alert">
                   {node?.name} is missing capabilit{unmet.length > 1 ? 'ies' : 'y'}: {unmet.join(', ')}
                 </div>
@@ -120,8 +137,16 @@
           </button>
         </li>
       {/each}
-      {#if filtered.length === 0}
-        <li class="library__empty">No blocks match "{query}".</li>
+      {#if filtered.entries.length === 0}
+        <li class="library__empty">
+          {#if query.trim().length > 0 && onlyRunnable}
+            No blocks match "{query}" and are confirmed to run on {node?.name}.
+          {:else if query.trim().length > 0}
+            No blocks match "{query}".
+          {:else if onlyRunnable}
+            No blocks are confirmed to run on {node?.name}.
+          {/if}
+        </li>
       {/if}
     </ul>
   </div>
@@ -165,6 +190,33 @@
     border-radius: 6px;
     background: var(--chrome-bg);
     color: var(--chrome-text);
+  }
+
+  .library__runnable-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--chrome-text-muted);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .library__runnable-toggle:has(input:disabled) {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+
+  /* Same muted, italic treatment as the per-row `.library__unknown` note — the filter hid these
+     blocks because compatibility is unconfirmed, not because it is confirmed incompatible, and
+     the two must never read the same way (eieio-m9s.21, eieio-m9s.20). */
+  .library__unknown-filtered {
+    padding: 6px 10px;
+    font-size: 10px;
+    color: var(--chrome-text-muted);
+    font-style: italic;
+    border-bottom: 1px solid var(--chrome-border);
   }
 
   .library__close {
