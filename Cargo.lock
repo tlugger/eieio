@@ -1162,6 +1162,8 @@ dependencies = [
  "eio-host-core",
  "eio-manifest",
  "eio-signal",
+ "serde",
+ "serde_json",
  "wasm3x",
 ]
 

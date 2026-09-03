@@ -57,5 +57,12 @@ wasm3x = "0.1.0"
 # of a crate that otherwise has nothing to do with it.
 eio-conformance.workspace = true
 
+# Tests only. `expr-tests/`'s three corpora (LEAF §9's suite 2) are JSON data files and
+# `tests/expr_vectors.rs`, `tests/properties_vectors.rs` and `tests/cbor_vectors.rs` are what
+# execute them — the same reason `crates/expr`, `crates/host-core` and `crates/signal` carry
+# this pair as dev-dependencies for their own copies of this corpus.
+serde.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true
