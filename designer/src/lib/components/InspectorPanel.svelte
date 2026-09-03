@@ -16,6 +16,7 @@
   // path to remember.
   import * as api from '../api/client';
   import type { LogLineEvent, StreamHandle, StreamStatus, TapStreamEvent, TappedConnection } from '../api/types';
+  import type { PropertyNameResolver } from '../derive/props';
 
   interface Props {
     open: boolean;
@@ -25,9 +26,16 @@
     selectedBlockId: string | null;
     onClose: () => void;
     onReleaseTap: () => void;
+    /** eieio-m9s.14: `(instanceId, prop) => name`, built by the caller from the
+     * service's blocks and the manifest cache it already holds (`lib/derive/props.ts`).
+     * This panel stays ignorant of manifests — an unresolved pair (out of range,
+     * unknown instance, no cached manifest) comes back `undefined`, and this panel
+     * falls back to the bare index rather than rendering nothing or guessing. */
+    resolvePropName: PropertyNameResolver;
   }
 
-  let { open, nodeId, serviceName, tappedConnection, selectedBlockId, onClose, onReleaseTap }: Props = $props();
+  let { open, nodeId, serviceName, tappedConnection, selectedBlockId, onClose, onReleaseTap, resolvePropName }: Props =
+    $props();
 
   interface PanelLine {
     id: number;
@@ -91,23 +99,34 @@
     switch (event.type) {
       case 'signals':
         return { id: nextId(), timestamp, level: 'SIGNAL', label: sourceLabel, payload: JSON.stringify(event.signals), kind: 'signal' };
-      case 'expr_failure':
+      case 'expr_failure': {
+        // The one line this whole panel exists for (EXPR §6 / DAEMON §6.3):
+        // which property, on which signal, and why - never buried among
+        // ordinary traffic.
+        // `prop` is the descriptor's numeric property index; the daemon has no name to
+        // send (DAEMON §9.6). This used to read an invented `event.property` name, so the
+        // prefix was empty against every real node — the one line this panel exists for,
+        // silently missing its subject. eieio-m9s.14 resolves the index through
+        // `resolvePropName` (the service's blocks -> `block_ref` -> the cached manifest ->
+        // `properties[prop].name`, `lib/derive/props.ts`), and falls back to the honest
+        // bare index — never a name it is not sure of — when that resolution fails for
+        // any reason: out of range, an unknown instance, or no cached manifest.
+        const name = event.prop !== undefined ? resolvePropName(event.instance, event.prop) : undefined;
+        const propLabel = event.prop === undefined ? '' : name !== undefined ? `${name}: ` : `prop ${event.prop}: `;
+        // `signal` is which signal of the batch the failure was for, when it was
+        // per-signal (DAEMON §6.3: "the most useful thing a tap can show"). Rendered
+        // ahead of the property label, since which record and which property are two
+        // independent facts about the same failure.
+        const signalLabel = event.signal !== undefined ? `signal ${event.signal}, ` : '';
         return {
           id: nextId(),
           timestamp,
           level: 'ERROR',
           label: `${serviceName ?? '?'}.${event.instance ?? '?'}`,
-          // The one line this whole panel exists for (EXPR §6 / DAEMON §6.3):
-          // which property, on which signal, and why - never buried among
-          // ordinary traffic.
-          // `prop` is the descriptor's numeric property index; the daemon has no name to
-          // send (DAEMON §9.6). This used to read an invented `event.property` name, so the
-          // prefix was empty against every real node — the one line this panel exists for,
-          // silently missing its subject. Resolving the index to a name needs the block's
-          // manifest, which this component is not given: eieio-m9s.14.
-          payload: `${event.prop !== undefined ? `prop ${event.prop}: ` : ''}${event.message} [${event.code}]`,
+          payload: `${signalLabel}${propLabel}${event.message} [${event.code}]`,
           kind: 'error',
         };
+      }
       case 'lagged':
         // §9.6: "That count is the sampling report" - stated as a count,
         // never rendered as if nothing had been missed.

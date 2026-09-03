@@ -25,6 +25,7 @@
   import NodeDashboard from './lib/components/NodeDashboard.svelte';
   import * as api from './lib/api/client';
   import { resolveManifest } from './lib/derive/capabilities';
+  import { makePropertyNameResolver } from './lib/derive/props';
   import {
     addBlockOperations,
     connectOperations,
@@ -265,6 +266,13 @@
     configuringInstance ? resolveManifest(configuringInstance.block, manifests) : undefined,
   );
 
+  // eieio-m9s.14: InspectorPanel renders a tap's `expr_failure` lines and needs a
+  // property index resolved to a name, but it is given no manifest or block list of
+  // its own (`lib/derive/props.ts`'s doc comment records why). This is the one place
+  // that has both `currentService.blocks` and `manifests` already, so it builds the
+  // resolver and hands it down as a single function prop.
+  const resolvePropName = $derived(makePropertyNameResolver(currentService?.blocks ?? {}, manifests));
+
   function handleConfigure(id: string) {
     editErrorMessage = null;
     editErrorBlockId = null;
@@ -378,6 +386,7 @@
     {selectedBlockId}
     onClose={handleCloseInspector}
     onReleaseTap={handleReleaseTap}
+    {resolvePropName}
   />
 </main>
 
