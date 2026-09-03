@@ -132,6 +132,10 @@ Two node classes, one wire protocol:
 
 The Designer flow is identical for both: design a service (subscriber/sensor blocks → logic → publisher/actuator blocks), deploy. For leaf targets, "deploy" runs a firmware build+flash pipeline instead of a config push. Extra flashing steps are acceptable; a different design flow is not.
 
+**A client that can name a node records its class, and refuses a leaf by name rather than dialling it.** A leaf serves no HTTP at all (LEAF §7), so an HTTP client pointed at one gets a connection error indistinguishable from a node that is down — reporting a fault against a device working exactly as designed, which is the most expensive kind of wrong answer to debug. The Designer already refuses one (DESIGNER §3.1); the `eio` CLI's `~/.config/eieio/nodes.toml` records no class, so it does not, and §4's peer-client rule makes that asymmetry a bug rather than a difference. So **a node entry carries an optional `class`, `"daemon"` or `"leaf"`, and an absent one means `"daemon"`** — every file that exists today keeps working and keeps meaning what it meant. `eio` refuses a `leaf` entry by naming the class and the reason, not by reporting a failed request.
+
+Optional-with-a-default rather than required, because the alternative is worse in both directions: making it required breaks every existing file to describe the case nobody has yet, and inferring it from a refused connection cannot tell a leaf from a daemon that is genuinely down — which is the whole problem, restated as a guess.
+
 Specified in `docs/specs/LEAF-SPEC.md`.
 
 - **OPEN:** the **flash wear budget policy** — how much writing is too much, over what window, and what a leaf does when a block ignores repeated refusals. ABI §7.2 already gives a leaf host the vocabulary (`ERR_THROTTLED`, refused rather than silently dropped) and LEAF §5 already requires it be used; what is unsettled is the *policy behind* the refusal. Deferred deliberately: the answer depends on the flash part and the write pattern, and neither exists to measure yet. Until it does, a leaf refuses on whatever budget it was built with and blocks may assume only that a refusal is possible.

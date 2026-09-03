@@ -124,7 +124,7 @@ A leaf serves no HTTP. DAEMON §9's entire surface is absent, and that is a desi
 
 **Consequences that other specs already encode**, restated here so a leaf implementer meets them in one place:
 
-- DESIGNER §3.1: the Designer's proxy and its node probe both **refuse a leaf by name** rather than dialling it. A leaf's address over HTTP would give a connection error indistinguishable from a node that is down, reporting a fault against a node working exactly as designed. (The `eio` CLI has no such guard today: `~/.config/eieio/nodes.toml` records no class, and every node it can name is one that answers. Adding a leaf to it is a mistake nothing currently catches — an §11 item, not a claim.)
+- DESIGNER §3.1: the Designer's proxy and its node probe both **refuse a leaf by name** rather than dialling it. A leaf's address over HTTP would give a connection error indistinguishable from a node that is down, reporting a fault against a node working exactly as designed. (The `eio` CLI now has the same guard, for the same reason: `nodes.toml` carries an optional `class` per node, absent meaning `"daemon"`, and `eio` refuses a `"leaf"` entry by naming the class. SCOPE §3.7.)
 - DAEMON §7.1: only a daemon-class node is eligible to be the pub/sub broker. A leaf is never a candidate.
 - Observability is the wire protocol's (§8), not an endpoint's.
 
@@ -183,5 +183,5 @@ Needed before implementation, and deliberately not guessed at in this draft:
 - **The transport client** (§8), once one has been measured.
 - **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on. **A host bring-up cannot stand in for this one**, measured rather than assumed: `wasm3x` 0.1.0 exposes no interruption, abort or termination entry point at all, so nothing outside a running guest call can end it, and the host leaf therefore answers `enforces_budgets = false` and has ABI §13's budget scenario skipped by name — which is §4's honest-binding rule working as intended, not a gap in the leaf. The watchdog becomes implementable at the same moment the target does: a hardware timer and an engine that can be told to stop.
 - **Observability without an API** (§7): what a leaf publishes about itself, and on which topic.
-- **A class-aware CLI** (§7): `nodes.toml` records no node class, so `eio` will happily try to reach a leaf. Either it learns the class or it stays a documented sharp edge.
+- ~~**A class-aware CLI**~~ — **resolved** (eieio-x7g.5): it learns the class. A node entry in `nodes.toml` carries an optional `class`, `"daemon"` or `"leaf"`, absent meaning `"daemon"`, and `eio` refuses a leaf by naming the class rather than reporting a failed request. SCOPE §3.7 records the decision and why the two alternatives — requiring the key, or inferring the class from a refused connection — are each worse.
 - **Flash layout**: where AOT artifacts, state and configuration sit, and how a firmware update treats existing state.

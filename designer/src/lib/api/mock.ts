@@ -767,15 +767,38 @@ export async function deleteTap(nodeId: string, tapId: string): Promise<void> {
  * refer to here" — see `PortDescriptor.fields`'s doc comment in `./types`).
  * `omitField`, when given, drops that key — how the mock manufactures the
  * "missing data" case EXPR §6 exists for. */
-function sampleSignal(manifest: BlockManifest | undefined, sourcePort: string, tick: number, omitField?: string): Record<string, unknown> {
+/** One signal as the wire carries it: a **string**, not an object.
+ *
+ * `What::Signals.signals` is a `Vec<String>` of EXPR §7.6 canonical renderings — DAEMON §9.6
+ * says so, and `observe.rs` builds each with `eio_expr::render`. This fixture returned a raw
+ * `Record<string, unknown>` until eieio-m9s.19, so every mock `signals` frame carried objects
+ * where a daemon sends text, and it went unnoticed because the decoder cast an unchecked
+ * `Array.isArray` result straight to `string[]`. The element check added by that bead is what
+ * surfaced it — the fifth field-shape drift in this fixture found by making something verify
+ * rather than assume.
+ *
+ * Rendered here rather than imported from `expr-wasm`: nothing in the Designer *parses* this
+ * string (`InspectorPanel` prints it), so what a fixture owes the decoder is a value of the
+ * right *type*, and a second canonical renderer in TypeScript would be exactly the extra
+ * source of truth EXPR §7.6 exists to prevent. Keys are emitted in sorted order because EXPR
+ * §2 iterates maps that way, so the shape reads like the real thing. */
+function sampleSignal(manifest: BlockManifest | undefined, sourcePort: string, tick: number, omitField?: string): string {
   const fields = manifest?.outputs.find((p) => p.name === sourcePort)?.fields ?? [];
-  if (fields.length === 0) return { value: Math.round(Math.sin(tick / 3) * 100) / 10 };
+  if (fields.length === 0) return render({ value: Math.round(Math.sin(tick / 3) * 100) / 10 });
   const out: Record<string, unknown> = {};
   for (const field of fields) {
     if (field === omitField) continue;
     out[field] = field === 'temp' ? Math.round((18 + Math.sin(tick / 2) * 6) * 10) / 10 : tick % 7;
   }
-  return out;
+  return render(out);
+}
+
+/** `{k: v, ...}`, keys sorted — the shape of EXPR §7.6's rendering, for a fixture. */
+function render(value: Record<string, unknown>): string {
+  const pairs = Object.keys(value)
+    .sort()
+    .map((key) => `${key}: ${String(value[key])}`);
+  return `{${pairs.join(', ')}}`;
 }
 
 /** The downstream property (if any) whose expression reads `$<field>` for

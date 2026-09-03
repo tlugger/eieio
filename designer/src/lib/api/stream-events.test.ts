@@ -20,10 +20,14 @@ function wire(event: string, own: Record<string, unknown>): SseFrame {
 
 describe('decodeTapFrame', () => {
   it('decodes a signals event', () => {
-    expect(decodeTapFrame(wire('signals', { signals: [{ temp: 21.5 }] }))).toEqual({
+    // `What::Signals.signals` is `Vec<String>` (EXPR §7.6's canonical rendering, DAEMON §9.6)
+    // — this fixture used to pass a raw object here, a shape the daemon does not send and
+    // that eieio-m9s.19's element check now rejects; see the "rejects a signals element..."
+    // test below for that rejection pinned directly.
+    expect(decodeTapFrame(wire('signals', { signals: ['{temp: 21.5}'] }))).toEqual({
       type: 'signals',
       ...ENVELOPE,
-      signals: [{ temp: 21.5 }],
+      signals: ['{temp: 21.5}'],
     });
   });
 
@@ -91,6 +95,40 @@ describe('decodeTapFrame', () => {
     expect(decodeTapFrame(wire('expr_failure', { message: 'no code' }))).toBeNull();
     // And a frame missing the §9.6 envelope the daemon always sends is malformed too.
     expect(decodeTapFrame(frame('signals', { signals: [] }))).toBeNull();
+  });
+
+  // eieio-m9s.19: `signals`, `reason` and `missed` are required on the wire (none of
+  // `What::Signals.signals`, `What::Discarded.reason`, `What::Lagged.missed` carries
+  // `skip_serializing_if`), so a frame missing one is malformed — the same `null` every other
+  // missing required field already answers, not a well-formed-looking stand-in.
+  it('rejects a signals frame missing `signals`, rather than reading an empty batch', () => {
+    expect(decodeTapFrame(wire('signals', {}))).toBeNull();
+    // Sanity: the same frame WITH the field decodes fine, so the rejection above is really
+    // about the missing field and not some other malformation of this fixture.
+    expect(decodeTapFrame(wire('signals', { signals: [] }))).not.toBeNull();
+  });
+
+  it("rejects a signals frame whose `signals` elements are not strings, matching the wire's Vec<String>", () => {
+    // `Array.isArray` alone would pass this through and mislabel a malformed element as a
+    // real rendered signal; the daemon never sends anything but rendered strings here
+    // (EXPR §7.6, DAEMON §9.6).
+    expect(decodeTapFrame(wire('signals', { signals: [{ temp: 21.5 }] }))).toBeNull();
+    expect(decodeTapFrame(wire('signals', { signals: ['{temp: 21.5}', 42] }))).toBeNull();
+  });
+
+  it('rejects a discarded frame missing `reason`, rather than reading "unknown"', () => {
+    expect(decodeTapFrame(wire('discarded', {}))).toBeNull();
+    expect(decodeTapFrame(wire('discarded', { reason: 'drop-oldest' }))).not.toBeNull();
+  });
+
+  it('rejects a lagged frame missing `missed`, rather than reading a lag count of zero', () => {
+    // The one this bead exists for (DAEMON §9.6): `missed` is "the sampling report", and a
+    // reader decoding an absent count as 0 would be told it lost nothing — the opposite of
+    // what a `lagged` event exists to say.
+    expect(decodeTapFrame(wire('lagged', {}))).toBeNull();
+    expect(decodeTapFrame(wire('lagged', { missed: 0 }))).toEqual(
+      expect.objectContaining({ type: 'lagged', missed: 0 }),
+    );
   });
 
   it('decodes the common Observation fields (service, instance, at, port) alongside a signals event', () => {

@@ -128,10 +128,16 @@ let daemonSseRequired: Record<string, string[]>;
 // file's own `beforeAll` doc): `just ci`'s stages run in parallel, so nothing guarantees the
 // generated file exists or is fresh by the time this suite runs.
 beforeAll(() => {
-  execSync('cargo test -p eio-cli --test response_shapes', {
-    cwd: REPO_ROOT,
-    stdio: 'pipe',
-  });
+  // Skipped when the harness already generated it (`just ci`'s `shapes` recipe sets this).
+  // Shelling out to cargo here while the `test` stage holds the target-directory lock is
+  // what timed this hook out on CI; regenerating remains the default so a bare `npm test`
+  // is still self-sufficient and never compares against a stale file.
+  if (!process.env.EIO_SHAPES_PREGENERATED) {
+    execSync('cargo test -p eio-cli --test response_shapes', {
+      cwd: REPO_ROOT,
+      stdio: 'pipe',
+    });
+  }
   const parsed = JSON.parse(readFileSync(GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
   daemonShapes = parsed as Record<string, string[]>;
   daemonRequired = (parsed.required as Record<string, string[]> | undefined) ?? {};

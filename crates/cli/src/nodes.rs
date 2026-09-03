@@ -19,12 +19,16 @@
 //! fields into DESIGNER §3.1's `POST /api/nodes` body, which is JSON. So this format *is*
 //! nearly that body, on purpose: each entry is named `address`/`token` rather than
 //! `nodes.toml`'s own internal `addr`/`token`, so an entry already reads as `POST /api/nodes`'s
-//! `{ name, address, token }` with only `system_id` and `class` missing — the two fields a
-//! name-only config file has no model for. `system_id` is a Designer-side grouping this file
-//! has never heard of; `class` is omitted rather than guessed at `"daemon"`, because every node
-//! `nodes.toml` can name answers a probe (`eio node info` calls `GET /node`), and DESIGNER
-//! §3.1 says a `leaf` answers none — so `nodes.toml` never holds one, and inventing a field this
-//! file has no way to get wrong would be a claim this command cannot back up.
+//! `{ name, address, token }` with only `system_id` missing — a Designer-side grouping this
+//! file has never heard of.
+//!
+//! **`class` is carried, and the reasoning here used to say the opposite.** It said `class` was
+//! omitted because "every node `nodes.toml` can name answers a probe... so `nodes.toml` never
+//! holds one". That premise stopped being true with eieio-x7g.5: a node entry now records its
+//! class, precisely so `eio` can refuse a leaf rather than dial it. Leaving it out of the
+//! export would make `import --force` silently reset a leaf entry to `daemon` — `Config::add`
+//! rebuilds the entry from scratch — which is the export losing the one field that exists to
+//! stop an operator debugging a working device.
 //!
 //! `format` is a version marker (`"eieio.nodes/v1"`) so a future incompatible change to this
 //! shape fails loudly and specifically on import — "not a recognized nodes export" — rather
@@ -77,7 +81,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::config::{Config, NodeClass};
 
 /// The export format's version marker. Bumped whenever the shape below changes incompatibly.
 const FORMAT: &str = "eieio.nodes/v1";
@@ -121,6 +125,11 @@ struct ExportedNode {
     address: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// `"daemon"` or `"leaf"` (SCOPE §3.7), omitted when it is `daemon` exactly as
+    /// `config::NodeEntry` omits it — so a v1 export written before eieio-x7g.5 imports as
+    /// `daemon`, which is what it meant.
+    #[serde(default, skip_serializing_if = "NodeClass::is_default")]
+    class: NodeClass,
 }
 
 impl std::fmt::Debug for ExportedNode {
@@ -182,6 +191,7 @@ fn export(args: Export) -> Result<()> {
                 name: name.clone(),
                 address: entry.addr.clone(),
                 token: entry.token.clone(),
+                class: entry.class,
             })
             .collect(),
     };
@@ -227,7 +237,12 @@ fn import(args: Import) -> Result<()> {
         } else {
             added.push(node.name.clone());
         }
-        config.add(node.name.clone(), node.address.clone(), node.token.clone());
+        config.add(
+            node.name.clone(),
+            node.address.clone(),
+            node.token.clone(),
+            node.class,
+        );
     }
 
     // The imported default is applied only when this machine has not already chosen one — an

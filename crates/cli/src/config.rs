@@ -19,6 +19,34 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+/// A node's class (SCOPE §3.7's amendment): whether `eio` may ever dial `addr` over HTTP at
+/// all.
+///
+/// Deserializes from exactly `"daemon"` or `"leaf"` — lowercase, matching the spec's own
+/// spelling — and anything else is a config error naming the bad value, not a silent fall back
+/// to [`NodeClass::Daemon`]. A typo here is either a leaf an operator wrongly believes `eio` can
+/// reach, or a daemon `eio` refuses for no reason, and both are the kind of wrong answer this
+/// whole field exists to stop happening quietly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeClass {
+    /// Serves DAEMON §9's management API over HTTP — every node `eio` could reach before this
+    /// field existed, and what an absent `class` key still means.
+    #[default]
+    Daemon,
+    /// An MCU-tier node (LEAF-SPEC): serves no HTTP at all, by design (LEAF §7). `Config::resolve`
+    /// refuses to hand one to a caller that is about to dial it.
+    Leaf,
+}
+
+impl NodeClass {
+    /// Whether this is the value an absent `class` key means — used to keep a `Daemon` entry
+    /// from gaining a redundant key the next time `nodes.toml` is written (see [`NodeEntry`]).
+    pub(crate) fn is_default(&self) -> bool {
+        *self == NodeClass::Daemon
+    }
+}
+
 /// One configured node.
 ///
 /// `Debug` is hand-written, not derived (below): this is the one type in the process that
@@ -34,10 +62,18 @@ pub struct NodeEntry {
     /// operator has not yet copied a token for can still be named for `list`/`set-default`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// What kind of node this is (SCOPE §3.7). Absent in the file means [`NodeClass::Daemon`],
+    /// via `#[serde(default)]`, and is omitted on write right back when it is `Daemon`, via
+    /// `skip_serializing_if` — the same pairing `token` above uses, and for the same reason:
+    /// every `nodes.toml` written before this field existed keeps meaning exactly what it meant,
+    /// and keeps being written back without gaining a redundant key.
+    #[serde(default, skip_serializing_if = "NodeClass::is_default")]
+    pub class: NodeClass,
 }
 
 impl std::fmt::Debug for NodeEntry {
-    /// Renders `token` as present-or-absent, never as its bytes.
+    /// Renders `token` as present-or-absent, never as its bytes. `class` is not secret and is
+    /// rendered plainly.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NodeEntry")
             .field("addr", &self.addr)
@@ -49,6 +85,7 @@ impl std::fmt::Debug for NodeEntry {
                     .map(|_| "<redacted>")
                     .unwrap_or("<none>"),
             )
+            .field("class", &self.class)
             .finish()
     }
 }
@@ -128,8 +165,11 @@ impl Config {
 
     /// Adds or replaces a node, minting no defaults: `addr` is required, `token` is whatever
     /// the caller supplied (including nothing, for a node named before its token is known).
-    pub fn add(&mut self, name: String, addr: String, token: Option<String>) {
-        self.nodes.insert(name, NodeEntry { addr, token });
+    /// Always `Daemon`-class: there is no `eio node add --class` today, so the only way a
+    /// `nodes.toml` entry becomes `leaf` is an operator hand-editing the file, the same way
+    /// every other TOML file in this system is authored (SERVICE §9).
+    pub fn add(&mut self, name: String, addr: String, token: Option<String>, class: NodeClass) {
+        self.nodes.insert(name, NodeEntry { addr, token, class });
     }
 
     /// Removes a node. Clears `default` too, when it named this one — a default pointing at a
@@ -159,6 +199,14 @@ impl Config {
     /// A caller who names neither, on a machine with no default, gets an error naming every
     /// configured node — the recovery in one message, rather than a bare "no node" that sends
     /// them to read a file they may not know the location of.
+    ///
+    /// **Refuses a `leaf`-class entry** (SCOPE §3.7, LEAF §7) rather than handing it back: every
+    /// caller of this — `client::connect`, `mcp.rs`'s `resolve_node` — dials the node over HTTP
+    /// immediately afterward, and a leaf serves none, so this is the one place the guard needs to
+    /// live for it to hold everywhere reaching a node does, rather than being a discipline each
+    /// call site could forget. Naming-only operations (`eio node list`, `remove`, `set-default`)
+    /// never call this — see [`Config::remove`] and [`Config::set_default`] — so a leaf entry
+    /// still lists, sets as default, and removes exactly as a daemon entry does.
     pub fn resolve<'a>(&'a self, requested: Option<&'a str>) -> Result<(&'a str, &'a NodeEntry)> {
         let name = requested
             .or(self.default.as_deref())
@@ -167,6 +215,12 @@ impl Config {
             .nodes
             .get(name)
             .with_context(|| format!("no configured node named `{name}`{}", self.known()))?;
+        if entry.class == NodeClass::Leaf {
+            bail!(
+                "node `{name}` is a leaf-class node, which serves no management API by design \
+                 (LEAF §7); deploy to it through a firmware build, not `eio`"
+            );
+        }
         Ok((name, entry))
     }
 
@@ -199,6 +253,7 @@ mod tests {
         let with_token = NodeEntry {
             addr: String::from("http://10.0.0.5:7777"),
             token: Some(String::from("s3cr3t-token-do-not-print-me")),
+            class: NodeClass::default(),
         };
         let rendered = format!("{with_token:?}");
         assert!(
@@ -214,6 +269,7 @@ mod tests {
         let without_token = NodeEntry {
             addr: String::from("http://10.0.0.5:7777"),
             token: None,
+            class: NodeClass::default(),
         };
         assert!(format!("{without_token:?}").contains("none"));
 
@@ -224,6 +280,7 @@ mod tests {
             String::from("kitchen"),
             String::from("http://10.0.0.5:7777"),
             Some(String::from("s3cr3t-token-do-not-print-me")),
+            NodeClass::Daemon,
         );
         let rendered = format!("{config:?}");
         assert!(

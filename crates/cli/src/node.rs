@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
-use crate::config::Config;
+use crate::config::{Config, NodeClass};
 
 /// What `eio node` can do.
 #[derive(Debug, Subcommand)]
@@ -39,6 +39,12 @@ pub struct Add {
     /// Make this the default node.
     #[arg(long)]
     default: bool,
+    /// `daemon` (the default) or `leaf`. A leaf-class node serves no management API at all
+    /// (LEAF §7), so `eio` refuses to reach one by name rather than reporting a failed
+    /// request — SCOPE §3.7. Recording it is the only way `eio` can tell a leaf from a
+    /// daemon that is down.
+    #[arg(long, value_enum, default_value_t = NodeClass::Daemon)]
+    class: NodeClass,
 }
 
 /// Names a configured node: `eio node remove`'s and `eio node set-default`'s arguments.
@@ -62,7 +68,7 @@ pub fn run(command: Node, node: Option<&str>) -> Result<()> {
 
 fn add(args: Add) -> Result<()> {
     let mut config = Config::load()?;
-    config.add(args.name.clone(), args.addr, args.token);
+    config.add(args.name.clone(), args.addr, args.token, args.class);
     if args.default {
         config.set_default(&args.name)?;
     }

@@ -57,15 +57,33 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
   const port = typeof payload.port === 'string' ? payload.port : undefined;
 
   switch (frame.event) {
-    case 'signals':
+    case 'signals': {
+      // `What::Signals.signals` is a `Vec<String>` with no `skip_serializing_if`, so the
+      // daemon always sends it, and an absent one joins the envelope guard rather than
+      // defaulting to `[]` (eieio-m9s.19): an empty batch and a malformed frame are different
+      // facts, and a fallback that answers the well-formed one hides the malformed one.
+      //
+      // Elements are checked too, not just cast: `Array.isArray` alone says nothing about
+      // what is *in* the array, and a batch containing a non-string is exactly as wire-wrong
+      // as a missing `signals` field, just caught one level down. This stops at
+      // "every element is a string" and does not parse each rendering as EXPR §7.6 CBOR text
+      // — `observe.rs` renders with a fixed, trusted formatter, so a well-formed-but-garbled
+      // rendering is not a shape this decoder is positioned to catch (and `ExprFailureEvent`'s
+      // own fields are what a caller uses to explain a bad signal, not this array). Malformed
+      // JSON *within* one element's string is a rendering bug to find at the source, not
+      // something to detect here by re-parsing text this decoder otherwise treats as opaque.
+      if (!Array.isArray(payload.signals) || !payload.signals.every((s) => typeof s === 'string')) {
+        return null;
+      }
       return {
         type: 'signals',
         service,
         instance,
         at,
         port,
-        signals: Array.isArray(payload.signals) ? (payload.signals as string[]) : [],
+        signals: payload.signals as string[],
       };
+    }
     case 'expr_failure':
       // `prop` joins the guard: `What::ExprFailure::prop` is a `u32` with no
       // `skip_serializing_if`, so the daemon always sends it. `signal` does carry one and is
@@ -90,22 +108,34 @@ export function decodeTapFrame(frame: SseFrame): TapStreamEvent | null {
         prop: payload.prop,
       };
     case 'discarded':
+      // `What::Discarded.reason` is a `String` with no `skip_serializing_if`, so the daemon
+      // always sends it; a frame missing it joins the guard rather than reading as
+      // `"unknown"` (eieio-m9s.19) — `"unknown"` is itself a plausible reason a real discard
+      // could report, which is exactly what made the old fallback dangerous: nothing about
+      // the rendered line would say the frame was malformed rather than genuinely unexplained.
+      if (typeof payload.reason !== 'string') return null;
       return {
         type: 'discarded',
         service,
         instance,
         at,
         port,
-        reason: typeof payload.reason === 'string' ? payload.reason : 'unknown',
+        reason: payload.reason,
       };
     case 'lagged':
+      // `What::Lagged.missed` is a `u64` with no `skip_serializing_if`, so the daemon always
+      // sends it. DAEMON §9.6: this count *is* the sampling report, and a tap MUST NOT skip
+      // silently — defaulting a missing count to 0 said "the reader missed nothing," the
+      // exact claim a `lagged` event exists to deny. A malformed `lagged` frame now joins
+      // every other malformed frame at `null` instead (eieio-m9s.19).
+      if (typeof payload.missed !== 'number') return null;
       return {
         type: 'lagged',
         service,
         instance,
         at,
         port,
-        missed: typeof payload.missed === 'number' ? payload.missed : 0,
+        missed: payload.missed,
       };
     default:
       return null;
