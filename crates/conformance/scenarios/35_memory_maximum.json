@@ -1,0 +1,11 @@
+{
+  "name": "a-module-that-may-grow-past-what-the-host-admits-is-refused",
+  "spec": "§4.1, §9.7, §13.1",
+  "note": "The pair to 34. There the module asks for memory a one-page host cannot supply; here its minimum fits and its declared maximum does not, so the host would be admitting a module that has said it will grow to four pages. §4.1 refuses both the same way and for the same reason — a host MUST NOT grant less than the module declared — so capping this one at instantiation is not an option a conforming host has. Every host runs this scenario, because the ceiling is loader configuration and the loader is shared code. A module declaring no maximum has said nothing to refuse and is the engine's to bound (§4.1), which is why there is no scenario for that case: what a guest sees there is `memory.grow` answering -1, which reaches the ABI only as `eio_alloc` returning 0 — 17_allocator_refuses' path (§9.5).",
+  "module": "blocks/four_page_max.wat",
+  "refuses": {
+    "memory_pages": 1,
+    "names": "maximum linear memory of 4 page(s)",
+    "layer": "loader"
+  }
+}

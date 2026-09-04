@@ -74,7 +74,7 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
     // every scenario that instantiates, because a module that never loads is the only thing
     // it can be about.
     let admission = match scenario.refuses.as_ref().and_then(|spec| spec.memory_pages) {
-        Some(pages) => eio_manifest::Admission::CURRENT.with_max_pages(pages),
+        Some(pages) => eio_manifest::Admission::CURRENT.with_page_ceiling(pages),
         None => eio_manifest::Admission::CURRENT,
     };
     let validated =
@@ -353,8 +353,8 @@ fn refused<H: Host>(
                              in the loader's layer — the leaf engine runs that one rather than \
                              refusing it, so nothing downstream will catch it"
                         ),
-                        Cause::Memory { max_pages } => format!(
-                            "the loader admitted a module under a ceiling of {max_pages} \
+                        Cause::Memory { page_ceiling } => format!(
+                            "the loader admitted a module under a ceiling of {page_ceiling} \
                              page(s), which ABI §4.1 makes a load-time refusal — a host that \
                              lets it through has nothing left that will"
                         ),

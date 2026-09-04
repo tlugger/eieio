@@ -169,12 +169,24 @@ pub struct RefusalSpec {
     #[serde(default)]
     pub proposal: Option<Proposal>,
     /// The per-instance page ceiling the scenario configures the host's loader with, for a
-    /// refusal that is about the module's declared minimum linear memory (§4.1).
+    /// refusal that is about the module's declared linear memory (§4.1).
+    ///
+    /// One field for both ends of the declaration, because the ceiling is one number: a
+    /// module's declared *minimum* over it cannot be supplied, and its declared *maximum*
+    /// over it cannot be honoured, and §4.1 refuses both rather than granting less than the
+    /// module declared. Which end a given scenario is about is pinned by
+    /// [`names`](RefusalSpec::names), which the loader's message spells out.
     ///
     /// The one host limit a scenario supplies that no instance descriptor publishes, and
     /// §9.7 rule 10 is why: the module never instantiates, so a block could not read it
     /// even in principle. Always a [`RefusalLayer::Loader`] refusal — the ceiling is host
     /// configuration and no engine has an opinion about it.
+    ///
+    /// It says nothing about a module that declares *no* maximum, which is every block the
+    /// SDK builds (SDK §5.2). Bounding that one is the engine's, not the loader's (§4.1),
+    /// so no scenario here can assert it: what a guest sees when an engine does bound it is
+    /// `memory.grow` answering −1, which is core WASM's own answer and reaches the ABI only
+    /// as `eio_alloc` returning 0 — the path `17_allocator_refuses` already covers (§9.5).
     #[serde(default)]
     pub memory_pages: Option<u64>,
     /// What the rejection must contain, matched case-insensitively as a substring.
@@ -226,10 +238,11 @@ pub enum RefusalLayer {
 pub enum Cause {
     /// A proposal outside §4.3's accepted set.
     Proposal(Proposal),
-    /// A declared minimum linear memory above the ceiling the host admits under (§4.1).
+    /// A declared linear memory, at one end or the other, above the ceiling the host admits
+    /// under (§4.1).
     Memory {
         /// The ceiling, in 64 KiB pages.
-        max_pages: u64,
+        page_ceiling: u64,
     },
 }
 
@@ -237,11 +250,8 @@ impl fmt::Display for Cause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Cause::Proposal(proposal) => proposal.fmt(f),
-            Cause::Memory { max_pages } => {
-                write!(
-                    f,
-                    "a declared minimum linear memory above {max_pages} page(s)"
-                )
+            Cause::Memory { page_ceiling } => {
+                write!(f, "a declared linear memory above {page_ceiling} page(s)")
             }
         }
     }
@@ -257,7 +267,7 @@ impl RefusalSpec {
     pub fn cause(&self) -> Result<Cause, &'static str> {
         match (self.proposal, self.memory_pages) {
             (Some(proposal), None) => Ok(Cause::Proposal(proposal)),
-            (None, Some(max_pages)) => Ok(Cause::Memory { max_pages }),
+            (None, Some(page_ceiling)) => Ok(Cause::Memory { page_ceiling }),
             (Some(_), Some(_)) => Err(
                 "a refusal is about the module's contents or about its declared memory, not \
                  both: `proposal` and `memory_pages` cannot both be set (ABI §13.1)",

@@ -189,12 +189,19 @@ impl Host for Wamr {
     /// The budget is ignored for the reason [`Host::enforces_budgets`] gives; the stack is
     /// [`EXEC_STACK_SIZE`], this harness's own and not the leaf's.
     ///
+    /// **No growth bound** (ABI §4.1's `max_pages` is `None`), which is the same choice as the
+    /// stack one field over and for the same reason: this is the reference measurement of what
+    /// WAMR does with ABI §13's scenarios, and a scenario result should never have to be
+    /// qualified with "on a host that was capping growth". §4.1 makes bounding growth a MAY,
+    /// so answering `None` is conforming — a leaf answers otherwise (LEAF §4.2), and
+    /// `crates/leaf/tests/memory_growth.rs` is where that answer is measured.
+    ///
     /// Every failure is a [`HostError::Refused`], worded as this file has always worded it —
     /// `InstantiateError` is a structured refusal precisely so that the two callers of the
     /// shared binding keep their own wording, since a leaf's `spawn` message and an ABI §13
     /// scenario report are read by different people.
     fn instantiate(&mut self, wasm: &[u8], _budget: Budget) -> Result<Guest, HostError> {
-        eio_wamr_host::instantiate(wasm, EXEC_STACK_SIZE).map_err(|error| match error {
+        eio_wamr_host::instantiate(wasm, EXEC_STACK_SIZE, None).map_err(|error| match error {
             InstantiateError::Load(detail) | InstantiateError::Instantiate(detail) => {
                 HostError::Refused(detail)
             }
@@ -204,8 +211,11 @@ impl Host for Wamr {
             InstantiateError::ExecEnv => {
                 HostError::Refused("failed to create an execution environment".to_string())
             }
-            // Unreachable: `EXEC_STACK_SIZE` is not zero.
-            InstantiateError::ZeroStack => HostError::Refused(error.to_string()),
+            // Unreachable: `EXEC_STACK_SIZE` is not zero, and this host passes no growth
+            // bound at all rather than one of zero pages.
+            InstantiateError::ZeroStack | InstantiateError::ZeroPages => {
+                HostError::Refused(error.to_string())
+            }
         })
     }
 }
@@ -368,9 +378,9 @@ fn wamr_passes_the_conformance_suite() {
     // capability namespace is implemented here, so the only scenario this host cannot reach is
     // `07_budget_exhausted.json` — WAMR's engine has no linked fuel-equivalent (see the module
     // docs), so `Host::enforces_budgets` answers `false` and that one scenario is skipped by
-    // name rather than hanging. 33 of the suite's 34 scenarios reach this host.
+    // name rather than hanging. 34 of the suite's 35 scenarios reach this host.
     let ran = summary.reports.len() - summary.skipped().count();
-    assert_eq!(ran, 33, "only {ran} scenario(s) reached wamr");
+    assert_eq!(ran, 34, "only {ran} scenario(s) reached wamr");
 }
 
 #[test]
