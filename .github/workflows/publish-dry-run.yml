@@ -39,6 +39,16 @@
 #      endpoint requires (and what `cargo publish --dry-run` would otherwise be the one to
 #      catch, for the crates it can reach at all).
 #
+#   3. A closure-and-order check over the same graph, added by eieio-7d8.39 after check 2
+#      missed a real one: `eio-conformance` grew a *versioned* dev-dependency on
+#      `eio-wamr-host`, which is not in the publish set, and check 2 had nothing to say about
+#      it because it only ever looked at names already in the set. cargo strips a
+#      version-less path dependency when it packages and keeps a versioned one, so every
+#      kept edge from a crate in the set into another workspace member must land on a crate
+#      that is also in the set and published before it. That also covers the publish ORDER,
+#      which nothing checked before — `publish_set` is a hand-written topological sort and
+#      release-sdk.yml publishes in exactly that order.
+#
 # Deliberately token-free: neither check needs `CARGO_REGISTRY_TOKEN`, so this workflow runs
 # on pull requests from forks the same as any other. `--dry-run` uploads nothing (it aborts
 # before the network call that would need credentials), and `cargo metadata` never leaves

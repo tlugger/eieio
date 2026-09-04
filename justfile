@@ -61,6 +61,14 @@ nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk 
 # need it, and a set duplicated across two workflows is one that drifts. `eio-conformance` is
 # in it because `cargo-eio` depends on it for `cargo eio test`, which SDK §5's prose does not
 # make obvious.
+#
+# It is the closure of those roots over *normal* dependencies, and dev edges are deliberately
+# not in it: a consumer links a published crate's library and never runs its tests. That is
+# why `eio-wamr-host` is absent even though `eio-conformance` dev-depends on it — publishing
+# an FFI crate that builds WAMR's C core, reachable from nothing on the registry, is a support
+# commitment bought for nothing (eieio-7d8.39). The corresponding obligation is on the use
+# site: such an edge must be path-only so cargo strips it when packaging, and
+# `publish-dry-run` fails if one is not.
 publish_set := "eio-abi eio-signal eio-expr eio-manifest eio-sdk-macros eio-host-core eio-sdk eio-conformance eio-test-host cargo-eio"
 
 # The subset with no `eio-*` dependency of its own. Before the first publish these are the only
@@ -71,6 +79,52 @@ dry_runnable := "eio-abi eio-signal"
 
 # The guest target (ABI §1). Blocks are core WASM modules and nothing else.
 guest_target := "wasm32-unknown-unknown"
+
+# ── disk headroom (eieio-7d8.40) ─────────────────────────────────────────────
+#
+# A full volume does not fail this gate honestly. Three failure shapes were observed in a
+# single session of parallel agent work, and none of them said "disk":
+#
+#   - `rustc-LLVM ERROR: IO failure on output stream: No space left on device`, whose LAST
+#     line — the one a summary shows — is `error: could not compile eio-manifest`. That reads
+#     as a code failure and cost a debugging session, three times.
+#   - A `crates/daemon` API test failing with `Io(Os { code: 22, kind: InvalidInput })` at
+#     5.4G free, passing unchanged at 14G. That one does not even mention IO capacity.
+#   - Everything downstream of either, which then looks like a cascade of real defects.
+#
+# So `ci` both looks before it starts and says so afterwards. The numbers below are measured,
+# and each defends against something specific:
+#
+#   ci_write     10G    What ONE cold `just ci` writes, not what a `target/` can grow to.
+#                       Measured across five independently built trees of this repository —
+#                       `target/` plus `examples/blocks/target/` came to 8.7G, 8.2G, 8.2G,
+#                       5.6G and 0.3G — so 10 is the top of that range rounded up. A
+#                       long-lived worktree accretes far past it (~34G is on record) as
+#                       profiles and feature combinations pile up, which is exactly why
+#                       `check-disk` measures what is already on disk and subtracts it rather
+#                       than assuming a fixed cost: a preflight that charged an incremental
+#                       run for a cold one's writes would fire constantly, and a check that
+#                       fires constantly is worse than no check at all.
+#
+#   floor         6G    The one REFUSAL, and the only number here that is not an estimate:
+#                       at 5.4G free this workspace's own suite produced a WRONG ANSWER — a
+#                       green test went red with an errno that names nothing about disk. A
+#                       gate that lies is worse than a gate that did not run, so below this
+#                       `ci` declines rather than reporting a result nobody should act on.
+#
+#   margin        8G    A WARNING on the projected end state, because each additional git
+#                       worktree building concurrently was measured to add 8-9G — so a run
+#                       projected to finish with less than that in hand is one agent away
+#                       from the floor, through no fault of its own. A warning and not a
+#                       refusal: the projection is an estimate, and an estimate must never
+#                       fail a build. It names the risk and gets out of the way.
+#
+# All three are overridable, which is also how they are tested: `EIO_DISK_FLOOR_GB=999 just
+# check-disk` demonstrates the refusal on any machine. An override states a number you are
+# accepting; there is deliberately no flag that skips the check without naming one.
+disk_ci_write_gb := env("EIO_DISK_CI_WRITE_GB", "10")
+disk_floor_gb := env("EIO_DISK_FLOOR_GB", "6")
+disk_margin_gb := env("EIO_DISK_MARGIN_GB", "8")
 
 # ── compiler cache ───────────────────────────────────────────────────────────
 #
@@ -284,21 +338,139 @@ check-nostd:
 check-guest:
     RUSTFLAGS="-C panic=abort" cargo build --quiet --package eio-sdk --target {{ guest_target }}
 
+# See the `disk headroom` block at the top of this file for where 10, 6 and 8 come from and
+# what each one defends against. This recipe is a *precondition* check, not a gate stage: it
+# says nothing about the code, only about whether this machine can give an answer about it.
+# `ci` runs it first so it reports on the disk as it stands immediately before the first
+# cargo invocation, which is when the estimate is at its most accurate.
+#
+# `du` over the two build trees rather than a flat threshold, because the question is not
+# "how much is free" but "how much still has to be written". It costs well under a second on
+# APFS (measured: 0.46s over an 8.2G tree), which is nothing against the build it precedes.
+
+# Report free disk; refuse below the floor, warn when the run will finish tight.
+check-disk:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    free_gb=$(df -Pk . | awk 'NR==2 { print int($4 / 1048576) }')
+    have_kb=0
+    for tree in target examples/blocks/target; do
+        [ -d "$tree" ] || continue
+        # `tail -1` because a partially unreadable tree still prints a usable total after its
+        # complaints; the guard after it is what makes an unusable answer count as zero
+        # rather than aborting a check whose whole job is to be advisory.
+        size=$(du -sk "$tree" 2>/dev/null | tail -1 | awk '{ print $1 }') || true
+        case "${size:-}" in ''|*[!0-9]*) size=0 ;; esac
+        have_kb=$((have_kb + size))
+    done
+    have_gb=$((have_kb / 1048576))
+    to_write_gb=$(( {{ disk_ci_write_gb }} - have_gb ))
+    [ "$to_write_gb" -ge 0 ] || to_write_gb=0
+    projected_gb=$((free_gb - to_write_gb))
+    echo "check-disk: ${free_gb}G free · ${have_gb}G of build output already here · ~${to_write_gb}G still to write → ~${projected_gb}G left at the end"
+    if [ "$free_gb" -lt {{ disk_floor_gb }} ]; then
+        echo "error: ${free_gb}G free is below the {{ disk_floor_gb }}G floor — refusing to start." >&2
+        echo "       This is not caution about speed. At 5.4G free this workspace's own suite" >&2
+        echo "       failed a passing test with Io(Os { code: 22, kind: InvalidInput }), which" >&2
+        echo "       names nothing about disk. A run from here would report something, and the" >&2
+        echo "       something would not be trustworthy." >&2
+        echo "       Free space, or state the number you are accepting: EIO_DISK_FLOOR_GB=<n> just ci" >&2
+        exit 1
+    fi
+    if [ "$projected_gb" -lt {{ disk_margin_gb }} ]; then
+        echo "warning: this run is projected to finish with ~${projected_gb}G free, under the {{ disk_margin_gb }}G margin." >&2
+        echo "         Each concurrent worktree building adds 8-9G, so one more agent starting" >&2
+        echo "         now takes this below the floor and failures stop meaning what they say." >&2
+        echo "         Proceeding: the {{ disk_ci_write_gb }}G estimate is an estimate, and an estimate must not fail a build." >&2
+    fi
+
 # ── the gate ─────────────────────────────────────────────────────────────────
 
-# The one command CI runs. Dependencies run in order; the first failure aborts.
-# Prove the publish set is publishable, as far as that can be proven before the first publish.
+# Three checks, because none covers the others. `cargo publish --dry-run` is the real thing but
+# reaches only `dry_runnable`; the two static checks below need no network and so cover every
+# crate in the set. Publishability then rots loudly here rather than at release time, which is
+# the point (SCOPE §7.2).
 #
-# Two checks, because neither covers the other. `cargo publish --dry-run` is the real thing but
-# reaches only `dry_runnable`; `cargo metadata` needs no network and so covers every crate,
-# confirming the three fields crates.io requires are present. Publishability then rots loudly
-# here rather than at release time, which is the point (SCOPE §7.2).
+# The static half is one Python program with two jobs:
+#
+#   1. The three fields crates.io's publish endpoint requires — `description`, `license`,
+#      `repository` — are present on every crate in the set.
+#
+#   2. **The set is closed over the edges that survive packaging, and ordered.** This is the
+#      leg eieio-7d8.39 added, and it exists because the first one did not catch that bug:
+#      `eio-conformance` is in the set and grew a *versioned* dev-dependency on
+#      `eio-wamr-host`, which is not, so a `sdk-v*` tag would have failed on an unpublished
+#      dependency months after anyone remembered adding the edge. The rule is read off cargo's
+#      own packaging behaviour rather than a convention: a workspace dependency whose `req` is
+#      `*` (path-only) is *stripped* when cargo packages, and one that carries a version is
+#      *kept* — so every kept edge into another workspace member must land on a crate that is
+#      in the set and published before it, and every stripped one must be a dev-dependency,
+#      because a path-only normal or build dependency is rejected outright. That covers the
+#      ordering too, which nothing checked before: `publish_set` is a hand-written topological
+#      sort and `release-sdk.yml` publishes in exactly that order.
+#
+#      Dependencies on crates that are not workspace members are not this check's business —
+#      they are on the registry already, which is what makes them buildable at all.
+
+# Prove the publish set is publishable, as far as that can be proven before the first publish.
 publish-dry-run:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo metadata --no-deps --format-version 1 > /tmp/eio-publish-meta.json
-    python3 -c 'import json,sys; m=json.load(open("/tmp/eio-publish-meta.json")); want=sys.argv[1].split(); pk={p["name"]:p for p in m["packages"]}; bad=[(n,f) for n in want for f in ("description","license","repository") if not pk.get(n,{}).get(f)]; missing=[n for n in want if n not in pk]; [sys.stderr.write("not in this workspace: %s\n" % n) for n in missing]; [sys.stderr.write("%s has no %s\n" % (n,f)) for n,f in bad]; sys.exit(1 if (bad or missing) else 0)' "{{ publish_set }}"
-    echo "  registry metadata present for every crate in the publish set"
+    meta="$(mktemp)"
+    trap 'rm -f "$meta"' EXIT
+    cargo metadata --no-deps --format-version 1 > "$meta"
+    python3 - "$meta" "{{ publish_set }}" <<'PUBLISH_SET_CHECK'
+    import json, sys
+
+    meta_path, publish_set = sys.argv[1], sys.argv[2].split()
+    meta = json.load(open(meta_path))
+    pkgs = dict((p["name"], p) for p in meta["packages"])
+    members = set(pkgs)
+    errors = []
+
+    for name in publish_set:
+        if name not in pkgs:
+            errors.append("%s is in publish_set but is not a member of this workspace" % name)
+
+    for i, name in enumerate(publish_set):
+        p = pkgs.get(name)
+        if p is None:
+            continue
+        for field in ("description", "license", "repository"):
+            if not p.get(field):
+                errors.append("%s has no %s, which crates.io requires" % (name, field))
+        for dep in p["dependencies"]:
+            dname = dep["name"]
+            if dname not in members:
+                continue
+            kind = dep.get("kind")
+            label = "dev-dependency" if kind == "dev" else ("%s dependency" % (kind or "normal"))
+            if dep["req"] == "*":
+                if kind != "dev":
+                    errors.append(
+                        "%s has a path-only %s on workspace crate %s. cargo strips a "
+                        "version-less edge only for dev-dependencies; a normal or build one "
+                        "is rejected at publish. Give it the workspace version."
+                        % (name, label, dname))
+                continue
+            if dname not in publish_set:
+                errors.append(
+                    "%s is in publish_set and has a %s on workspace crate %s that carries a "
+                    "version, so the edge survives packaging - but %s is not in publish_set. "
+                    "cargo publish -p %s would fail on an unpublished dependency. Either add "
+                    "%s to publish_set ahead of %s, or drop the version key at the use site "
+                    "so cargo strips the edge, which is legal for a dev-dependency only."
+                    % (name, label, dname, dname, name, dname, name))
+            elif publish_set.index(dname) > i:
+                errors.append(
+                    "publish_set is out of dependency order: %s is published before %s, but "
+                    "%s is a %s of it" % (name, dname, dname, label))
+
+    for e in errors:
+        sys.stderr.write("error: %s\n" % e)
+    sys.exit(1 if errors else 0)
+    PUBLISH_SET_CHECK
+    echo "  registry metadata present, and the publish set is closed and ordered"
     for crate in {{ dry_runnable }}; do
         echo "  $crate → cargo publish --dry-run"
         cargo publish --dry-run -p "$crate"
@@ -320,18 +492,71 @@ publish-dry-run:
 # second broken gate cannot hide behind "never got to run"; first-failure-aborts is restored
 # at the end by exiting non-zero, with every failed stage named on the final line, if any
 # stage did.
+#
+# `build`, `build-golden` and `shapes` used to be `just` dependencies of this recipe and are
+# now its first three stages instead (eieio-7d8.40). Nothing about their order changed — they
+# still run sequentially, before anything else, and the first failure still aborts. What
+# changed is that a dependency's output goes nowhere this recipe can read, and a run that dies
+# in `build` therefore reached no summary at all: the last line on the terminal was cargo's
+# `error: could not compile eio-manifest`, four lines under an LLVM `No space left on device`
+# that nobody scrolls back to. `tee` keeps them live AND greppable, so `disk_verdict` below
+# sees every stage of the run rather than only the parallel ones.
 
 # The one command CI runs: builds, then fmt/lint/test/nostd/guest concurrently, then the golden blocks.
-ci: build build-golden shapes
+ci: check-disk
     #!/usr/bin/env bash
     set -euo pipefail
     logdir="$(mktemp -d)"
     trap 'rm -rf "$logdir"' EXIT
-    # `shapes` (a dependency above) has already written both generated files, so the
+
+    # Say "disk" when it was the disk. Two independent signals, because a full volume shows up
+    # in two quite different shapes (eieio-7d8.40):
+    #
+    #   - The explicit one. rustc, ld and cargo all say `No space left on device` somewhere in
+    #     the middle of their output and then exit with a message that names a CRATE. Grepping
+    #     every stage log for the phrase turns "could not compile eio-manifest" back into what
+    #     actually happened.
+    #   - The silent one, and the reason this does not stop at a grep. A `crates/daemon` API
+    #     test failed with `Io(Os { code: 22, kind: InvalidInput })` at 5.4G free and passed
+    #     unchanged at 14G; the phrase appears nowhere in that. All this can do is read the
+    #     volume as the run ends and say that the failures are suspect — which is exactly the
+    #     sentence that was missing when this cost a debugging session.
+    disk_verdict() {
+        if grep -qs -e 'No space left on device' -e 'IO failure on output stream' "$logdir"/*.log; then
+            echo "ci: THE DISK FILLED. A stage hit 'No space left on device' — whatever crate or" >&2
+            echo "ci: test is named above did not fail on its own merits. Free space and rerun." >&2
+            grep -hs -e 'No space left on device' -e 'IO failure on output stream' "$logdir"/*.log \
+                | sort -u | head -3 | sed 's/^/ci:   /' >&2
+            return 0
+        fi
+        local free_gb
+        free_gb=$(df -Pk . | awk 'NR==2 { print int($4 / 1048576) }')
+        if [ "$free_gb" -lt {{ disk_margin_gb }} ]; then
+            echo "ci: ${free_gb}G free on this volume as the run ended, under the {{ disk_margin_gb }}G margin." >&2
+            echo "ci: A tight disk makes this suite fail in ways that name no disk at all — an" >&2
+            echo "ci: EINVAL from a test that passes at 14G, for one. Treat the failures above as" >&2
+            echo "ci: unproven until a rerun with room reproduces them." >&2
+        fi
+        return 0
+    }
+
+    # Sequential prelude. `shapes` must run before EIO_SHAPES_PREGENERATED is exported below —
+    # that variable is how it makes itself a no-op for the `test-designer` stage.
+    for stage in build build-golden shapes; do
+        echo "═══ ${stage} ═══"
+        if ! just "$stage" 2>&1 | tee "$logdir/$stage.log"; then
+            echo "═══ ${stage}: FAILED ═══" >&2
+            disk_verdict
+            echo "ci: failed stage(s): ${stage}" >&2
+            exit 1
+        fi
+    done
+
+    # `shapes` (a stage above) has already written both generated files, so the
     # `test-designer` stage below must not run it a second time — it would put a second cargo
     # on the target-directory lock the `test` stage is holding. See the `shapes` recipe.
     export EIO_SHAPES_PREGENERATED=1
-    # `build-golden` (a dependency above) has already built the golden blocks, so no test
+    # `build-golden` (a stage above) has already built the golden blocks, so no test
     # process may invoke cargo on that target directory — see `golden::build`'s comment for
     # why even a no-op invocation is a writer, and how that turned CI red twice.
     export EIO_GOLDEN_PREBUILT=1
@@ -374,11 +599,18 @@ ci: build build-golden shapes
     done
 
     if [ "${#failed[@]}" -gt 0 ]; then
+        disk_verdict
         echo "ci: failed stage(s): ${failed[*]}" >&2
         exit 1
     fi
 
-    just test-golden
+    echo "═══ test-golden ═══"
+    if ! just test-golden 2>&1 | tee "$logdir/test-golden.log"; then
+        echo "═══ test-golden: FAILED ═══" >&2
+        disk_verdict
+        echo "ci: failed stage(s): test-golden" >&2
+        exit 1
+    fi
     echo "ci: all gates passed"
 
 # ── designer ─────────────────────────────────────────────────────────────────

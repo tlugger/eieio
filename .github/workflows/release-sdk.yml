@@ -26,6 +26,13 @@
 #     eio-test-host     -> eio-host-core, eio-sdk, eio-manifest, eio-signal
 #     cargo-eio         -> eio-manifest, eio-conformance
 #
+#   That graph is over NORMAL dependencies only, and the omission is deliberate: a consumer
+#   links a published crate's library and never runs its tests, so a workspace crate reachable
+#   only through a dev edge is not published and the dev-dependency is written path-only, which
+#   is what makes cargo strip it at packaging time. `eio-conformance`'s dev-dependency on
+#   `eio-wamr-host` is the one that exists (eieio-7d8.39), and `just publish-dry-run` fails if
+#   such an edge ever carries a version — which is what would break this job.
+#
 #   PUBLISH_ORDER below is one valid topological sort of that graph: every crate is listed
 #   after everything it depends on. All ten share the workspace's version (SCOPE §7.2: "the
 #   ★ crates and eio-sdk keep a shared one, because crates.io publishes them together
