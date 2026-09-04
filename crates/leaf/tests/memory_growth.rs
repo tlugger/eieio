@@ -19,14 +19,19 @@
 //!    golden blocks declare `(memory 1)` with nothing on the right, because `wasm-ld` emits no
 //!    maximum unless asked and SDK §5.2 deliberately does not ask.
 //!
-//! # The number, and why it is not one page
+//! # The number, and why it is measured rather than read off a memory section
 //!
-//! [`the_page_reserve_is_what_the_suite_measures`] is the measurement, and it is the reason
-//! `eio_leaf::V1_MEMORY_PAGES` is **two** pages rather than the one a reading of the golden
-//! blocks' memory sections would suggest. A Rust guest's declared minimum is its statics and
-//! its shadow stack; its heap is not in there, because `dlmalloc` on
-//! `wasm32-unknown-unknown` takes every byte it hands out from `memory.grow`. At a one-page
-//! bound `counter` fails `eio_configure` with `ERR_LIMIT` before a signal is ever routed.
+//! [`the_page_reserve_is_what_the_suite_measures`] is the measurement, and
+//! `eio_leaf::V1_MEMORY_PAGES` is **one** page. That is the same number a reading of the golden
+//! blocks' memory sections would suggest, and it is emphatically not read from there: a Rust
+//! guest's declared minimum is its statics and its shadow stack, and its heap need not be in
+//! there at all. This constant read **two** until SDK §4.1 landed, because `dlmalloc` at its
+//! default 64 KiB granularity declined the ~38 KiB the linker leaves inside the declared page —
+//! its donation of the `__heap_base`..`__heap_end` span fires only when the span is at least one
+//! granule — and took its whole heap from `memory.grow` instead. At a one-page bound `counter`
+//! failed `eio_configure` with `ERR_LIMIT` before a signal was ever routed. A 4 096-byte
+//! granularity is what made the declaration and the footprint agree again, and this file is what
+//! would notice if they stopped agreeing.
 //!
 //! # What a guest observes, in ABI §8's vocabulary: nothing new
 //!
@@ -162,7 +167,7 @@ fn the_default_instantiate_is_the_bounded_one() {
 ///
 /// This is half 1's justification, measured. WAMR's `wasm_runtime_get_max_mem` takes the
 /// smaller of the host's number and the module's own, so a module that declared it may grow to
-/// four pages is given two and finds out at whatever allocation first crosses a line it was
+/// four pages is given the reserve and finds out at whatever allocation first crosses a line it was
 /// never told about. ABI §4.1 names that outcome and forbids it: a host MUST NOT grant less
 /// than the module declared. So the engine bound cannot be the whole answer, and the generator
 /// refusal is not belt-and-braces — it is the only place this module can be dealt with
@@ -175,7 +180,7 @@ fn a_declared_maximum_is_silently_shrunk_which_is_why_the_generator_refuses_it()
     assert_eq!(
         grow_until_refused(&mut guest) as u32,
         V1_MEMORY_PAGES,
-        "the engine capped a module that declared four pages at the host's two, with no \
+        "the engine capped a module that declared four pages at the host's reserve, with no \
          diagnostic anywhere — the refusal a deployer can act on is `eio_leaf_gen`'s, at the \
          firmware build (LEAF §4.2)"
     );
@@ -364,11 +369,13 @@ fn minimum_for(path: &std::path::Path) -> Option<u32> {
 
 /// The headline: what every scenario actually needs, against §4.2's reserve.
 ///
-/// **This is where `V1_MEMORY_PAGES` comes from**, and it is why the constant is two rather
-/// than the one page every golden block *declares*. `wasm-ld` puts a block's statics and shadow
-/// stack in the declared minimum and nothing else; `dlmalloc` on `wasm32-unknown-unknown` takes
-/// its whole heap from `memory.grow`, so the first `eio_alloc` a block serves leaves the page it
-/// declared. The table below is that fact, per scenario.
+/// **This is where `V1_MEMORY_PAGES` comes from**, and the reason it is taken here rather than
+/// read off a golden block's memory section is that the two once disagreed. `wasm-ld` puts a
+/// block's statics and shadow stack in the declared minimum and nothing else, and an allocator
+/// that will not use the remainder inside that page takes its whole heap from `memory.grow` —
+/// which is what `dlmalloc` did at its default granularity, and why this table read two for
+/// every SDK-built block. SDK §4.1's 4 096-byte granularity is what brought it back to one. The
+/// table below is the current state of that, per scenario.
 ///
 /// Two assertions, and the second is the one that keeps the number honest:
 ///

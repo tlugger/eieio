@@ -93,7 +93,12 @@ pub use eio_wamr_host::Guest;
 /// Public because a firmware build's heap-floor arithmetic is §4.2's table and this is one of
 /// its rows: the number a leaf reserves per instance has to be readable by the thing that adds
 /// it up, and by `tests/exec_stack.rs`, rather than restated in either.
-pub const EXEC_STACK_SIZE: u32 = 8 * 1024;
+///
+/// **The value itself is [`crate::V1_EXEC_STACK_BYTES`]**, and this is the name the engine
+/// binding uses for it. The row moved to the crate root when [`crate::V1_MAX_INSTANCES`]
+/// arrived: the thing that adds §4.2's table up depends on this crate with
+/// `default-features = false`, so a row behind an engine feature is a row it cannot see.
+pub const EXEC_STACK_SIZE: u32 = crate::V1_EXEC_STACK_BYTES;
 
 /// Loads and instantiates `wasm` on WAMR's interpreter (ABI §5.1 step 1), with both of LEAF
 /// §4.2's per-instance reserves: [`EXEC_STACK_SIZE`] and [`crate::V1_MEMORY_PAGES`].

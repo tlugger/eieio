@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use eio_leaf_gen::{Inputs, TransportInput, V1_MEMORY_PAGES};
+use eio_leaf_gen::{Inputs, TransportInput, V1_MAX_INSTANCES, V1_MEMORY_PAGES};
 
 /// Turns a service file into LEAF §6.4's baked graph.
 #[derive(Debug, Parser)]
@@ -53,6 +53,13 @@ struct Cli {
     /// The per-instance linear-memory page budget to refuse against (LEAF §4.2).
     #[arg(long, value_name = "PAGES", default_value_t = V1_MEMORY_PAGES)]
     memory_pages: u64,
+
+    /// How many block instances this target's heap floor carries (LEAF §4.2).
+    ///
+    /// Derived from the same table as `--memory-pages` and not independent of it: the floor
+    /// less the shared working set, divided by what one instance costs.
+    #[arg(long, value_name = "COUNT", default_value_t = V1_MAX_INSTANCES)]
+    max_instances: u64,
 
     /// The bus this node speaks on (DAEMON §7.1). Omit for a node that runs no bridge.
     #[arg(long, value_name = "BUS")]
@@ -128,6 +135,7 @@ fn run(cli: &Cli) -> Result<(), String> {
         artifacts: &artifacts,
         transport,
         memory_pages: cli.memory_pages,
+        max_instances: cli.max_instances,
     })
     .map_err(|error| format!("{}: {error}", cli.service.display()))?;
 
