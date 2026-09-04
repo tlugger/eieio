@@ -1,0 +1,59 @@
+[package]
+name = "eio-wamr-host"
+description = "The WAMR interpreter binding of eio_host_core::Engine, shared by the leaf runtime and the ABI §13 conformance harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# ── why this crate is neither of its two callers (eieio-7d8.34) ──────────────
+#
+# `crates/leaf/src/wamr.rs` and `crates/conformance/tests/wamr.rs` were the same
+# ~640 lines twice, including the whole of `impl Engine for Guest` — which is not
+# FFI plumbing but ABI §8's trap classification, and two copies of that can
+# disagree with nothing comparing them. Sharing it directly was rejected, twice
+# correctly: `eio-conformance` depending on `eio-leaf` is a dev-dependency cycle
+# (`eio-leaf` dev-depends on `eio-conformance` for LEAF §9's suite), and it would
+# recast the reference harness's independent fourth-engine measurement as a test
+# of the leaf's own code.
+#
+# So this crate is written for neither, and depends on neither. `eio-leaf` takes
+# it as a normal dependency behind its `wamr` feature; `eio-conformance` takes it
+# as a *dev*-dependency, for the same reason it dev-depends on `wamrx-sys` and
+# `wasm3x` — `crates/daemon` dev-depends on `eio-conformance`, and a library
+# dependency here would put WAMR's C build in the daemon's test path for nothing.
+# No edge runs between the leaf and the harness in either direction.
+#
+# The harness's *measurements* stay the harness's: ABI §4.3's instruction table,
+# the carved-out remainder and all nine refused proposals still drive raw
+# `wamrx-sys` inside `tests/wamr.rs`. What is shared is the instrument.
+#
+# `std`, and never `no_std`: `wamrx-sys` builds WAMR's C core and this crate needs
+# `CString`/`Mutex`/`Once` to drive it. That is why `eio-leaf`'s `wamr` feature
+# implies `std` and why `just check-nostd` never reaches this crate — a bare-metal
+# engine binding is LEAF §11's MCU cross-compile, not this.
+
+[dependencies]
+# `Engine`, `HostFn`, `Memory`, `Trap`/`TrapKind` and `memory_range` — the trait this
+# crate implements and the vocabulary ABI §8 and §9 are stated in (DAEMON §1).
+eio-host-core.workspace = true
+
+# ABI §7's published import table: `CORE_IMPORTS` and `Capability::imports()` are what
+# `register_one` builds WAMR's native signature strings from, so this binding reads §7's
+# signatures rather than restating them (eieio-7d8.18, eieio-7d8.35).
+eio-manifest.workspace = true
+
+# WAMR itself, in interpreter mode. **No `features` key, deliberately**: `wamrx-sys` 0.3.0
+# defaults to exactly `bulk-memory` and `reference-types`, which is LEAF §3.1's requirement
+# stated as a build configuration — enable those two, and do not go adding SIMD, tail call,
+# multi-memory, memory64, threads, exceptions or GC for a convenience. WAMR selects features
+# at CMake time, so the conforming set is kept here by writing nothing.
+#
+# `wamrx` — the safe wrapper `wamrx-sys` backs — is deliberately absent; `src/lib.rs`'s module
+# docs are the long version of why (its linker closures never see the calling instance, its
+# handles are `pub(crate)`, and its `Engine` wipes the native registry on drop).
+wamrx-sys = "0.3.0"
+
+[lints]
+workspace = true

@@ -1,31 +1,52 @@
 //! The suite against **WAMR**'s fast interpreter — the leaf-class engine SCOPE §3.2 and
 //! SDK §5 name for ESP32-class targets, alongside wasm3 (ABI-SPEC §13, eieio-x7g.3).
 //!
+//! # The binding is [`eio_wamr_host`]; the measurements are this file's (eieio-7d8.34)
+//!
+//! This file used to carry its own ~450-line raw-FFI binding of `eio_host_core::Engine`, and
+//! `crates/leaf/src/wamr.rs` — copied from it — carried the same one again. ~640 of the two
+//! files' ~880 non-blank, non-comment lines were identical, and the identical part included
+//! the whole of `impl Engine for Guest`: ABI §8's `TrapKind::Trap`-versus-`TrapKind::Engine`
+//! classification, what a missing export or a wrong-shaped return says, `MAX_ARITY`,
+//! `EngineError::DuplicateImport`, `has_export`'s `memory` special case. Two copies of *that*
+//! can disagree, and nothing in the suite compares them: no scenario pins `dead: "trap"`, so a
+//! host that reclassified a WAMR failure would go on passing while disagreeing with this
+//! file's own measurement about what ABI §8 says happened.
+//!
+//! Sharing it needed a crate written for neither, and `crates/wamr-host` is that crate: it
+//! depends on `eio-host-core`, `eio-manifest` and `wamrx-sys` and on nothing else in the
+//! workspace. So there is no `eio-conformance` → `eio-leaf` edge (which would be a cycle,
+//! since `eio-leaf` dev-depends on this crate for LEAF §9's suite) and this file is not
+//! measuring the leaf's code — the objection the bead recorded, and the reason the obvious
+//! merge was right to be refused.
+//!
+//! **What this file kept is every measurement.** ABI §4.3's accepted-set instruction table,
+//! the carved-out remainder WAMR runs where wasm3 refuses, all nine refused proposals and
+//! whether a refusal names one still drive `wasm_runtime_load`, `wasm_runtime_instantiate` and
+//! `wasm_runtime_call_wasm_a` directly, from [`raw_load`] and [`run`] below, against raw
+//! `wamrx_sys`. Those never touch [`Guest`]. What the shared crate supplies is the instrument
+//! — load, instantiate, call, read, write — which is the layer where a second copy is a
+//! liability rather than a corroboration.
+//!
+//! The `unsafe` that remains here is therefore the fixtures' and not a host binding's, and
+//! CLAUDE.md's list says so.
+//!
 //! # `wamrx`'s safe wrapper cannot express this host
 //!
-//! `wamrx::Linker::define_func` takes `Fn(&[Val], &mut [Val]) + 'static` — no `Caller`, no
-//! access to the calling instance at all. WAMR's own raw native calling convention hands the
-//! C trampoline an `exec_env`, but `wamrx` never forwards it to the Rust closure. Every ABI
-//! §7 function that touches guest memory — `log`, `emit`, `prop`, every capability's
-//! `state_get`/`i2c_read`/… — needs exactly that access, so a host built on `wamrx::Linker`
-//! could implement only the handful of ABI §7 functions with no `(ptr, len)` at all
-//! (`gpio_read`, `timer_set`, …), which is not enough to run a single realistic scenario:
-//! even `01_lifecycle.json`'s property evaluation calls `prop`.
-//!
-//! `wamrx::Module` and `wamrx::Instance` compound the problem: their raw handles are
-//! `pub(crate)`, so there is no way to hand a module loaded through `wamrx::Module::new` to a
-//! native-registration path built directly against `wamrx_sys`, or to reach the `exec_env` a
-//! `wamrx::Instance` owns. There is no partial mix of the two layers on offer — this file
-//! therefore reimplements the load/instantiate/call/memory operations directly against
-//! `wamrx_sys`'s raw FFI, the same layer `wamrx`'s own `Linker` and `Instance` are built on.
-//! `wamrx::Engine`'s runtime init/refcount lifecycle turned out not to be reusable either (see
-//! [`ensure_runtime`]'s doc), so this file ends up depending on `wamrx-sys` alone and not on
-//! `wamrx` at all — the Cargo.toml dependency comment explains both halves of why.
-//!
-//! This is a real capability gap in the *published binding*, not in WAMR itself: WAMR's C API
-//! (`wasm_runtime_get_module_inst`, `wasm_runtime_lookup_memory`, …) supports exactly what is
-//! needed, and this file's `raw_trampoline` uses it the same way `wamrx`'s internal one does,
-//! one layer lower.
+//! Summarised here because it is why the shared crate is raw FFI at all, and stated in full in
+//! `crates/wamr-host`'s module docs. `wamrx::Linker::define_func` takes
+//! `Fn(&[Val], &mut [Val]) + 'static` — no `Caller`, no access to the calling instance at all.
+//! WAMR's own raw native calling convention hands the C trampoline an `exec_env`, but `wamrx`
+//! never forwards it to the Rust closure. Every ABI §7 function that touches guest memory —
+//! `log`, `emit`, `prop`, every capability's `state_get`/`i2c_read`/… — needs exactly that
+//! access, so a host built on `wamrx::Linker` could implement only the handful of ABI §7
+//! functions with no `(ptr, len)` at all (`gpio_read`, `timer_set`, …), which is not enough to
+//! run a single realistic scenario: even `01_lifecycle.json`'s property evaluation calls
+//! `prop`. `wamrx::Module` and `wamrx::Instance` compound it — their raw handles are
+//! `pub(crate)`, so there is no partial mix of the two layers on offer — and `wamrx::Engine`
+//! tears the runtime down (wiping its native registry with it) when its last clone drops,
+//! which is fatal to a registration that must happen exactly once for the process. This is a
+//! gap in the *published binding*, not in WAMR itself.
 //!
 //! # What was measured, and where it landed
 //!
@@ -50,9 +71,10 @@
 //! - **Broader engine-layer refusal than wasm3, narrower than nothing.** Unlike wasm3, which
 //!   *runs* tail call, memory64 and threads (ABI §4.3's three measured, loader-refused gaps),
 //!   WAMR's default build (`bulk-memory` and `reference-types` only — `wamrx-sys`'s own
-//!   defaults, which is why this file adds no `features` to that dependency) refuses all nine
-//!   of §4.3's refused proposals at load time, including those three. This needs no loader
-//!   carve-out of its own; the existing one stays because wasm3 still needs it.
+//!   defaults, which is why neither this crate nor `crates/wamr-host` adds a `features` key to
+//!   that dependency) refuses all nine of §4.3's refused proposals at load time, including
+//!   those three. This needs no loader carve-out of its own; the existing one stays because
+//!   wasm3 still needs it.
 //! - **A wider accepted engine than the portable subset.** WAMR's `bulk-memory` and
 //!   `reference-types` features are the *whole* proposals, not wasm3's partial ones:
 //!   `memory.init`, `data.drop`, `table.init`, `table.copy`, `elem.drop`, `ref.null`,
@@ -69,429 +91,64 @@
 //! WAMR's runtime is a process-wide singleton (`wamrx::Engine`'s own doc calls it "neither
 //! `Send` nor `Sync`"), and nothing in its public documentation states that concurrent module
 //! load/instantiate/teardown from *different* threads against *different* instances is safe.
-//! `cargo test` runs `#[test]` functions on a thread pool by default, so [`WAMR_LOCK`]
-//! serializes every [`Wamr::instantiate`] against every other one, and a [`Guest`] holds the
-//! lock for its whole lifetime rather than release it after instantiation: the risk is around
-//! the runtime's shared state generally, not narrowly around the moment of instantiation, and
-//! a conformance harness has nothing to gain from finding that boundary experimentally.
-
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::ffi::{CString, c_char, c_void};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Mutex, MutexGuard, Once};
+//! `cargo test` runs `#[test]` functions on a thread pool by default, so every operation
+//! against that runtime is serialized by `eio_wamr_host::with_wamr`.
+//!
+//! **This file used to hold that lock for a [`Guest`]'s whole lifetime and no longer does**,
+//! and the change is a strict improvement in both directions. The shared binding takes the
+//! lock per *operation*, because a leaf runs a graph and a lifetime-held guard would deadlock
+//! its second instantiation against its first live instance — sound because re-entering it is
+//! unconstructible: a host function is handed an `eio_host_core::Memory`, which carries no way
+//! back into the engine (ABI §1.2). For this file that means several guests may now be alive
+//! at once, which costs one 8 MiB execution stack each (see [`EXEC_STACK_SIZE`]) on a machine
+//! with gigabytes. In the other direction it closes a gap the lifetime-held guard never
+//! covered: [`raw_load`], [`run`] and [`engine_refuses`] drive the same global runtime
+//! *without* going through a [`Guest`], and used to take no lock at all. They take it now,
+//! at their outermost call, which is why [`raw_load`] itself does not — `with_wamr` is not
+//! re-entrant.
 
 use eio_conformance::{Budget, Host, HostError, suite};
-use eio_host_core::{
-    Arg, Engine, EngineError, HostCall, HostFn, Memory as GuestMemory, Ret, Trap, TrapKind,
-    memory_range,
-};
 use eio_manifest::{Capability, MEMORY_EXPORT};
+use eio_wamr_host::{
+    ERR_BUF_SIZE, Guest, HEAP_SIZE, InstantiateError, cstr_buf, cstr_ptr, ensure_runtime,
+    ensure_thread_env, wasm_val_i32, with_wamr,
+};
+use std::ffi::{CString, c_char};
 use wamrx_sys as sys;
 
-/// The most arguments any ABI §4 export takes: `eio_on_http(req_id, status, ptr, len)`.
-const MAX_ARITY: usize = 4;
-
-/// Size of the stack buffer WAMR writes diagnostic messages into (mirrors `wamrx::util`'s,
-/// which is `pub(crate)` and so not reachable from here).
-const ERR_BUF_SIZE: usize = 256;
-
-/// `wamrx::InstanceConfig`'s defaults, restated because that type's fields are `pub(crate)`.
+/// The engine execution stack every instance and every fixture in this file is created with —
+/// `wamrx::InstanceConfig`'s own default, restated because that type's fields are `pub(crate)`.
 ///
-/// **These stay `wamrx`'s numbers, and `crates/leaf/src/wamr.rs`'s no longer do** — the two
-/// files are otherwise the same shape, so the difference is worth stating here rather than
-/// leaving to whoever notices it next (eieio-x7g.2.24).
-///
-/// `EXEC_STACK_SIZE` is the size `wasm_runtime_create_exec_env` mallocs *and* `memset`s per
-/// instance, retained for that instance's life. Eight mebibytes of it is indefensible on a
-/// leaf, where LEAF §4.2 reserves 8 KiB per instance out of a 192 KiB heap floor, and the leaf
-/// binding now measures its way to that number (`crates/leaf/tests/exec_stack.rs`: the whole
-/// suite fits in 3 252 bytes on WAMR's interpreter, and 8 KiB is a 2.5× margin over it).
+/// **This stays `wamrx`'s number, and `crates/leaf`'s no longer does** (eieio-x7g.2.24). It is
+/// the size `wasm_runtime_create_exec_env` mallocs *and* `memset`s per instance, retained for
+/// that instance's life. Eight mebibytes of it is indefensible on a leaf, where LEAF §4.2
+/// reserves 8 KiB per instance out of a 192 KiB heap floor, and the leaf binding measures its
+/// way to that number (`crates/leaf/tests/exec_stack.rs`: the whole suite fits in 3 252 bytes
+/// on WAMR's interpreter, and 8 KiB is a 2.5× margin over it).
 ///
 /// It is *not* indefensible here, and the reason is what this file is for. This is a desktop
 /// reference measurement of what WAMR does with ABI §13's scenarios — including the hostile
 /// blocks, whose whole job is to behave badly — and its design goal is that a scenario result
 /// never has to be qualified with "on a host that was being stingy". A conformance harness that
 /// imposed a *measured* limit would be a harness whose failures need a second explanation, and
-/// the number it imposed would have nothing to do with the ABI it is testing. The cost is one
-/// 8 MiB allocation live at a time (this file's `Guest` holds `WAMR_LOCK` for its whole life,
-/// so there is never a second), on a machine with gigabytes, and it was measured before being
-/// kept: dropping the leaf's copy from 8 MiB to 8 KiB moved that crate's whole suite by less
-/// than its own run-to-run noise (0.127 s → 0.147 s over 33 tests). So this is a memory
-/// number, not a time one, and the memory is not scarce here.
+/// the number it imposed would have nothing to do with the ABI it is testing. The cost was
+/// measured before being kept: dropping the leaf's copy from 8 MiB to 8 KiB moved that crate's
+/// whole suite by less than its own run-to-run noise (0.127 s → 0.147 s over 33 tests). So this
+/// is a memory number, not a time one, and the memory is not scarce here.
 ///
-/// What was worth fixing is that the *leaf* inherited it by copying, which is the same class of
-/// defect as the golden blocks' 17-page shadow stack (eieio-x7g.2.21). Hence this comment: the
-/// next file that copies this one is copying a desktop harness, and should say which of the two
-/// it is before it takes the number.
-const AUX_STACK_SIZE: u32 = 64 * 1024;
-const HEAP_SIZE: u32 = 0;
+/// That the two callers want different numbers is exactly why `eio_wamr_host::instantiate`
+/// *takes* one rather than owning a constant: a shared constant would be one of these two
+/// budgets imposed on the other, which is the defect that made the shared crate necessary in
+/// the first place.
 const EXEC_STACK_SIZE: u32 = 8 * 1024 * 1024;
-
-/// Serializes every operation that touches WAMR's process-global runtime. See the module
-/// docs' "Concurrency" section.
-static WAMR_LOCK: Mutex<()> = Mutex::new(());
-
-/// A parameter or result's WASM value kind, restricted to ABI §7's two: `i32` everywhere, and
-/// `i64` for `timer_set`'s `delay_ms` and the two clocks (§7.0, §7.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    I32,
-    I64,
-}
-
-impl Kind {
-    /// The character WAMR's native signature string uses for this kind.
-    fn signature_char(self) -> u8 {
-        match self {
-            Kind::I32 => b'i',
-            Kind::I64 => b'I',
-        }
-    }
-}
-
-/// Every ABI §7 function's signature, as `(params, results)`.
-///
-/// Restated here for the reason `tests/wasm3.rs`'s identical table is: `wamrx_sys`'s raw
-/// registration wants a signature string, and this second statement of §7's table is exactly
-/// the duplication eieio-7d8.18 is filed about.
-fn signature(name: &str) -> (Vec<Kind>, Vec<Kind>) {
-    use Kind::{I32, I64};
-    let i32s = |n: usize| vec![I32; n];
-    match name {
-        "log" | "error" => (i32s(3), vec![]),
-        "emit" => (i32s(3), vec![I32]),
-        "prop" => (i32s(4), vec![I32]),
-        "time_unix_ms" | "time_mono_ms" => (vec![], vec![I64]),
-        "rand" => (i32s(2), vec![I32]),
-        "state_get" | "state_put" => (i32s(4), vec![I32]),
-        "state_del" => (i32s(2), vec![I32]),
-        "timer_set" => (vec![I64, I32], vec![I32]),
-        "timer_cancel" | "gpio_read" | "gpio_unwatch" => (i32s(1), vec![I32]),
-        "gpio_mode" | "gpio_write" | "gpio_watch" | "http_request" => (i32s(2), vec![I32]),
-        "i2c_write" | "i2c_read" => (i32s(4), vec![I32]),
-        "i2c_write_read" => (i32s(6), vec![I32]),
-        other => panic!("{other} is not an ABI §7 function"),
-    }
-}
-
-/// Every `(namespace, name)` pair ABI §7 defines, core plus all five capabilities.
-fn every_abi_7_function() -> Vec<(&'static str, &'static str)> {
-    use eio_host_core::exports::{core_fn, namespace as ns};
-
-    let mut all: Vec<(&'static str, &'static str)> =
-        core_fn::ALL.iter().map(|name| (ns::CORE, *name)).collect();
-    for capability in Capability::ALL {
-        for name in capability.functions().iter().copied() {
-            all.push((capability.namespace(), name));
-        }
-    }
-    all
-}
-
-// ── per-thread setup ────────────────────────────────────────────────────────────────
-
-/// Mirrors `wamrx::thread`'s guard, which is `pub(crate)` and so not reachable from here.
-/// WAMR's hardware bound-checking installs per-thread signal handlers when enabled; it is not
-/// enabled in `wamrx-sys`'s default build (see the module docs), but the underlying
-/// `os_thread_signal_init` this calls is idempotent per thread and cheap regardless, so it is
-/// called unconditionally rather than made to depend on that.
-struct ThreadEnvGuard;
-
-impl ThreadEnvGuard {
-    fn new() -> ThreadEnvGuard {
-        // SAFETY: the runtime is initialized (by `ensure_runtime`, which every entry point
-        // into this file calls first) before any `Wamr`-derived call reaches here.
-        unsafe { sys::wasm_runtime_init_thread_env() };
-        ThreadEnvGuard
-    }
-}
-
-impl Drop for ThreadEnvGuard {
-    fn drop(&mut self) {
-        // SAFETY: matches the init above; safe to call at thread exit.
-        unsafe { sys::wasm_runtime_destroy_thread_env() };
-    }
-}
-
-thread_local! {
-    static THREAD_ENV: ThreadEnvGuard = ThreadEnvGuard::new();
-}
-
-fn ensure_thread_env() {
-    THREAD_ENV.with(|_| {});
-}
-
-// ── native registration ─────────────────────────────────────────────────────────────
-
-/// One registered native's fixed context, reached through WAMR's `attachment` pointer.
-///
-/// Leaked deliberately, along with every C string and array [`register_one`] builds: WAMR's
-/// native registry is process-global (`wamrx_sys`'s own doc, restated in this crate's
-/// `Cargo.toml`) and [`ensure_natives_registered`] runs its registration exactly once for the
-/// process's whole life, so there is no point at which freeing any of it would be correct —
-/// the pointers must outlive every module that ever imports them, which in this binary is
-/// "forever". The set is fixed and small (ABI §7's twenty-one functions), so the leak is
-/// bounded.
-struct HostCtx {
-    namespace: &'static str,
-    name: &'static str,
-    params: Vec<Kind>,
-    results: Vec<Kind>,
-}
-
-/// Builds the WAMR native signature string for `(params, results)`, e.g. `"(iii)i"`.
-fn signature_cstring(params: &[Kind], results: &[Kind]) -> CString {
-    let mut s = Vec::with_capacity(params.len() + results.len() + 2);
-    s.push(b'(');
-    s.extend(params.iter().map(|k| k.signature_char()));
-    s.push(b')');
-    s.extend(results.iter().map(|k| k.signature_char()));
-    CString::new(s).expect("signature contains no NUL bytes")
-}
-
-/// Registers `namespace`.`name` with WAMR's global native registry, dispatching every call
-/// through [`raw_trampoline`].
-fn register_one(namespace: &'static str, name: &'static str) {
-    let (params, results) = signature(name);
-    let sig = signature_cstring(&params, &results);
-    let ctx = Box::new(HostCtx {
-        namespace,
-        name,
-        params,
-        results,
-    });
-    let ctx_ptr = Box::into_raw(ctx);
-
-    let module_name =
-        CString::into_raw(CString::new(namespace).expect("a namespace has no interior NUL"));
-    let field = CString::into_raw(CString::new(name).expect("a function name has no interior NUL"));
-    let sig_ptr = CString::into_raw(sig);
-
-    let symbol: *mut sys::NativeSymbol = Box::into_raw(Box::new(sys::NativeSymbol {
-        symbol: field as *const c_char,
-        func_ptr: raw_trampoline as *mut c_void,
-        signature: sig_ptr as *const c_char,
-        attachment: ctx_ptr as *mut c_void,
-    }));
-
-    // SAFETY: `module_name`, `symbol`, and the `HostCtx` `symbol`'s `attachment` points to are
-    // all leaked just above and never freed (see this struct's docs), so every pointer WAMR
-    // retains here stays valid for the process's life.
-    let ok =
-        unsafe { sys::wasm_runtime_register_natives_raw(module_name as *const c_char, symbol, 1) };
-    assert!(ok, "WAMR refused to register {namespace} {name}");
-}
-
-/// Initializes the WAMR runtime and registers every ABI §7 function, both exactly once for the
-/// process's whole life — and, deliberately, never torn down.
-///
-/// `wamrx::Engine` was the first approach here, and it does not work: it tears the runtime
-/// down via `wasm_runtime_destroy` when its last clone drops, and `wasm_runtime_destroy` wipes
-/// WAMR's native registry along with everything else. A `Wamr` holding one `Engine` per
-/// instance — one per [`Wamr::new`] call, dropped at the end of whichever test or scenario
-/// created it — tears the runtime down the moment one test finishes, and the *next*
-/// `wasm_runtime_full_init` starts from an empty native registry with no way back in: this
-/// file's registration is a process-lifetime [`Once`], by design (WAMR resolves a module's
-/// imports against the registry at *load* time, so it must already hold everything before the
-/// first module loads). Measured, not assumed: the first version of this file used
-/// `wamrx::Engine` this way, and every module past the first test in a run failed to link
-/// (`failed to link import function`) — including modules with no imports at all
-/// (`wasm_runtime_malloc failed: memory hasn't been initialized`), because the torn-down
-/// runtime's global allocator state went with it.
-///
-/// So this calls `wasm_runtime_full_init` directly, behind its own `Once`, and there is no
-/// corresponding `wasm_runtime_destroy` anywhere in this file: the runtime and its natives
-/// live for exactly as long as the leaked registrations in [`register_one`] do, which is to
-/// say the process's life, reclaimed by the OS at exit like every other test binary's static
-/// state. `wamrx::Engine`'s `Rc`-based refcounting is also why it cannot sit in a `static`
-/// directly (`Engine` is neither `Send` nor `Sync`, by its own design) — a second reason this
-/// file does not depend on `wamrx` at all, only `wamrx-sys`.
-fn ensure_runtime() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let mut args = sys::RuntimeInitArgs {
-            mem_alloc_type: sys::Alloc_With_System_Allocator,
-            // SAFETY: every other field is zero-valid; WAMR reads only `mem_alloc_type` and
-            // `mem_alloc_option` when the allocator is the system one.
-            ..unsafe { std::mem::zeroed() }
-        };
-        // SAFETY: `args` is a valid, fully-initialized init-args struct, and this runs at
-        // most once for the process's life (`Once`).
-        let ok = unsafe { sys::wasm_runtime_full_init(&mut args) };
-        assert!(ok, "the WAMR runtime failed to initialize");
-        for (namespace, name) in every_abi_7_function() {
-            register_one(namespace, name);
-        }
-    });
-}
-
-/// One guest instance's registered handlers, reached from [`raw_trampoline`] through WAMR's
-/// per-`exec_env` user data (`wasm_runtime_set_user_data`/`get_user_data`) — the WAMR
-/// equivalent of wasmtime's `Store` data or wasm3's `Store` data, and, like both, this file's
-/// answer to "where does a call find out what to do".
-#[derive(Default)]
-struct GuestState {
-    funcs: RefCell<BTreeMap<(&'static str, &'static str), HostFn>>,
-}
-
-/// Guest memory for the duration of one host call, reached through the caller's `module_inst`
-/// rather than a borrowed store: WAMR's raw native calling convention hands the trampoline no
-/// borrow to speak of, only handles.
-///
-/// Like the other two hosts' equivalents, this has no `call`: [`eio_host_core::Memory`]
-/// carries none, so a handler cannot re-enter the guest (ABI §1.2).
-struct View {
-    module_inst: sys::wasm_module_inst_t,
-}
-
-impl View {
-    /// The live memory instance, or `None` if the module (contrary to `instantiate`'s own
-    /// check) exports none.
-    fn memory(&self) -> Option<sys::wasm_memory_inst_t> {
-        // WAMR ignores the name with multi-memory off (`wamrx`'s own `Instance::get_memory`
-        // doc) and this build never turns multi-memory on (see the module docs), so any name
-        // reaches the module's sole memory.
-        let name = CString::new(MEMORY_EXPORT).expect("the export name has no interior NUL");
-        // SAFETY: `module_inst` is a live instance handle for the duration of this call.
-        let mem = unsafe { sys::wasm_runtime_lookup_memory(self.module_inst, name.as_ptr()) };
-        if mem.is_null() { None } else { Some(mem) }
-    }
-
-    /// The memory's bytes, sized from its live page count — never from WAMR's declared type,
-    /// which it folds into one oversized page for a non-growing memory (`wamrx`'s own
-    /// `Memory::byte_len` doc explains the same wrinkle).
-    fn bytes(&self) -> &[u8] {
-        let Some(mem) = self.memory() else { return &[] };
-        // SAFETY: `mem` is a live memory instance belonging to `module_inst`, which outlives
-        // this borrow.
-        unsafe {
-            let base = sys::wasm_memory_get_base_address(mem) as *const u8;
-            if base.is_null() {
-                return &[];
-            }
-            let pages = sys::wasm_memory_get_cur_page_count(mem);
-            let per_page = sys::wasm_memory_get_bytes_per_page(mem);
-            std::slice::from_raw_parts(base, pages.saturating_mul(per_page) as usize)
-        }
-    }
-
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        let Some(mem) = self.memory() else {
-            return &mut [];
-        };
-        // SAFETY: as `bytes`; `&mut self` rules out an aliasing view through this handle.
-        unsafe {
-            let base = sys::wasm_memory_get_base_address(mem) as *mut u8;
-            if base.is_null() {
-                return &mut [];
-            }
-            let pages = sys::wasm_memory_get_cur_page_count(mem);
-            let per_page = sys::wasm_memory_get_bytes_per_page(mem);
-            std::slice::from_raw_parts_mut(base, pages.saturating_mul(per_page) as usize)
-        }
-    }
-}
-
-impl GuestMemory for View {
-    fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError> {
-        let data = self.bytes();
-        memory_range(data.len(), ptr, len).map(|range| data[range].to_vec())
-    }
-
-    fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError> {
-        let range = memory_range(self.bytes_mut().len(), ptr, bytes.len() as u64)?;
-        self.bytes_mut()[range].copy_from_slice(bytes);
-        Ok(())
-    }
-}
-
-/// The single generic C trampoline every registered native dispatches through.
-///
-/// WAMR's raw convention hands one 64-bit slot per parameter in `argv` and expects a single
-/// result written back to `argv[0]`. The per-function [`HostCtx`] travels via the
-/// `attachment` pointer, and the *live instance's* handler table travels via
-/// `wasm_runtime_get_user_data(exec_env)` — set once, in [`Wamr::instantiate`], right after
-/// the `exec_env` is created.
-unsafe extern "C" fn raw_trampoline(exec_env: sys::wasm_exec_env_t, argv: *mut u64) {
-    // SAFETY: `exec_env` is the live environment WAMR is calling this trampoline through, and
-    // every raw call inside is documented at its own site below.
-    unsafe {
-        let attachment = sys::wasm_runtime_get_function_attachment(exec_env);
-        if attachment.is_null() {
-            return;
-        }
-        // SAFETY: `attachment` is the `HostCtx` `register_one` leaked for this native; it is
-        // never freed (see that function's docs), so it outlives every call.
-        let ctx = &*(attachment as *const HostCtx);
-
-        let args: Vec<Arg> = ctx
-            .params
-            .iter()
-            .enumerate()
-            .map(|(i, kind)| {
-                // SAFETY: WAMR guarantees one valid 64-bit slot per declared parameter.
-                let slot = *argv.add(i);
-                match kind {
-                    Kind::I32 => Arg::I32(slot as u32 as i32),
-                    Kind::I64 => Arg::I64(slot as i64),
-                }
-            })
-            .collect();
-
-        // SAFETY: `exec_env` is the live environment WAMR is calling through.
-        let module_inst = sys::wasm_runtime_get_module_inst(exec_env);
-        // SAFETY: set by `Wamr::instantiate` immediately after this `exec_env` was created,
-        // and never cleared before the `Guest` (which owns both) is dropped.
-        let state_ptr = sys::wasm_runtime_get_user_data(exec_env) as *const GuestState;
-
-        let ret = if state_ptr.is_null() {
-            // Unreachable in practice: `instantiate` always sets this before returning a
-            // `Guest`. Answered as "unimplemented" rather than trusted to be unreachable,
-            // exactly as an unregistered `(ns, name)` is below.
-            Ret::None
-        } else {
-            let state = &*state_ptr;
-            // Guarded against a panicking handler: unwinding across this `extern "C"`
-            // boundary is UB, so a panic becomes a WASM exception instead (`wamrx`'s own
-            // trampoline does the same for the identical reason).
-            let outcome = catch_unwind(AssertUnwindSafe(|| {
-                let mut view = View { module_inst };
-                match state.funcs.borrow_mut().get_mut(&(ctx.namespace, ctx.name)) {
-                    Some(handler) => handler(HostCall {
-                        args: &args,
-                        memory: &mut view,
-                    }),
-                    None => Ret::None,
-                }
-            }));
-            match outcome {
-                Ok(ret) => ret,
-                Err(_) => {
-                    let msg = CString::new("host function panicked").expect("no interior NUL");
-                    sys::wasm_runtime_set_exception(module_inst, msg.as_ptr());
-                    return;
-                }
-            }
-        };
-
-        match (ret, ctx.results.first()) {
-            (Ret::I32(value), Some(Kind::I32)) => *argv = value as u32 as u64,
-            (Ret::I64(value), Some(Kind::I64)) => *argv = value as u64,
-            // `log` and `error` return nothing, and an unimplemented `-> i32`/`-> i64`
-            // function is answered by the caller's own default (WAMR zero-initializes
-            // `argv`), exactly as the other two hosts' dispatch does.
-            _ => {}
-        }
-    }
-}
 
 // ── the host ─────────────────────────────────────────────────────────────────────────
 
 /// The WAMR fast-interpreter host (ABI §13.1).
 ///
-/// Carries no `wamrx::Engine` of its own — see [`ensure_runtime`]'s doc for why a `Wamr` that
-/// held one would tear the whole runtime down the moment it was the last one dropped.
+/// Carries no engine handle of its own: WAMR's runtime is a process-global singleton that
+/// `eio_wamr_host::ensure_runtime` brings up once and never tears down (its doc has the
+/// measurement of what happens when something tries).
 pub struct Wamr;
 
 impl Wamr {
@@ -510,9 +167,9 @@ impl Host for Wamr {
         "wamr"
     }
 
-    /// All five. WAMR implements no host functions of its own — every one of them is this
-    /// file's, exactly as on the other two hosts — so what a capability costs here is a
-    /// registration this file already did once, for every module.
+    /// All five. WAMR implements no host functions of its own — every one of them is the
+    /// harness's, exactly as on the other two hosts — so what a capability costs here is a
+    /// registration the shared binding already did once, for every module.
     fn capabilities(&self) -> &[Capability] {
         &Capability::ALL
     }
@@ -529,275 +186,53 @@ impl Host for Wamr {
         false
     }
 
+    /// The budget is ignored for the reason [`Host::enforces_budgets`] gives; the stack is
+    /// [`EXEC_STACK_SIZE`], this harness's own and not the leaf's.
+    ///
+    /// Every failure is a [`HostError::Refused`], worded as this file has always worded it —
+    /// `InstantiateError` is a structured refusal precisely so that the two callers of the
+    /// shared binding keep their own wording, since a leaf's `spawn` message and an ABI §13
+    /// scenario report are read by different people.
     fn instantiate(&mut self, wasm: &[u8], _budget: Budget) -> Result<Guest, HostError> {
-        ensure_thread_env();
-        let lock = WAMR_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-
-        // `wasm_runtime_load` mutates and retains this buffer for the module's whole life
-        // (`wamrx::Module`'s own doc explains the same requirement), so it is owned here and
-        // kept in `Guest` rather than borrowed from the caller.
-        let mut owned: Box<[u8]> = wasm.to_vec().into_boxed_slice();
-        let mut err_buf = [0 as c_char; ERR_BUF_SIZE];
-        // SAFETY: `owned` is a valid, exclusively-owned buffer of its stated length; `err_buf`
-        // is a valid, correctly-sized out-buffer.
-        let module = unsafe {
-            sys::wasm_runtime_load(
-                owned.as_mut_ptr(),
-                owned.len() as u32,
-                err_buf.as_mut_ptr(),
-                err_buf.len() as u32,
-            )
-        };
-        if module.is_null() {
-            return Err(HostError::Refused(cstr_buf(&err_buf)));
-        }
-
-        let mut err_buf2 = [0 as c_char; ERR_BUF_SIZE];
-        // SAFETY: `module` is the handle just returned by a successful `wasm_runtime_load`.
-        let module_inst = unsafe {
-            sys::wasm_runtime_instantiate(
-                module,
-                AUX_STACK_SIZE,
-                HEAP_SIZE,
-                err_buf2.as_mut_ptr(),
-                err_buf2.len() as u32,
-            )
-        };
-        if module_inst.is_null() {
-            let detail = cstr_buf(&err_buf2);
-            // SAFETY: `module` is live and not yet unloaded.
-            unsafe { sys::wasm_runtime_unload(module) };
-            return Err(HostError::Refused(detail));
-        }
-
-        let name = CString::new(MEMORY_EXPORT).expect("the export name has no interior NUL");
-        // SAFETY: `module_inst` is a live instance handle.
-        let has_memory =
-            !unsafe { sys::wasm_runtime_lookup_memory(module_inst, name.as_ptr()) }.is_null();
-        if !has_memory {
-            // SAFETY: both handles are live and owned exclusively here.
-            unsafe {
-                sys::wasm_runtime_deinstantiate(module_inst);
-                sys::wasm_runtime_unload(module);
+        eio_wamr_host::instantiate(wasm, EXEC_STACK_SIZE).map_err(|error| match error {
+            InstantiateError::Load(detail) | InstantiateError::Instantiate(detail) => {
+                HostError::Refused(detail)
             }
-            return Err(HostError::Refused(format!(
-                "the module does not export {MEMORY_EXPORT:?}"
-            )));
-        }
-
-        // SAFETY: `module_inst` is a live instance handle.
-        let exec_env = unsafe { sys::wasm_runtime_create_exec_env(module_inst, EXEC_STACK_SIZE) };
-        if exec_env.is_null() {
-            // SAFETY: as above.
-            unsafe {
-                sys::wasm_runtime_deinstantiate(module_inst);
-                sys::wasm_runtime_unload(module);
+            InstantiateError::NoMemory => {
+                HostError::Refused(format!("the module does not export {MEMORY_EXPORT:?}"))
             }
-            return Err(HostError::Refused(
-                "failed to create an execution environment".to_string(),
-            ));
-        }
-
-        let state = Box::new(GuestState::default());
-        // SAFETY: `exec_env` is live and owned exclusively by the `Guest` this returns, which
-        // also owns `state` and keeps it alive at a stable heap address for at least as long.
-        unsafe {
-            sys::wasm_runtime_set_user_data(exec_env, (&*state as *const GuestState) as *mut c_void)
-        };
-
-        Ok(Guest {
-            module,
-            module_inst,
-            exec_env,
-            _bytes: owned,
-            state,
-            _lock: lock,
+            InstantiateError::ExecEnv => {
+                HostError::Refused("failed to create an execution environment".to_string())
+            }
+            // Unreachable: `EXEC_STACK_SIZE` is not zero.
+            InstantiateError::ZeroStack => HostError::Refused(error.to_string()),
         })
     }
 }
 
-/// A live guest instance, as `eio_host_core` drives it.
-pub struct Guest {
-    module: sys::wasm_module_t,
-    module_inst: sys::wasm_module_inst_t,
-    exec_env: sys::wasm_exec_env_t,
-    /// The module's own backing bytes; WAMR retains pointers into this for the module's life.
-    _bytes: Box<[u8]>,
-    /// This instance's registered handlers, reached from [`raw_trampoline`] through
-    /// `exec_env`'s user data. Boxed so its heap address is stable across a `Guest` move.
-    state: Box<GuestState>,
-    /// Held for this `Guest`'s whole life. See the module docs' "Concurrency" section.
-    _lock: MutexGuard<'static, ()>,
-}
-
-fn wasm_val_i32(value: i32) -> sys::wasm_val_t {
-    sys::wasm_val_t {
-        kind: sys::WASM_I32 as u8,
-        _paddings: [0; 7],
-        of: sys::wasm_val_t__bindgen_ty_1 { i32_: value },
-    }
-}
-
-impl Engine for Guest {
-    fn call(&mut self, export: &str, args: &[i32]) -> Result<i32, Trap> {
-        ensure_thread_env();
-        let Ok(cname) = CString::new(export) else {
-            return Err(Trap::with_detail(
-                TrapKind::Engine,
-                format!("{export:?} has an interior NUL"),
-            ));
-        };
-        // SAFETY: `module_inst` is live for this `Guest`'s whole life.
-        let func = unsafe { sys::wasm_runtime_lookup_function(self.module_inst, cname.as_ptr()) };
-        if func.is_null() {
-            return Err(Trap::with_detail(
-                TrapKind::Engine,
-                format!("the guest does not export {export:?}"),
-            ));
-        }
-        if args.len() > MAX_ARITY {
-            return Err(Trap::with_detail(
-                TrapKind::Engine,
-                format!("{export:?} was called with {} arguments", args.len()),
-            ));
-        }
-
-        // SAFETY: `func`/`module_inst` are both live.
-        let n_results = unsafe { sys::wasm_func_get_result_count(func, self.module_inst) } as usize;
-        let mut wasm_args: Vec<sys::wasm_val_t> = args.iter().copied().map(wasm_val_i32).collect();
-        let mut results = vec![wasm_val_i32(0); n_results];
-
-        // SAFETY: `exec_env`/`func` are live; `wasm_args`/`results` are sized to the counts
-        // passed alongside them.
-        let ok = unsafe {
-            sys::wasm_runtime_call_wasm_a(
-                self.exec_env,
-                func,
-                n_results as u32,
-                results.as_mut_ptr(),
-                wasm_args.len() as u32,
-                wasm_args.as_mut_ptr(),
-            )
-        };
-        if !ok {
-            // SAFETY: on failure WAMR records an exception on the instance.
-            let detail = unsafe { cstr_ptr(sys::wasm_runtime_get_exception(self.module_inst)) };
-            // No budget mechanism is armed here (`Host::enforces_budgets` is `false`), so
-            // every failure is ABI §8's ordinary trap or an engine fault — never a fuel or
-            // deadline death that never happened, the same reasoning `tests/wasm3.rs` states
-            // for its own dispatch.
-            return Err(Trap::with_detail(TrapKind::Trap, detail));
-        }
-        match results.as_slice() {
-            // SAFETY: `kind` was just checked to be `WASM_I32`, so reading that union member
-            // is reading the one WAMR wrote.
-            [value] if value.kind as u32 == sys::WASM_I32 => Ok(unsafe { value.of.i32_ }),
-            _ => Err(Trap::with_detail(
-                TrapKind::Engine,
-                format!("{export:?} did not return a single i32"),
-            )),
-        }
-    }
-
-    fn has_export(&self, export: &str) -> bool {
-        if export == MEMORY_EXPORT {
-            return true;
-        }
-        let Ok(cname) = CString::new(export) else {
-            return false;
-        };
-        // SAFETY: `module_inst` is live.
-        !unsafe { sys::wasm_runtime_lookup_function(self.module_inst, cname.as_ptr()) }.is_null()
-    }
-
-    fn read(&self, ptr: u32, len: u32) -> Result<Vec<u8>, EngineError> {
-        let view = View {
-            module_inst: self.module_inst,
-        };
-        let data = view.bytes();
-        memory_range(data.len(), ptr, len).map(|range| data[range].to_vec())
-    }
-
-    fn write(&mut self, ptr: u32, bytes: &[u8]) -> Result<(), EngineError> {
-        let mut view = View {
-            module_inst: self.module_inst,
-        };
-        let range = memory_range(view.bytes_mut().len(), ptr, bytes.len() as u64)?;
-        view.bytes_mut()[range].copy_from_slice(bytes);
-        Ok(())
-    }
-
-    fn register(&mut self, namespace: &str, name: &str, f: HostFn) -> Result<(), EngineError> {
-        let Some(slot) = eio_host_core::exports::abi_name(namespace, name) else {
-            return Err(EngineError::Engine(format!(
-                "{namespace} has no function named {name:?} (ABI §7)"
-            )));
-        };
-        let mut funcs = self.state.funcs.borrow_mut();
-        if funcs.contains_key(&slot) {
-            return Err(EngineError::DuplicateImport {
-                namespace: namespace.to_string(),
-                name: name.to_string(),
-            });
-        }
-        funcs.insert(slot, f);
-        Ok(())
-    }
-}
-
-impl Drop for Guest {
-    fn drop(&mut self) {
-        // SAFETY: teardown in reverse order of creation, exactly as `wamrx::Instance`'s own
-        // `Drop` does; every handle here is live and owned exclusively by this `Guest`.
-        unsafe {
-            sys::wasm_runtime_destroy_exec_env(self.exec_env);
-            sys::wasm_runtime_deinstantiate(self.module_inst);
-            sys::wasm_runtime_unload(self.module);
-        }
-    }
-}
-
-/// Converts a NUL-terminated stack buffer into an owned `String` (lossily), mirroring
-/// `wamrx::util`'s `pub(crate)` helper of the same purpose.
-fn cstr_buf(buf: &[c_char]) -> String {
-    let bytes: Vec<u8> = buf
-        .iter()
-        .take_while(|&&c| c != 0)
-        .map(|&c| c as u8)
-        .collect();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// Converts a borrowed C string pointer into an owned `String` (lossily).
-///
-/// # Safety
-///
-/// `ptr` must be null or point to a valid NUL-terminated C string.
-unsafe fn cstr_ptr(ptr: *const c_char) -> String {
-    // SAFETY: the caller's contract (this function's own `# Safety` section) is exactly
-    // `CStr::from_ptr`'s.
-    unsafe {
-        if ptr.is_null() {
-            return String::new();
-        }
-        std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
-    }
-}
-
 // ── measurement fixtures ─────────────────────────────────────────────────────────────
+//
+// Everything below drives WAMR's engine directly rather than through `Guest`, and that is the
+// point: ABI §4.3's accepted set, the carved-out remainder and the nine refused proposals are
+// this file's *own* measurement of a fourth engine, not a re-run of the shared binding. See
+// the module docs.
+//
+// None of these take `with_wamr` themselves — their callers do, at the outermost call, because
+// that lock is not re-entrant.
 
 /// Assembles `contents` inside a module with a memory (every scenario module has one, so a
-/// fixture here is the same shape `instantiate` really refuses/accepts) and loads it fresh.
+/// fixture here is the same shape `Host::instantiate` really refuses/accepts) and loads it
+/// fresh.
 ///
 /// Mirrors `tests/wasm3.rs`'s `load` helper. Returns the raw module handle *and* its backing
 /// bytes — `wasm_runtime_load` retains pointers into that buffer for the module's whole life
-/// (`Wamr::instantiate`'s identical comment explains the same requirement), so a caller that
-/// dropped it here and kept only the handle would hand every one of the two callers below a
-/// module reading from freed memory. Measured, not assumed: the first version of this
-/// function did exactly that, and every measurement built on it either failed with a
+/// (`eio_wamr_host::instantiate`'s identical comment explains the same requirement), so a
+/// caller that dropped it here and kept only the handle would hand every one of the two
+/// callers below a module reading from freed memory. Measured, not assumed: the first version
+/// of this function did exactly that, and every measurement built on it either failed with a
 /// nonsensical "exports no f" or, worse, did not fail at all.
+///
+/// **Call under [`with_wamr`].**
 fn raw_load(text: &str) -> Result<(sys::wasm_module_t, Box<[u8]>), String> {
     ensure_runtime();
     ensure_thread_env();
@@ -821,96 +256,98 @@ fn raw_load(text: &str) -> Result<(sys::wasm_module_t, Box<[u8]>), String> {
 
 /// Loads `text` fresh and answers `Ok(())` if WAMR's engine refuses it, `Err` (naming what
 /// happened instead) if it was accepted. Never touches the native registry or the module's
-/// imports, so an engine-layer refusal (ABI §4.3) is measured in isolation from anything this
-/// file registered.
+/// imports, so an engine-layer refusal (ABI §4.3) is measured in isolation from anything the
+/// shared binding registered.
 fn engine_refuses(text: &str) -> Result<(), String> {
-    match raw_load(text) {
+    with_wamr(|| match raw_load(text) {
         Err(_detail) => Ok(()),
         Ok((module, _bytes)) => {
             // SAFETY: `module` is live and not yet unloaded; `_bytes` outlived it.
             unsafe { sys::wasm_runtime_unload(module) };
             Err("was accepted".to_string())
         }
-    }
+    })
 }
 
 /// Wraps `contents` in a module with a memory, loads it fresh, calls its `f`, and answers what
 /// came back. Mirrors `tests/wasm3.rs`'s `run` helper exactly, one engine per snippet.
 fn run(contents: &str) -> Result<i64, String> {
     let text = format!(r#"(module (memory (export "memory") 1) {contents})"#);
-    // `_bytes` must outlive every operation below: see `raw_load`'s doc.
-    let (module, _bytes) = raw_load(&text)?;
+    with_wamr(|| {
+        // `_bytes` must outlive every operation below: see `raw_load`'s doc.
+        let (module, _bytes) = raw_load(&text)?;
 
-    let mut err_buf = [0 as c_char; ERR_BUF_SIZE];
-    // SAFETY: `module` was just loaded successfully.
-    let module_inst = unsafe {
-        sys::wasm_runtime_instantiate(
-            module,
-            AUX_STACK_SIZE,
-            HEAP_SIZE,
-            err_buf.as_mut_ptr(),
-            err_buf.len() as u32,
-        )
-    };
-    if module_inst.is_null() {
-        let detail = cstr_buf(&err_buf);
-        // SAFETY: `module` is live and not yet unloaded.
-        unsafe { sys::wasm_runtime_unload(module) };
-        return Err(format!("would not instantiate: {detail}"));
-    }
-    // SAFETY: `module_inst` is live.
-    let exec_env = unsafe { sys::wasm_runtime_create_exec_env(module_inst, EXEC_STACK_SIZE) };
-    let fname = CString::new("f").expect("no interior NUL");
-    // SAFETY: `module_inst` is live.
-    let func = unsafe { sys::wasm_runtime_lookup_function(module_inst, fname.as_ptr()) };
-    if func.is_null() {
+        let mut err_buf = [0 as c_char; ERR_BUF_SIZE];
+        // SAFETY: `module` was just loaded successfully.
+        let module_inst = unsafe {
+            sys::wasm_runtime_instantiate(
+                module,
+                EXEC_STACK_SIZE,
+                HEAP_SIZE,
+                err_buf.as_mut_ptr(),
+                err_buf.len() as u32,
+            )
+        };
+        if module_inst.is_null() {
+            let detail = cstr_buf(&err_buf);
+            // SAFETY: `module` is live and not yet unloaded.
+            unsafe { sys::wasm_runtime_unload(module) };
+            return Err(format!("would not instantiate: {detail}"));
+        }
+        // SAFETY: `module_inst` is live.
+        let exec_env = unsafe { sys::wasm_runtime_create_exec_env(module_inst, EXEC_STACK_SIZE) };
+        let fname = CString::new("f").expect("no interior NUL");
+        // SAFETY: `module_inst` is live.
+        let func = unsafe { sys::wasm_runtime_lookup_function(module_inst, fname.as_ptr()) };
+        if func.is_null() {
+            // SAFETY: every handle here is live and owned exclusively by this function.
+            unsafe {
+                sys::wasm_runtime_destroy_exec_env(exec_env);
+                sys::wasm_runtime_deinstantiate(module_inst);
+                sys::wasm_runtime_unload(module);
+            }
+            return Err("exports no f".to_string());
+        }
+        // SAFETY: `func`/`module_inst` are live.
+        let n_results = unsafe { sys::wasm_func_get_result_count(func, module_inst) } as usize;
+        let mut results = vec![wasm_val_i32(0); n_results];
+        // SAFETY: `exec_env`/`func` are live; `results` is sized to `n_results`.
+        let ok = unsafe {
+            sys::wasm_runtime_call_wasm_a(
+                exec_env,
+                func,
+                n_results as u32,
+                results.as_mut_ptr(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        let out = if !ok {
+            // SAFETY: on failure WAMR records an exception on the instance.
+            Err(format!("would not run: {}", unsafe {
+                cstr_ptr(sys::wasm_runtime_get_exception(module_inst))
+            }))
+        } else {
+            match results.as_slice() {
+                [value] if value.kind as u32 == sys::WASM_I32 => {
+                    // SAFETY: `kind` was just checked to be `WASM_I32`.
+                    Ok(i64::from(unsafe { value.of.i32_ }))
+                }
+                [value] if value.kind as u32 == sys::WASM_I64 => {
+                    // SAFETY: `kind` was just checked to be `WASM_I64`.
+                    Ok(unsafe { value.of.i64_ })
+                }
+                other => Err(format!("returned {} value(s)", other.len())),
+            }
+        };
         // SAFETY: every handle here is live and owned exclusively by this function.
         unsafe {
             sys::wasm_runtime_destroy_exec_env(exec_env);
             sys::wasm_runtime_deinstantiate(module_inst);
             sys::wasm_runtime_unload(module);
         }
-        return Err("exports no f".to_string());
-    }
-    // SAFETY: `func`/`module_inst` are live.
-    let n_results = unsafe { sys::wasm_func_get_result_count(func, module_inst) } as usize;
-    let mut results = vec![wasm_val_i32(0); n_results];
-    // SAFETY: `exec_env`/`func` are live; `results` is sized to `n_results`.
-    let ok = unsafe {
-        sys::wasm_runtime_call_wasm_a(
-            exec_env,
-            func,
-            n_results as u32,
-            results.as_mut_ptr(),
-            0,
-            std::ptr::null_mut(),
-        )
-    };
-    let out = if !ok {
-        // SAFETY: on failure WAMR records an exception on the instance.
-        Err(format!("would not run: {}", unsafe {
-            cstr_ptr(sys::wasm_runtime_get_exception(module_inst))
-        }))
-    } else {
-        match results.as_slice() {
-            [value] if value.kind as u32 == sys::WASM_I32 => {
-                // SAFETY: `kind` was just checked to be `WASM_I32`.
-                Ok(i64::from(unsafe { value.of.i32_ }))
-            }
-            [value] if value.kind as u32 == sys::WASM_I64 => {
-                // SAFETY: `kind` was just checked to be `WASM_I64`.
-                Ok(unsafe { value.of.i64_ })
-            }
-            other => Err(format!("returned {} value(s)", other.len())),
-        }
-    };
-    // SAFETY: every handle here is live and owned exclusively by this function.
-    unsafe {
-        sys::wasm_runtime_destroy_exec_env(exec_env);
-        sys::wasm_runtime_deinstantiate(module_inst);
-        sys::wasm_runtime_unload(module);
-    }
-    out
+        out
+    })
 }
 
 // ── the tests ────────────────────────────────────────────────────────────────
@@ -1310,11 +747,16 @@ fn wamr_refusals_do_not_reliably_name_the_proposal() {
         ),
     ];
     for (proposal, text, needle) in cases {
-        // SAFETY: `module` is live and not yet unloaded; the boxed bytes bound to `_` outlived
-        // it (see `raw_load`'s doc).
-        let Err(detail) = raw_load(text).map(|(module, _)| unsafe {
-            sys::wasm_runtime_unload(module);
-        }) else {
+        // `raw_load` takes no lock of its own, so this call site takes it — see the module
+        // docs' "Concurrency" section.
+        let loaded = with_wamr(|| {
+            // SAFETY: `module` is live and not yet unloaded; the boxed bytes bound to `_`
+            // outlived it (see `raw_load`'s doc).
+            raw_load(text).map(|(module, _)| unsafe {
+                sys::wasm_runtime_unload(module);
+            })
+        });
+        let Err(detail) = loaded else {
             panic!("WAMR accepted {proposal}");
         };
         assert!(

@@ -51,7 +51,7 @@
 //!
 //! | Gated behind `std` | Why it cannot cross |
 //! |---|---|
-//! | [`wasm3`] and [`wamr`] — the two engine bindings | `wasm3x` 0.1.0 builds its wrapper and the wasm3 C sources against `std`; `wamrx-sys` builds WAMR's C core and this binding drives it with `CString`, `Mutex` and `Once`. Neither crosses today, and a bare-metal engine binding is settled by LEAF §11's MCU cross-compile — where the C runtime is cross-compiled too, which is a different problem from this one. |
+//! | [`wasm3`] and [`wamr`] — the two engine bindings | `wasm3x` 0.1.0 builds its wrapper and the wasm3 C sources against `std`; `eio-wamr-host` builds WAMR's C core through `wamrx-sys` and drives it with `CString`, `Mutex` and `Once`. Neither crosses today, and a bare-metal engine binding is settled by LEAF §11's MCU cross-compile — where the C runtime is cross-compiled too, which is a different problem from this one. |
 //! | [`state`] — the flat-file store | `std::fs`. LEAF §5 backs `eio:state` by *flash*; the file is named as a stand-in in its own module docs, and flash layout is a §11 expansion item. |
 //! | [`core_fns::SystemClock`] | `std::time::{Instant, SystemTime}`. DAEMON §1.1's two things a `no_std` crate with no platform beneath it cannot answer; a leaf reads a hardware clock. |
 //! | [`core_fns::BringUpEntropy`] | Seeded from `SystemTime`. Same reason — a leaf reads a hardware entropy source. |
@@ -70,8 +70,11 @@
 //! - [`wasm3`] and [`wamr`] bind LEAF §3's two engines, both in interpreter mode. AOT is out
 //!   of scope for both: it is WAMR's, it needs a `wamrc` this machine cannot build
 //!   (eieio-7d8.21), and LEAF §6.1 stays `PROPOSED` until a leaf loads an artifact the
-//!   pipeline produced. [`wamr`] is the fifth sanctioned `unsafe` site in this repository
-//!   (CLAUDE.md) and its module docs say which published-crate gap forces the raw FFI.
+//!   pipeline produced. [`wamr`] holds no `unsafe` and no FFI at all: the binding is
+//!   `eio_wamr_host`, shared with the reference conformance harness and written for neither
+//!   of them (eieio-7d8.34) — the same reasoning as [`core_fns`] below, one layer down. What
+//!   stays in [`wamr`] is LEAF §4.2's per-instance stack reserve, which is the leaf's budget
+//!   line and no shared crate's business.
 //! - [`core_fns`] supplies `eio:core`'s clock and entropy (DAEMON §1.1): the six host
 //!   functions themselves are `eio_host_core::Core`'s, shared with the daemon and the
 //!   reference conformance harness since eieio-35h.15 — this crate's own copy of them was
