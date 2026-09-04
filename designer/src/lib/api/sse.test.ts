@@ -221,6 +221,11 @@ function statusResponse(status: number): Response {
   });
 }
 
+// The predicate on its own. It is exported for exactly this — see its doc in `sse.ts`: nothing
+// in `src/` calls it, and since eieio-m9s.43 nothing should, because the login gate is raised
+// before it is consulted rather than downstream of it. Enumerating statuses against it here
+// costs one line each; driving a whole stream per status would not, which is why the rule keeps
+// a direct test even though its only other exercise is the loop's own behaviour below.
 describe('isPermanentStreamStatus', () => {
   it('classifies 4xx as permanent, except HTTP\'s own two "ask again" statuses', () => {
     expect([400, 401, 403, 404, 422, 499].map(isPermanentStreamStatus)).toEqual([true, true, true, true, true, true]);
@@ -248,7 +253,9 @@ describe('connectSse — a refused stream ends, a dropped one reconnects', () =>
     await vi.waitFor(() => expect(statuses.some((s) => s.status === 'closed')).toBe(true));
     // --- Prove it can fail: delete the `isPermanentStreamStatus` branch in
     // `connectSse` and this reads `reconnecting`, with `detail.status`
-    // undefined and `fetchImpl` called over and over.
+    // undefined and `fetchImpl` called over and over. Note what does NOT
+    // break with it: the login gate, which `connectSse` raises from the
+    // `401` above this branch (eieio-m9s.43, `session.test.ts`).
     expect(statuses.map((s) => s.status)).toEqual(['connecting', 'closed']);
     const closed = statuses.find((s) => s.status === 'closed');
     expect(closed?.detail?.status).toBe(401);

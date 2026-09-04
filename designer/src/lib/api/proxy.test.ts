@@ -740,8 +740,10 @@ describe('client.ts — getService/putService stay on mock.ts in both branches (
   // --- Prove it can fail (3): the guard on eieio-m9s.37 not having landed yet. ------------------
   //
   // Real transcript with `getService` in `client.ts` temporarily rewired to
-  // `useRealBackend() ? watchSession(proxy.getService(nodeId, serviceName)) : mock.getService(nodeId, serviceName)`,
-  // matching every one of the eleven functions just above it (both tests in this `describe`
+  // `useRealBackend() ? proxy.getService(nodeId, serviceName) : mock.getService(nodeId, serviceName)`,
+  // matching every one of the eleven functions just above it. (The transcript below is from
+  // before eieio-m9s.43 moved the login gate out of `client.ts`, so its stack still shows the
+  // `watchSession` wrapper that branch used to carry; the failure is otherwise unchanged.) (both tests in this `describe`
   // fail the same way, since `putService`'s own test calls `getService` first to get a real
   // `etag`):
   //
@@ -794,10 +796,12 @@ describe('client.ts — a proxied 401 reopens the login gate too (eieio-m9s.38, 
   // are logged out of the Designer" or "this node's stored bearer token went stale" — nothing on
   // the wire tells the two apart (a dead Designer session never reaches a node at all;
   // `require_session` answers the same `{error: "unauthorized", message}` shape directly).
-  // `client.ts`'s `watchSession` treats `ProxyUnauthorizedError` as the same signal
-  // `SessionRequiredError` already is, on the reasoning that never reopening the gate for the
-  // ambiguous case is strictly worse than sometimes reopening it when a re-login would not have
-  // actually helped.
+  // `ProxyUnauthorizedError` is the same signal `SessionRequiredError` already is, on the
+  // reasoning that never reopening the gate for the ambiguous case is strictly worse than
+  // sometimes reopening it when a re-login would not have actually helped. Since eieio-m9s.43
+  // that is raised by `proxy.ts` where it builds the error, not by a wrapper here — this suite
+  // is unchanged by that move, which is the point of it: it asserts the behaviour an operator
+  // sees, through the same seam a component calls, and survived the seam underneath moving.
   it('notifies onSessionRequired when a newly-wired call hits a 401 through the proxy', async () => {
     vi.stubEnv('VITE_EIO_BACKEND', 'real');
     vi.stubGlobal(
@@ -811,8 +815,8 @@ describe('client.ts — a proxied 401 reopens the login gate too (eieio-m9s.38, 
     });
 
     try {
-      // --- Prove it can fail (4): drop `watchSession(...)` from `listServices`'s real-backend
-      // branch in `client.ts` (call `proxy.listServices(nodeId)` bare) and this fails:
+      // --- Prove it can fail (4): drop `notifySessionRequired()` from
+      // `ProxyUnauthorizedError`'s constructor in `proxy.ts` and this fails:
       //
       //   FAIL  src/lib/api/proxy.test.ts > client.ts — a proxied 401 reopens the login gate
       //   too (eieio-m9s.38, extending eieio-m9s.31) > notifies onSessionRequired when a
@@ -826,6 +830,10 @@ describe('client.ts — a proxied 401 reopens the login gate too (eieio-m9s.38, 
       //   + false
       //
       //       at src/lib/api/proxy.test.ts:<line>
+      //
+      // (Before eieio-m9s.43 the same failure came from dropping `watchSession(...)` off this
+      // one call site in `client.ts` — which is exactly why the seam moved: this assertion
+      // could only ever pin the call sites someone had already remembered to wrap.)
       await expect(clientListServices('5')).rejects.toBeInstanceOf(ProxyUnauthorizedError);
       expect(notified).toBe(true);
     } finally {
@@ -855,13 +863,15 @@ describe('client.ts — a proxied 401 reopens the login gate too (eieio-m9s.38, 
 });
 
 describe('client.ts — a 401 on a tap or log stream reopens the login gate too (eieio-m9s.39)', () => {
-  // The bug: `streamTap`/`streamLogs` return a `StreamHandle` synchronously, so `watchSession`
-  // — which sits in front of a `Promise` — cannot wrap them, and `sse.ts` used to treat a 401
-  // exactly like a dropped connection: `'reconnecting'` and backoff, forever. A dead session
-  // therefore left a tap panel spinning while every other call in the app raised the gate.
-  // `sse.ts` now ends a permanently-failing stream as `'closed'` with the status attached, and
-  // `client.ts`'s `watchStreamSession` routes a 401 there to the same `onSessionRequired`
-  // listeners `watchSession` notifies. DESIGNER §6 records the rule.
+  // The bug: `streamTap`/`streamLogs` return a `StreamHandle` synchronously, so no
+  // promise-shaped guard could sit in front of them, and `sse.ts` used to treat a 401 exactly
+  // like a dropped connection: `'reconnecting'` and backoff, forever. A dead session therefore
+  // left a tap panel spinning while every other call in the app raised the gate. `sse.ts` now
+  // ends a permanently-failing stream as `'closed'` with the status attached (DESIGNER §6
+  // records that rule) *and*, since eieio-m9s.43, raises the login gate itself the moment it
+  // sees the 401 — above its own permanent/transient decision, so the two are independent.
+  // `session.test.ts` pins that independence; this suite pins what an operator sees, through
+  // the same `client.ts` seam a panel calls.
   it('notifies onSessionRequired when a tap stream is answered 401', async () => {
     vi.stubEnv('VITE_EIO_BACKEND', 'real');
     const fetchMock = vi
@@ -876,10 +886,11 @@ describe('client.ts — a 401 on a tap or log stream reopens the login gate too 
 
     const statuses: Array<{ status: string; detail?: { status?: number } }> = [];
     try {
-      // --- Prove it can fail (1): drop `watchStreamSession(...)` from `streamTap`'s
-      // real-backend branch in `client.ts` and `notified` stays false. Drop the
-      // `isPermanentStreamStatus` branch from `sse.ts`'s loop instead and this hangs on
-      // 'reconnecting' until the waitFor times out — the exact bug, reproduced.
+      // --- Prove it can fail (1): drop the `response.status === 401` branch from `sse.ts`'s
+      // loop and `notified` stays false. Drop the `isPermanentStreamStatus` branch instead and
+      // the gate still goes up (that is eieio-m9s.43's whole point) but the status assertions
+      // below fail, hanging on 'reconnecting' until the waitFor times out — the panel half of
+      // the same bug, now separable from the session half.
       const handle = clientStreamTap('5', 'tap-1', {
         onEvent: () => {},
         onStatus: (status, detail) => statuses.push({ status, detail }),
