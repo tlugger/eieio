@@ -35,33 +35,22 @@
 // `requiredFieldsOfInterface`, `collectKinds`) reads the same tag now too, for the same reason on
 // the non-SSE side (`TapSummary.tap_id`, `@wire id`, eieio-m9s.17).
 //
-// # Why this file regenerates the Rust side itself, rather than trusting `just ci`'s ordering
+// # Where the Rust side comes from (eieio-m9s.42)
 //
-// `just ci` runs its stages in parallel background jobs (see the `justfile`'s `ci` recipe), so
-// `test` (which would run `response_shapes.rs` as part of `cargo test --workspace`) and
-// `test-designer` (which runs this file) have no ordering guarantee relative to each other, and
-// on a fresh checkout the generated JSON does not exist at all until something writes it. A
-// check that silently skipped or passed vacuously against a missing/stale file would be worse
-// than the drift it exists to catch. So `beforeAll` below shells out to
-// `cargo test -p eio-cli --test response_shapes` itself before reading anything — self-
-// sufficient regardless of what else `just ci` is doing at the same time, at the cost of one
-// extra (mostly-cached) `cargo test` invocation whenever this suite runs.
-import { execSync } from 'node:child_process';
+// This file used to regenerate it itself, shelling out to `cargo test -p eio-cli --test
+// response_shapes` from `beforeAll` so that it could never read a missing or stale file no
+// matter what else `just ci` was doing in parallel. Both halves of that goal still hold; the
+// mechanism does not. The generated shapes are now a *prerequisite* of the run — `just shapes`
+// writes them, `just test-designer` depends on it, and `./generated-shapes.ts` reads what is
+// there and fails loudly (naming the recipe) when it is absent or older than the Rust sources it
+// came from. That file's module doc has the full account of why a cold checkout made the old
+// shape fail its first run and pass its second.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { readGeneratedShapes } from './generated-shapes';
 
-const REPO_ROOT = path.resolve(process.cwd(), '..');
-const GENERATED_PATH = path.resolve(process.cwd(), 'src/lib/api/__generated__/daemon-response-shapes.json');
-/** `crates/designer/tests/response_shapes.rs`'s own generated file (eieio-m9s.33) — a sibling of
- * [`GENERATED_PATH`], never the same file: see that Rust file's module doc for why a shared
- * writer between two independent `cargo test` invocations would be exactly the race
- * eieio-m9s.22 already found once. */
-const DESIGNER_GENERATED_PATH = path.resolve(
-  process.cwd(),
-  'src/lib/api/__generated__/designer-response-shapes.json',
-);
 const TYPES_PATH = path.resolve(process.cwd(), 'src/lib/api/types.ts');
 
 /** The schemas this check asserts on, and the TypeScript interface each is compared against.
@@ -139,27 +128,10 @@ let designerRequired: Record<string, string[]>;
 let designerTypes: Record<string, Record<string, string>>;
 
 beforeAll(() => {
-  // Skipped when the harness already generated it (`just ci`'s `shapes` recipe sets this).
-  // Shelling out to cargo here while the `test` stage holds the target-directory lock is
-  // what timed this hook out on CI; regenerating remains the default so a bare `npm test`
-  // is still self-sufficient and never compares against a stale file.
-  //
-  // Both invocations below happen in this one `beforeAll`, one after the other — never from a
-  // second `describe` block or a second file — for exactly the reason `crates/designer/tests/
-  // response_shapes.rs`'s own module doc gives: two `cargo test` calls racing for the workspace
-  // target-directory lock is eieio-m9s.22's bug, and the fix is one caller running them in
-  // sequence, not a second caller running one of them concurrently with the first.
-  if (!process.env.EIO_SHAPES_PREGENERATED) {
-    execSync('cargo test -p eio-cli --test response_shapes', {
-      cwd: REPO_ROOT,
-      stdio: 'pipe',
-    });
-    execSync('cargo test -p eio-designer --test response_shapes', {
-      cwd: REPO_ROOT,
-      stdio: 'pipe',
-    });
-  }
-  const parsed = JSON.parse(readFileSync(GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
+  // Reads only. `just shapes` is the sole writer of both files, and `just test-designer` depends
+  // on it — `./generated-shapes.ts` explains why no test may invoke cargo for itself, and throws
+  // here with the recipe to run if either file is missing or stale.
+  const parsed = readGeneratedShapes('daemon');
   daemonShapes = parsed as Record<string, string[]>;
   daemonSse = (parsed.sse as Record<string, string[]> | undefined) ?? {};
   daemonRequired = (parsed.required as Record<string, string[]> | undefined) ?? {};
@@ -167,11 +139,11 @@ beforeAll(() => {
   daemonTypes = (parsed.types as Record<string, Record<string, string>> | undefined) ?? {};
   daemonSseTypes = (parsed.sseTypes as Record<string, Record<string, string>> | undefined) ?? {};
 
-  const designerParsed = JSON.parse(readFileSync(DESIGNER_GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
+  const designerParsed = readGeneratedShapes('designer');
   designerShapes = designerParsed as Record<string, string[]>;
   designerRequired = (designerParsed.required as Record<string, string[]> | undefined) ?? {};
   designerTypes = (designerParsed.types as Record<string, Record<string, string>> | undefined) ?? {};
-}, 120_000);
+});
 
 /** Parses `types.ts` once and indexes every top-level `interface` by name, so a property whose
  * type names another interface in the same file (`NodeInfo` has none today, but the walker

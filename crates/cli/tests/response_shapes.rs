@@ -25,10 +25,13 @@
 //! CLAUDE.md's prime directive and this bead's own brief warn against).
 //!
 //! The generated file (`designer/src/lib/api/__generated__/daemon-response-shapes.json`,
-//! gitignored) is **not trusted**: `schema-parity.test.ts` regenerates it itself, by shelling
-//! out to `cargo test -p eio-cli --test response_shapes` before reading it, so a stale or
-//! missing file is never silently compared against — see that file's module doc for why that
-//! had to live on the TypeScript side rather than in `just ci`'s stage ordering.
+//! gitignored) is **not trusted**, and is also never written from inside vitest (eieio-m9s.42).
+//! `just shapes` — a prerequisite of `just test-designer` and of `just ci`, the way
+//! `just designer-wasm` is for the SPA's other generated artifact — runs this test to write it;
+//! the TypeScript side only reads it, and refuses to run at all when it is missing or older
+//! than the sources it came from. `designer/src/lib/api/generated-shapes.ts` holds both halves
+//! of that reasoning: why a test may not shell out to cargo for its own input, and why refusing
+//! is the only safe answer when the input is absent.
 //!
 //! Approach two — generating the TypeScript types outright and diffing committed output — is
 //! the stronger check (it would also police shapes nothing here names), but it is real design
@@ -742,9 +745,9 @@ fn sse_shapes(
 
 /// Where `schema-parity.test.ts` reads what this test just wrote.
 ///
-/// Generated, gitignored (`designer/.gitignore`), and overwritten on every run — see this
-/// module's doc for why the TypeScript side regenerates it itself rather than trusting whatever
-/// is already on disk.
+/// Generated, gitignored (`designer/.gitignore`), and overwritten on every run of `just shapes`
+/// — see this module's doc for why the TypeScript side reads this file and never writes it, and
+/// why it still refuses to trust whatever happens to be on disk.
 fn generated_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../designer/src/lib/api/__generated__/daemon-response-shapes.json")

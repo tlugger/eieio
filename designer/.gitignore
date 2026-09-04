@@ -20,10 +20,17 @@ dist/*
 dist-ssr
 *.local
 
-# eieio-m9s.11: written by `cargo test -p eio-cli --test response_shapes`, read by
-# `src/lib/api/schema-parity.test.ts`. An artifact, not a maintained list — see that Rust
-# test's module doc for why it must be regenerated rather than trusted, and is therefore never
-# committed.
+# eieio-m9s.11: written by `just shapes` (which runs the `response_shapes` test in
+# `crates/cli` and `crates/designer`), read by `src/lib/api/schema-parity.test.ts` and
+# `src/lib/api/mock-parity.test.ts`. An artifact, not a maintained list — see those Rust tests'
+# module docs for why it must be regenerated rather than trusted.
+#
+# Still not committed, deliberately (eieio-m9s.42 re-weighed it). A committed copy would be a
+# second source of truth for the daemon's own schemas, and one that goes stale silently: the
+# parity check would then compare `types.ts` against a snapshot of the schemas rather than the
+# schemas, which is the drift it exists to catch, wearing the check's own clothes. A fresh
+# clone pays one `just shapes` instead — the same trade `dist/` and `crates/expr-wasm/pkg`
+# already make, and it is a prerequisite of `just test-designer` for exactly that reason.
 src/lib/api/__generated__/
 
 # Editor directories and files

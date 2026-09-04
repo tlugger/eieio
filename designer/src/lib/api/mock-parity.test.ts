@@ -129,40 +129,27 @@
 //   reads — each is reported in `response_shapes.rs`'s module doc, in place, rather than repeated
 //   here as a second copy of the same reasoning.
 
-import { execSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { readGeneratedShapes } from './generated-shapes';
 import type { SseFrame } from './sse';
-
-const REPO_ROOT = path.resolve(process.cwd(), '..');
-const GENERATED_PATH = path.resolve(process.cwd(), 'src/lib/api/__generated__/daemon-response-shapes.json');
 
 let daemonShapes: Record<string, string[]>;
 let daemonRequired: Record<string, string[]>;
 let daemonSse: Record<string, string[]>;
 let daemonSseRequired: Record<string, string[]>;
 
-// Self-sufficient the same way `schema-parity.test.ts` is, and for the same reason (see that
-// file's own `beforeAll` doc): `just ci`'s stages run in parallel, so nothing guarantees the
-// generated file exists or is fresh by the time this suite runs.
+// Reads the same generated file `schema-parity.test.ts` does, the same way (eieio-m9s.42): a
+// prerequisite written by `just shapes` before anything runs, never regenerated from inside
+// vitest. Both suites used to shell out to cargo here — see `./generated-shapes.ts` for why that
+// made a cold checkout fail its first run and pass its second, and for what happens now when the
+// file is missing or stale.
 beforeAll(() => {
-  // Skipped when the harness already generated it (`just ci`'s `shapes` recipe sets this).
-  // Shelling out to cargo here while the `test` stage holds the target-directory lock is
-  // what timed this hook out on CI; regenerating remains the default so a bare `npm test`
-  // is still self-sufficient and never compares against a stale file.
-  if (!process.env.EIO_SHAPES_PREGENERATED) {
-    execSync('cargo test -p eio-cli --test response_shapes', {
-      cwd: REPO_ROOT,
-      stdio: 'pipe',
-    });
-  }
-  const parsed = JSON.parse(readFileSync(GENERATED_PATH, 'utf-8')) as Record<string, unknown>;
+  const parsed = readGeneratedShapes('daemon');
   daemonShapes = parsed as Record<string, string[]>;
   daemonRequired = (parsed.required as Record<string, string[]> | undefined) ?? {};
   daemonSse = (parsed.sse as Record<string, string[]> | undefined) ?? {};
   daemonSseRequired = (parsed.sseRequired as Record<string, string[]> | undefined) ?? {};
-}, 120_000);
+});
 
 // --- Capturing what `mock.ts` actually puts on the wire, before anything decodes it -----------
 //
