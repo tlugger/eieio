@@ -202,6 +202,57 @@ pub fn leaf_budgets() -> ExprBudgets {
     ExprBudgets::new(EvalLimits::FLOORS, eio_signal::MAX_DEPTH)
 }
 
+/// The linear memory one instance may reach, in 64 KiB pages — LEAF §4.2's per-instance
+/// reserve, and the one number a leaf answers ABI §4.1 with at both ends.
+///
+/// # It is a footprint, not a declaration
+///
+/// The obvious number here is one page: `wasm-ld` emits `(memory 1)` for every one of ABI
+/// §13.2's golden blocks once SDK §5.2's link default is in force, so a leaf that reserved one
+/// page each would look right. **It is wrong, measured**: a Rust guest's declared minimum is
+/// its statics and its shadow stack, and its *heap* is not in there. `dlmalloc` on
+/// `wasm32-unknown-unknown` takes every byte it hands out from `memory.grow`, so the first
+/// `eio_alloc` a block ever serves leaves the page it declared. At a one-page bound, `counter`
+/// fails `eio_configure` with `ERR_LIMIT` before a single signal is routed.
+///
+/// **Two pages is the measurement**, taken over the whole of LEAF §9's suite 1 on WAMR's
+/// interpreter by `tests/memory_growth.rs`: every scenario driving an SDK-built golden block
+/// needs exactly two, every hand-written `.wat` fixture needs one, and nothing in the suite
+/// needs three. Unlike the execution-stack row beside it, this number is **not** a property of
+/// the host it was measured on — linear memory is the guest's own address space, so a 32-bit
+/// target sees the same pages — which makes it one of the few rows in §4.2 the MCU bring-up
+/// does not have to re-take.
+///
+/// # What it costs, and it is the whole of §4.2's headline
+///
+/// 128 KiB per instance rather than 64 leaves §4.2's 192 KiB heap floor sizing for **one**
+/// block instance, not two. That is a finding rather than a choice: the reserve was derived
+/// from a declaration that does not describe a Rust guest's footprint. §4.2 carries the
+/// corrected arithmetic.
+///
+/// # Where it is enforced, and why in two places
+///
+/// ABI §4.1 makes this an *admission* bound and a *growth* bound, and both are needed because
+/// they catch disjoint modules:
+///
+/// - **admission**, at firmware build time: `eio_leaf_gen` refuses a module whose declared
+///   minimum or declared maximum exceeds this, because a leaf cannot supply the one or honour
+///   the other, and granting less than a module declared is what §4.1 forbids;
+/// - **growth**, at instantiation: [`wamr::instantiate`] passes it to the engine, because a
+///   module that declares *no* maximum — which is every block `cargo eio build` produces — has
+///   said nothing for the loader to refuse, and an engine left to itself would let it reach
+///   65 536 pages.
+///
+/// What a guest sees when the growth bound bites is core WASM's own answer and no ABI surface:
+/// `memory.grow` returns −1, a guest allocator reads that as a failed allocation, and it
+/// reaches ABI §9 only as `eio_alloc` returning 0 — §9.5's `ERR_LIMIT`. ABI §8's death kinds
+/// are a closed set and this adds nothing to it.
+///
+/// **The growth half reaches WAMR and not wasm3**, measured: wasm3's only linear-memory
+/// ceiling is a compile-time define of a published crate. See [`wamr::instantiate`] and
+/// `tests/memory_growth.rs` for the gap and where its fix belongs.
+pub const V1_MEMORY_PAGES: u32 = 2;
+
 /// A leaf's own ABI §5.2 limits (LEAF §4.2, §4.3): `max_payload` 4 096, `max_batch` 8,
 /// `max_emission_bytes` 4 096.
 ///

@@ -82,12 +82,17 @@ pub use emit::emit;
 
 /// The per-instance linear-memory budget the v1 leaf target enforces (LEAF §4.2).
 ///
-/// §4.2 reserves 2 × 64 KiB of the 192 KiB heap floor for guest linear memory, one page each
-/// for the two instances a v1 image sizes for, and states the consequence as a MUST: **a leaf
-/// refuses, at firmware build time, a module whose declared minimum linear memory exceeds its
-/// per-instance page budget.** This is that number, and [`Inputs::memory_pages`] is how a
-/// build states a different one.
-pub const V1_MEMORY_PAGES: u64 = 1;
+/// **`eio_leaf::V1_MEMORY_PAGES` widened, not a number of this crate's own.** §4.2's reserve is
+/// the runtime's row and it is measured there (`crates/leaf/tests/memory_growth.rs`); a second
+/// spelling of it here is how a build comes to admit a module the device it builds for cannot
+/// hold. Widened because a page count is a `u32` to an engine and a `u64` to
+/// `eio_manifest::Admission`, which reads it out of a module's memory section.
+///
+/// §4.2 states the consequence as a MUST: **a leaf refuses, at firmware build time, a module
+/// whose declared linear memory exceeds its per-instance page budget** — at either end, since
+/// a minimum over it cannot be supplied and a maximum over it cannot be honoured (ABI §4.1).
+/// [`Inputs::memory_pages`] is how a build states a different number.
+pub const V1_MEMORY_PAGES: u64 = eio_leaf::V1_MEMORY_PAGES as u64;
 
 /// Everything a firmware build states before a graph can be baked (LEAF §6, §6.4.3).
 #[derive(Debug, Clone)]
@@ -240,21 +245,24 @@ pub fn bake(inputs: &Inputs<'_>) -> Result<Baked, Error> {
                 // pipeline's to carry (§6.1's WAMR/LLVM pairing is the other half of that
                 // item), and the embedded `eio:manifest` section is what a build has today.
                 let admission =
-                    eio_manifest::Admission::CURRENT.with_max_pages(inputs.memory_pages);
+                    eio_manifest::Admission::CURRENT.with_page_ceiling(inputs.memory_pages);
                 let manifest =
                     eio_manifest::validate_against(bytes, None, admission).map_err(|error| {
                         match error {
                             // LEAF §4.2's refusal names the link flag, which is the thing that
                             // usually fixes it. The loader states the numbers; this states what
                             // to do about them.
-                            eio_manifest::ModuleError::MemoryCeiling { declared, ceiling } => {
-                                Error::MemoryBudget {
-                                    id: id.clone(),
-                                    block: instance.block.clone(),
-                                    declared,
-                                    budget: ceiling,
-                                }
-                            }
+                            eio_manifest::ModuleError::MemoryCeiling {
+                                bound,
+                                declared,
+                                ceiling,
+                            } => Error::MemoryBudget {
+                                id: id.clone(),
+                                block: instance.block.clone(),
+                                bound,
+                                declared,
+                                budget: ceiling,
+                            },
                             error => Error::Manifest {
                                 id: id.clone(),
                                 block: instance.block.clone(),
@@ -280,7 +288,7 @@ pub fn bake(inputs: &Inputs<'_>) -> Result<Baked, Error> {
             // The same admission as above, though this artifact was admitted when it was
             // first read: one call shape, so the ceiling cannot be dropped by whichever
             // path happens to reach a block second.
-            let admission = eio_manifest::Admission::CURRENT.with_max_pages(inputs.memory_pages);
+            let admission = eio_manifest::Admission::CURRENT.with_page_ceiling(inputs.memory_pages);
             let manifest = eio_manifest::validate_against(artifacts[index].bytes, None, admission)
                 .map_err(|error| Error::Manifest {
                     id: id.clone(),
@@ -415,13 +423,21 @@ pub enum Error {
         /// What `eio_manifest::validate` said.
         error: String,
     },
-    /// LEAF §4.2's per-instance linear-memory budget.
+    /// LEAF §4.2's per-instance linear-memory budget, at one end of the declaration or the
+    /// other (ABI §4.1).
     MemoryBudget {
         /// The instance id whose block it is.
         id: String,
         /// The block reference, as the service file wrote it.
         block: String,
-        /// The module's declared minimum, in 64 KiB pages.
+        /// Whether it was the module's declared minimum or its declared maximum.
+        ///
+        /// Two different fixes, so the message has to say which: a minimum over budget is
+        /// almost always `wasm-ld`'s shadow stack and is fixed by a link flag, while a
+        /// maximum over budget is a `--max-memory` the block chose for itself and can only
+        /// be fixed in the block.
+        bound: eio_manifest::MemoryBound,
+        /// The module's declaration at that end, in 64 KiB pages.
         declared: u64,
         /// The budget it exceeded.
         budget: u64,
@@ -484,19 +500,31 @@ impl fmt::Display for Error {
             Error::MemoryBudget {
                 id,
                 block,
+                bound,
                 declared,
                 budget,
             } => write!(
                 f,
-                "instance {id:?}'s block {block:?} declares a minimum linear memory of \
+                "instance {id:?}'s block {block:?} declares a {bound} linear memory of \
                  {declared} page(s), {} KiB, and this leaf's per-instance budget is {budget} \
-                 page(s), {} KiB (LEAF §4.2).\n\
-                 If the block was built by `cargo eio build`, this is very likely `wasm-ld`'s \
-                 1 MiB default shadow stack rather than anything the block asked for: \
-                 rebuilding with `RUSTFLAGS=\"-C link-arg=-zstack-size=16384\"` brings every \
-                 golden block to one page with no source change (LEAF §4.2, eieio-x7g.2.21).",
+                 page(s), {} KiB (LEAF §4.2).\n{}",
                 declared * 64,
-                budget * 64
+                budget * 64,
+                match bound {
+                    eio_manifest::MemoryBound::Minimum =>
+                        "If the block was built by `cargo eio build`, this is very likely \
+                         `wasm-ld`'s 1 MiB default shadow stack rather than anything the block \
+                         asked for: rebuilding with `RUSTFLAGS=\"-C \
+                         link-arg=-zstack-size=16384\"` brings every golden block to one page \
+                         with no source change (LEAF §4.2, eieio-x7g.2.21).",
+                    eio_manifest::MemoryBound::Maximum =>
+                        "This one is the block's own `--max-memory`, not a link default: the \
+                         module has said it may grow that far and the engine would let it, so \
+                         a leaf that admitted it would be admitting a module it cannot hold. \
+                         Capping it here instead would grant the block less than it declared, \
+                         which ABI §4.1 refuses in as many words. Lower the block's maximum, \
+                         or run it on a node with room for it.",
+                }
             ),
             Error::Property { id, error } => {
                 write!(f, "instance {id:?} cannot be configured: {error}")
