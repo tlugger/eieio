@@ -5,8 +5,9 @@
 // the approach and its scope in full; the short version, since both halves need to be read to
 // understand either: that Rust test reads the daemon's *live* `utoipa` schemas the same way
 // `crates/cli/tests/openapi_surface.rs` already reads its live *paths*, flattens `PAIRS`' daemon
-// side (`NodeInfo`, `TapRequest`, `ApiError`, `ServiceSummary`, `Tap` — chosen because they are
-// the ones with a clean, field-for-field TypeScript counterpart; see that file's doc for what is
+// side (`NodeInfo`, `TapRequest`, `ApiError`, `ServiceSummary`, `Tap`, and — since eieio-m9s.46 —
+// `CachedBlock`, `AvailableTag` and `AvailableBlock`; chosen because they are the ones with a
+// clean, field-for-field TypeScript counterpart; see that file's doc for what is
 // deliberately excluded and why) to a generated JSON file, and this file compares that JSON's
 // field sets against the *actual* TypeScript interfaces of the same names in `./types.ts` —
 // extracted by parsing that file with the `typescript` package's own compiler API, not by a
@@ -63,6 +64,18 @@ const PAIRS: ReadonlyArray<readonly [daemonSchema: string, tsInterface: string]>
   ['ApiError', 'ApiError'],
   ['ServiceSummary', 'ServiceSummary'],
   ['Tap', 'TapSummary'],
+  // eieio-m9s.46: the three shapes the block-install flow reads on the real path
+  // (`proxy.ts`'s `listCachedBlocks`/`listAvailableBlocks`/`inspectAvailableBlock`/`pullBlock`).
+  // `CachedBlock` used to be excluded from `response_shapes.rs`'s targets by name, because its
+  // `manifest` field is `serde_json::Value` and had no schema to compare; that field is now
+  // described from `eio_manifest::schema::Manifest`'s own serde output (see that file's
+  // `SERDE_TYPED_FIELDS` for why, and for why no ★ crate gained a `utoipa` dependency), so
+  // `manifest.name`, `manifest.abi.major` and the rest are compared under those dotted paths
+  // against `types.ts`'s `NodeManifest` — which is an `interface` rather than an `Omit<>` alias
+  // for exactly this reason.
+  ['CachedBlock', 'CachedBlock'],
+  ['AvailableTag', 'AvailableTag'],
+  ['AvailableBlock', 'AvailableBlock'],
 ];
 
 /** [`PAIRS`]'s counterpart for `crates/designer`'s own document (eieio-m9s.33, closing the gap
@@ -75,28 +88,35 @@ const DESIGNER_PAIRS: ReadonlyArray<readonly [designerSchema: string, tsInterfac
   ['NodeOut', 'NodeSummary'],
 ];
 
-/** `ServiceDetail` and `CachedBlock` are deliberately absent, and not as an exemption: the
+/** `ServiceDetail` and `BlockManifest` are deliberately absent, and not as an exemption: the
  * Designer has no wire mirror of either. `GET /services/{s}` answers `{name, state, definition,
  * autostart, error?}`, and this shell's `ServiceDefinition` is the *parsed* model it builds
  * from that text — blocks, connections, `ui`, an `etag` — so a field-set diff between them
- * would compare two different kinds of thing. `GET /blocks` answers `Vec<CachedBlock>`
- * (`{name, version, reference, manifest}`), and this shell's `BlockManifest` flattens
- * `manifest`'s own fields to the top level and renames `reference` to `block_ref` — the same
- * kind of parsed reshaping, and `manifest` itself has no live schema to check regardless (see
- * `crates/cli/tests/response_shapes.rs`'s module doc for why: `eio_manifest::schema::Manifest`
- * has no `ToSchema` derive). `ServiceSummary` and `Tap` have real mirrors and are checked; if
- * `ServiceDefinition` or `BlockManifest` ever grow a wire twin, that twin belongs above.
+ * would compare two different kinds of thing. `BlockManifest` is the same kind of parsed
+ * reshaping: it is a manifest's own fields lifted to the top level plus `block_ref`, this
+ * shell's cache key, so it mirrors no single body. `ServiceSummary`, `Tap`, `CachedBlock`,
+ * `AvailableTag` and `AvailableBlock` have real mirrors and are checked; if `ServiceDefinition`
+ * or `BlockManifest` ever grow a wire twin, that twin belongs above.
+ *
+ * `CachedBlock` used to be listed here too — it is above now (eieio-m9s.46). What changed is
+ * only its `manifest` field: `serde_json::Value` on the daemon side, so utoipa could describe
+ * nothing about it and `response_shapes.rs` excluded the whole schema by name. That field is
+ * now described from `eio_manifest::schema::Manifest`'s own serde output — the same code path
+ * that produces the wire bytes — rather than from a `ToSchema` derive that would have cost a ★
+ * crate its dependency-freedom, or from a hand-written mirror struct that would have been a
+ * third source of truth. See that file's `SERDE_TYPED_FIELDS` section.
  *
  * `BlockManifest` stays unpaired even against `crates/designer`'s own document, for a distinct
  * reason worth spelling out separately: `GET /api/blocks` (the Designer's own route, not the
- * daemon's `GET /blocks` named above) answers `ManifestCacheEntry` — `{block_ref, manifest,
- * fetched_at}` (`crates/designer/src/api/blocks.rs`) — and `BlockManifest` is not a mirror of
- * *that* either. It flattens `manifest`'s own fields to its own top level, keeps `block_ref`,
- * and drops `fetched_at` — the same parsed-model relationship `ServiceDefinition` has to
- * `ServiceDetail`, just one level deeper. `crates/designer/tests/response_shapes.rs` targets
- * only `SystemOut`/`NodeOut` for exactly this reason; see that file's own module doc for the
- * fuller accounting (`manifest` itself is `serde_json::Value` there too, so even a mirror of
- * `ManifestCacheEntry` alone could not check inside it). */
+ * daemon's `GET /blocks`) answers `ManifestCacheEntry` — `{block_ref, manifest, fetched_at}`
+ * (`crates/designer/src/api/blocks.rs`) — and `BlockManifest` is not a mirror of *that* either.
+ * It flattens `manifest`'s own fields to its own top level, keeps `block_ref`, and drops
+ * `fetched_at` — the same parsed-model relationship `ServiceDefinition` has to `ServiceDetail`,
+ * just one level deeper. `crates/designer/tests/response_shapes.rs` targets only
+ * `SystemOut`/`NodeOut` for exactly this reason; see that file's own module doc for the fuller
+ * accounting (`manifest` is `serde_json::Value` there too — the same splice this bead added on
+ * the daemon side would work there, and is reported as follow-up rather than reached into from
+ * here). */
 
 let daemonShapes: Record<string, string[]>;
 /** `daemonShapes.sse`, typed for what it actually is: one field-name array per SSE event name,
@@ -499,12 +519,34 @@ function kindOfTypeNode(type: ts.TypeNode | undefined): Kind | undefined {
  */
 const TYPE_KIND_EXCEPTIONS: ReadonlyArray<readonly [event: string, field: string]> = [['expr_failure', 'span']];
 
+/** The interface `type` names, when it names one declared in this same file — the thing
+ * [`flattenInterface`] has always followed for field *names*, factored out so [`collectKinds`]
+ * can follow it for *kinds* too (eieio-m9s.46).
+ *
+ * [`kindOfTypeNode`] deliberately does not resolve an interface reference: it answers "what
+ * primitive kind is this field", and an interface is not one. But the daemon side's
+ * [`schema_kind`] *does* resolve a `$ref` and answers `object` for it, then keeps walking — so
+ * before this, every field typed as another interface (`ServiceSummary.error?: ApiError`, and
+ * now `CachedBlock.manifest: NodeManifest`) had a kind on the wire side and none here, and the
+ * comparison silently skipped it and everything under it. Following the reference and recording
+ * `object` makes the two sides symmetric; a type *alias* is still unmappable, because
+ * `parseInterfaces` only indexes interfaces and an alias is a computation this file cannot
+ * evaluate. */
+function referencedInterface(
+  type: ts.TypeNode | undefined,
+  interfaces: Map<string, ts.InterfaceDeclaration>,
+): ts.InterfaceDeclaration | undefined {
+  if (!type || !ts.isTypeReferenceNode(type) || !ts.isIdentifier(type.typeName)) return undefined;
+  return interfaces.get(type.typeName.text);
+}
+
 /** [`flattenInterface`]'s counterpart for kinds: the same dotted-path recursion through an inline
  * type literal or a same-file interface reference, but recording [`kindOfTypeNode`] at each path
  * instead of just the path's existence. A path [`flattenInterface`] would include that this
  * leaves `out` without an entry for is not a bug — it means the field's declared type was not
- * honestly one of the five kinds (or, per [`kindOfTypeNode`]'s doc, a reference this check
- * deliberately does not resolve), and the comparison below simply has nothing to check it
+ * honestly one of the five kinds (a type *alias*, per [`kindOfTypeNode`]'s doc; an interface
+ * reference is followed, via [`referencedInterface`]), and the comparison below simply has
+ * nothing to check it
  * against, symmetric with how the daemon side leaves unguessable fields out of `types`/
  * `sseTypes` entirely. Path segments are [`wireNameOf`]'s result, the same rename mechanism
  * [`flattenInterface`] uses, so a renamed field's kind is recorded under its wire name too. */
@@ -524,6 +566,12 @@ function collectKinds(
     if (stripped && ts.isTypeLiteralNode(stripped)) {
       out.set(path, 'object');
       collectKindsFromMembers(stripped.members, path, interfaces, depth - 1, out);
+      continue;
+    }
+    const referenced = referencedInterface(stripped, interfaces);
+    if (referenced) {
+      out.set(path, 'object');
+      collectKinds(referenced, path, interfaces, depth - 1, out);
       continue;
     }
     const kind = kindOfTypeNode(type);
@@ -547,6 +595,12 @@ function collectKindsFromMembers(
     if (stripped && ts.isTypeLiteralNode(stripped)) {
       out.set(path, 'object');
       collectKindsFromMembers(stripped.members, path, interfaces, depth - 1, out);
+      continue;
+    }
+    const referenced = referencedInterface(stripped, interfaces);
+    if (referenced) {
+      out.set(path, 'object');
+      collectKinds(referenced, path, interfaces, depth - 1, out);
       continue;
     }
     const kind = kindOfTypeNode(type);
