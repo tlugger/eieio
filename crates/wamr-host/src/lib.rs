@@ -566,7 +566,10 @@ pub struct Guest {
     module_inst: sys::wasm_module_inst_t,
     exec_env: sys::wasm_exec_env_t,
     /// The module's own backing bytes; WAMR retains pointers into this for the module's life.
-    _bytes: Box<[u8]>,
+    ///
+    /// `[u32]` rather than `[u8]`, and that is [`aligned_copy`]'s requirement rather than a
+    /// convenience: WAMR's loaders read a module buffer through direct casts.
+    _bytes: Box<[u32]>,
     /// This instance's registered handlers, reached from [`raw_trampoline`] through
     /// `exec_env`'s user data. Boxed so its heap address is stable across a `Guest` move.
     state: Box<GuestState>,
@@ -693,16 +696,19 @@ pub fn instantiate(
     ensure_runtime();
     ensure_thread_env();
     with_wamr(|| {
-        // `wasm_runtime_load` mutates and retains this buffer for the module's whole life, so
-        // it is owned here and kept in `Guest` rather than borrowed from the caller.
-        let mut owned: Box<[u8]> = wasm.to_vec().into_boxed_slice();
+        // `wasm_runtime_load` mutates and retains this buffer for the module's whole life, and
+        // requires it aligned, so it is owned here and kept in `Guest` rather than borrowed
+        // from the caller. Both requirements are WAMR's; `aligned_copy` records where each is
+        // written down and what measuring it against the vendored loaders found.
+        let mut owned = aligned_copy(wasm);
         let mut err_buf = [0 as c_char; ERR_BUF_SIZE];
-        // SAFETY: `owned` is a valid, exclusively-owned buffer of its stated length; `err_buf`
-        // is a valid, correctly-sized out-buffer.
+        // SAFETY: `owned` is a valid, exclusively-owned allocation of at least `wasm.len()`
+        // bytes, `MODULE_ALIGN`-aligned because it is an allocation of `u32`; `err_buf` is a
+        // valid, correctly-sized out-buffer.
         let module = unsafe {
             sys::wasm_runtime_load(
-                owned.as_mut_ptr(),
-                owned.len() as u32,
+                owned.as_mut_ptr().cast::<u8>(),
+                wasm.len() as u32,
                 err_buf.as_mut_ptr(),
                 err_buf.len() as u32,
             )
@@ -959,5 +965,131 @@ pub unsafe fn cstr_ptr(ptr: *const c_char) -> String {
             return String::new();
         }
         std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
+/// What WAMR requires a module buffer's **base address** to be a multiple of, in bytes.
+///
+/// See [`aligned_copy`] for how the number was arrived at. `crates/leaf`'s
+/// `eio_leaf::graph::MODULE_ALIGN` is the same measurement stated for a *linked-in* artifact
+/// (LEAF §6.4.2); the two are deliberately not one constant, because that crate has to state
+/// it with this one's `wamr` feature off.
+pub const MODULE_ALIGN: usize = 4;
+
+/// The caller's module bytes, copied into a buffer WAMR's loader can actually read.
+///
+/// Two properties, both of them WAMR's requirements rather than this crate's taste, and both
+/// written down in `core/iwasm/include/wasm_export.h` on `wasm_runtime_load`:
+///
+/// - **Writable, and retained.** *"the byte buffer must be writable since runtime may change
+///   its content for footprint and performance purpose, and it must be referenceable until
+///   `wasm_runtime_unload` is called"*. So the copy is owned by the [`Guest`] and outlives
+///   every call into it, and the caller's slice is never handed across the boundary.
+/// - **Aligned to [`MODULE_ALIGN`].** *"If it is AOT binary data, it must be 4-byte aligned."*
+///
+/// The second was measured against `wamrx-sys` 0.3.0's vendored tree rather than taken from
+/// that sentence alone (`eieio-x7g.2.20`), and the measurement says three things the sentence
+/// does not:
+///
+/// - **The interpreter path needs it too.** `core/iwasm/interpreter/wasm_loader.c` parses the
+///   body bytewise through LEB decoders, but its `read_uint32` is `TEMPLATE_READ_VALUE`, a
+///   bare `*(uint32 *)` cast with **no** alignment step at all. It is used exactly twice, on
+///   the magic number and the version word at buffer offsets 0 and 4, so both loads inherit
+///   the base's alignment directly.
+/// - **4 is the ceiling, not a floor to be exceeded.** `core/iwasm/aot/aot_loader.c` reads
+///   every header field through `TEMPLATE_READ`, and no call site anywhere in the file asks
+///   `align_ptr` for more than `sizeof(uint32)`. The one field that would need 8 is read as
+///   two 4-byte loads on purpose — `GET_U64_FROM_ADDR` copies `addr[0]` and `addr[1]` into a
+///   union — so 8 is deliberately never required.
+/// - **Under-aligning an `.aot` desynchronises the parse; it does not merely misalign a load.**
+///   `TEMPLATE_READ`'s `align_ptr` works on the *absolute* address, so a base that is not a
+///   multiple of 4 advances the cursor to a different file offset than `wamrc` wrote.
+///
+/// **Why a copy is not enough on its own.** `Vec<u8>` requests alignment 1; `wasm.to_vec()`
+/// satisfied WAMR only by whatever the global allocator happened to hand back, which on this
+/// repository's dev host is 16 and on a target with a fine-grained allocator need not be 4.
+/// Collecting into `u32` words *asks* for it, so the guarantee comes from the allocator's
+/// contract rather than from its habits.
+///
+/// The tail word is zero-padded and the length passed to WAMR stays the caller's, so the
+/// padding is never inside the module.
+fn aligned_copy(wasm: &[u8]) -> Box<[u32]> {
+    wasm.chunks(MODULE_ALIGN)
+        .map(|chunk| {
+            let mut word = [0u8; MODULE_ALIGN];
+            word[..chunk.len()].copy_from_slice(chunk);
+            // Native-endian, so the word's bytes sit in memory in the order they arrived.
+            u32::from_ne_bytes(word)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MODULE_ALIGN, aligned_copy};
+
+    /// The alignment WAMR's loaders require, asserted on the buffer this crate hands them.
+    ///
+    /// The source of a misalignment is not hypothetical: the caller's slice may be borrowed
+    /// from anywhere, including a `&[u8]` at an odd offset into a larger buffer, and a leaf's
+    /// is `include_bytes!`'s align-1 `.rodata`. So the input here is deliberately taken at
+    /// every offset into a backing array rather than at a natural one.
+    #[test]
+    fn every_copy_is_aligned_for_wamr() {
+        let backing: Vec<u8> = (0u8..64).collect();
+        for offset in 0..8 {
+            for len in 0..=32 {
+                let input = &backing[offset..offset + len];
+                let owned = aligned_copy(input);
+                assert_eq!(
+                    owned.as_ptr() as usize % MODULE_ALIGN,
+                    0,
+                    "a module buffer at offset {offset}, length {len} was not \
+                     {MODULE_ALIGN}-byte aligned, which WAMR's loader requires"
+                );
+            }
+        }
+    }
+
+    /// The copy is byte-for-byte the caller's module over the length WAMR is given.
+    ///
+    /// The words are `from_ne_bytes`, so this is the assertion that the round trip through
+    /// `u32` reorders nothing — it would fail on a big-endian host if it had been `from_le`.
+    #[test]
+    fn a_copy_reproduces_the_caller_s_bytes() {
+        for len in 0..=32usize {
+            let input: Vec<u8> = (0..len as u8)
+                .map(|i| i.wrapping_mul(7).wrapping_add(3))
+                .collect();
+            let owned = aligned_copy(&input);
+            // SAFETY: `owned` is a live allocation of `owned.len() * 4 >= input.len()` bytes,
+            // and `u8` has no alignment or validity requirement a `u32` allocation violates.
+            // This is the same view `instantiate` hands `wasm_runtime_load`.
+            let seen = unsafe { std::slice::from_raw_parts(owned.as_ptr().cast::<u8>(), len) };
+            assert_eq!(
+                seen,
+                &input[..],
+                "the {len}-byte copy is not the caller's module"
+            );
+        }
+    }
+
+    /// The padding is zero and lives past the length WAMR is told about.
+    #[test]
+    fn the_tail_word_is_padded_and_outside_the_module() {
+        let owned = aligned_copy(&[1, 2, 3, 4, 5]);
+        assert_eq!(owned.len(), 2, "five bytes is two words");
+        assert_eq!(owned[1].to_ne_bytes(), [5, 0, 0, 0]);
+    }
+
+    /// An empty module still yields an aligned pointer rather than an unaligned dangling one.
+    ///
+    /// WAMR refuses a zero-length buffer on its own ("magic header not detected"), so this is
+    /// about not handing it something it would fault on before it got that far.
+    #[test]
+    fn an_empty_module_is_still_aligned() {
+        let owned = aligned_copy(&[]);
+        assert!(owned.is_empty());
+        assert_eq!(owned.as_ptr() as usize % MODULE_ALIGN, 0);
     }
 }
