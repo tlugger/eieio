@@ -179,13 +179,17 @@ export interface PropertyDescriptor {
   required?: boolean;
 }
 
-/** ABI §11's manifest schema, the fields the shell needs. */
-export interface BlockManifest {
-  /** The reference this manifest was fetched for, verbatim — DESIGNER §2's
-   *  `manifest_cache.block_ref`, and the key a service file's `block` field is
-   *  matched against. Carried alongside the manifest because a manifest's own
-   *  `name` does not identify which registry or version it came from. */
-  block_ref: string;
+/** A manifest as a *node* answers it: ABI §11's manifest schema, verbatim — the fields the
+ *  shell needs, and nothing of the shell's own. `GET /blocks`, `GET /blocks/available/
+ *  {reference}` and `POST /blocks/pull` all carry one of these in their `manifest` field, and
+ *  `PUT /api/blocks/{reference}` stores it verbatim.
+ *
+ *  Declared as an `interface` rather than as `Omit<BlockManifest, 'block_ref'>` (eieio-m9s.46)
+ *  so that `schema-parity.test.ts` can walk it: that check reads `types.ts`'s AST, and an
+ *  `Omit<...>` alias is a type-level computation it cannot follow into. This is the wire half,
+ *  so this is the half that has to be checkable — {@link BlockManifest} extends it with the one
+ *  field the wire does not carry, rather than the other way round. */
+export interface NodeManifest {
   name: string;
   version: string;
   abi: { major: number; minor: number };
@@ -198,11 +202,16 @@ export interface BlockManifest {
   aot: string[];
 }
 
-/** A manifest as a *node* answers it (ABI §11): {@link BlockManifest} minus `block_ref`, which
- *  is this shell's own bookkeeping key and never part of what a node sends. `GET /blocks`,
- *  `GET /blocks/available/{reference}` and `POST /blocks/pull` all carry one of these in their
- *  `manifest` field, and `PUT /api/blocks/{reference}` stores it verbatim. */
-export type NodeManifest = Omit<BlockManifest, 'block_ref'>;
+/** {@link NodeManifest} plus the reference it was fetched for — this shell's own cache model,
+ *  not a wire shape (see `crates/cli/tests/response_shapes.rs`'s module doc for why it is not
+ *  a parity target while `NodeManifest` is). */
+export interface BlockManifest extends NodeManifest {
+  /** The reference this manifest was fetched for, verbatim — DESIGNER §2's
+   *  `manifest_cache.block_ref`, and the key a service file's `block` field is
+   *  matched against. Carried alongside the manifest because a manifest's own
+   *  `name` does not identify which registry or version it came from. */
+  block_ref: string;
+}
 
 /** One block a node has **installed** — `GET /blocks` and `POST /blocks/pull` both answer this
  *  shape (`crates/daemon/src/api/blocks.rs`'s `CachedBlock`), field for field.

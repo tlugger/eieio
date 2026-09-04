@@ -51,15 +51,21 @@ const REPO_ROOT = path.resolve(DESIGNER_ROOT, '..');
  *
  * `sources` is what staleness is measured against: the emitting test itself, plus the crate
  * whose schemas it reads. `crates/daemon/src` is the whole of what can change `NodeInfo`,
- * `TapRequest`, `ApiError`, `ServiceSummary`, `Tap` or the SSE payloads; `crates/designer/src`
- * the same for `SystemOut`/`NodeOut`. Coarser than a real dependency graph, deliberately: the
- * cost of an over-broad answer is one `just shapes` run, and the cost of an under-broad one is
- * the silent stale comparison this whole module exists to prevent. */
+ * `TapRequest`, `ApiError`, `ServiceSummary`, `Tap`, `CachedBlock`, `AvailableTag`,
+ * `AvailableBlock` or the SSE payloads; `crates/designer/src` the same for
+ * `SystemOut`/`NodeOut`. `crates/manifest/src` is the daemon artifact's third source
+ * (eieio-m9s.46): `CachedBlock.manifest`/`AvailableBlock.manifest` are `serde_json::Value` in
+ * the daemon's own schema, so `response_shapes.rs` describes them from
+ * `eio_manifest::schema::Manifest`'s serde output instead — which makes a field added to that
+ * `no_std` struct a change to this artifact, in a tree `crates/daemon/src` does not cover.
+ * Coarser than a real dependency graph, deliberately: the cost of an over-broad answer is one
+ * `just shapes` run, and the cost of an under-broad one is the silent stale comparison this
+ * whole module exists to prevent. */
 const SOURCES = {
   daemon: {
     artifact: 'designer/src/lib/api/__generated__/daemon-response-shapes.json',
     emitter: 'crates/cli/tests/response_shapes.rs',
-    sources: ['crates/cli/tests/response_shapes.rs', 'crates/daemon/src'],
+    sources: ['crates/cli/tests/response_shapes.rs', 'crates/daemon/src', 'crates/manifest/src'],
   },
   designer: {
     artifact: 'designer/src/lib/api/__generated__/designer-response-shapes.json',
