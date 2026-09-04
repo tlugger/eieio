@@ -6,7 +6,7 @@
 // the exact assertion broken and restored.
 
 import { describe, expect, it, vi } from 'vitest';
-import { IncrementalSseParser, connectSse } from './sse';
+import { IncrementalSseParser, connectSse, isPermanentStreamStatus } from './sse';
 
 describe('IncrementalSseParser', () => {
   it('parses one event in one chunk', () => {
@@ -193,6 +193,123 @@ describe('connectSse', () => {
     await vi.waitFor(() => expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(2));
     const secondCallHeaders = fetchImpl.mock.calls[1]?.[1]?.headers as Record<string, string>;
     expect(secondCallHeaders['last-event-id']).toBe('42');
+    handle.close();
+  });
+});
+
+// --- Permanent statuses: a refusal is not a disconnect (eieio-m9s.39) ----
+//
+// The bug these pin: `connectSse` treated every non-2xx exactly like a
+// dropped connection - `'reconnecting'` and backoff, forever - so a dead
+// session on a tap or log panel spun indefinitely while every other call
+// in the app raised the login gate. See `sse.ts`'s own module doc for the
+// permanent-vs-transient rule and DESIGNER §6 for the ratified version.
+
+/** A `wait` that lets the loop retry at most `n` times and then hangs. Only ever exercised by
+ *  a *broken* implementation: the tests below assert the loop never reaches a second attempt,
+ *  and the cap is what makes that failure a clean assertion (a bounded number of statuses)
+ *  rather than an out-of-memory kill from an unbounded retry storm. */
+function waitAtMost(n: number): () => Promise<void> {
+  let left = n;
+  return () => (left-- > 0 ? Promise.resolve() : new Promise<void>(() => {}));
+}
+
+function statusResponse(status: number): Response {
+  return new Response(JSON.stringify({ error: 'unauthorized', message: 'no live session' }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+describe('isPermanentStreamStatus', () => {
+  it('classifies 4xx as permanent, except HTTP\'s own two "ask again" statuses', () => {
+    expect([400, 401, 403, 404, 422, 499].map(isPermanentStreamStatus)).toEqual([true, true, true, true, true, true]);
+    expect([408, 429].map(isPermanentStreamStatus)).toEqual([false, false]);
+  });
+
+  it('classifies 5xx as transient - a node restarting or a proxy that could not reach it', () => {
+    expect([500, 502, 503, 504].map(isPermanentStreamStatus)).toEqual([false, false, false, false]);
+  });
+});
+
+describe('connectSse — a refused stream ends, a dropped one reconnects', () => {
+  it('a 401 closes the stream with the status attached and never retries', async () => {
+    const statuses: Array<{ status: string; detail?: { error?: string; status?: number } }> = [];
+    const fetchImpl = vi.fn().mockResolvedValue(statusResponse(401));
+    const handle = connectSse(
+      'http://node/taps/1/stream',
+      { onFrame: () => {}, onStatus: (status, detail) => statuses.push({ status, detail }) },
+      // Were the loop still treating a 401 as a disconnect, it would retry
+      // here (three times, then hang - see `waitAtMost`) and the
+      // assertions below would find 'reconnecting' and several fetches.
+      { fetchImpl, wait: waitAtMost(3) },
+    );
+
+    await vi.waitFor(() => expect(statuses.some((s) => s.status === 'closed')).toBe(true));
+    // --- Prove it can fail: delete the `isPermanentStreamStatus` branch in
+    // `connectSse` and this reads `reconnecting`, with `detail.status`
+    // undefined and `fetchImpl` called over and over.
+    expect(statuses.map((s) => s.status)).toEqual(['connecting', 'closed']);
+    const closed = statuses.find((s) => s.status === 'closed');
+    expect(closed?.detail?.status).toBe(401);
+    expect(closed?.detail?.error).toContain('401');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // close() after a permanent failure is the no-op it is after any other
+    // close - no second 'closed' for a caller's own teardown to render.
+    handle.close();
+    expect(statuses.filter((s) => s.status === 'closed')).toHaveLength(1);
+  });
+
+  it('a 404 (a tap the node has already released, DAEMON §9.6) ends the stream too', async () => {
+    const statuses: Array<{ status: string; detail?: { status?: number } }> = [];
+    const fetchImpl = vi.fn().mockResolvedValue(statusResponse(404));
+    connectSse(
+      'http://node/taps/gone/stream',
+      { onFrame: () => {}, onStatus: (status, detail) => statuses.push({ status, detail }) },
+      { fetchImpl, wait: waitAtMost(3) },
+    );
+
+    await vi.waitFor(() => expect(statuses.some((s) => s.status === 'closed')).toBe(true));
+    expect(statuses.find((s) => s.status === 'closed')?.detail?.status).toBe(404);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('a 503 is a disconnect, not a refusal: it still reconnects with backoff', async () => {
+    const statuses: string[] = [];
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(statusResponse(503))
+      .mockResolvedValueOnce(okResponse(['data: back\n\n']))
+      .mockImplementation(() => new Promise(() => {})); // see the earlier tests' note on the hung third call
+    const frames: string[] = [];
+    const handle = connectSse(
+      'http://node/logs/stream',
+      { onFrame: (f) => frames.push(f.data), onStatus: (s) => statuses.push(s) },
+      { fetchImpl, wait: async () => {} },
+    );
+
+    await vi.waitFor(() => expect(frames).toContain('back'));
+    expect(statuses).toContain('reconnecting');
+    expect(statuses).not.toContain('closed');
+    handle.close();
+  });
+
+  it('a 429 is retried: HTTP\'s "ask again", not a refusal', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(statusResponse(429))
+      .mockResolvedValueOnce(okResponse(['data: later\n\n']))
+      .mockImplementation(() => new Promise(() => {})); // see the earlier tests' note on the hung third call
+    const frames: string[] = [];
+    const handle = connectSse(
+      'http://node/logs/stream',
+      { onFrame: (f) => frames.push(f.data), onStatus: () => {} },
+      { fetchImpl, wait: async () => {} },
+    );
+
+    await vi.waitFor(() => expect(frames).toContain('later'));
     handle.close();
   });
 });

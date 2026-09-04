@@ -61,6 +61,8 @@ import type {
   ServiceDefinition,
   ServiceSummary,
   StreamHandle,
+  StreamStatus,
+  StreamStatusDetail,
   SystemSummary,
   TapStreamHandlers,
   TapSummary,
@@ -299,16 +301,14 @@ export function deleteRegistry(id: number): Promise<void> {
 // doc, just above, for why a proxied `401` (`ProxyUnauthorizedError`) reopens the same gate a
 // Designer-own one (`SessionRequiredError`) does, through the one guard rather than a second.
 //
-// `streamTap`/`streamLogs` are the two exceptions to the `watchSession` pattern: both return a
-// `StreamHandle` synchronously rather than a `Promise`, so there is no rejection for
-// `watchSession` to sit in front of. A stream's own transport (`sse.ts`'s `connectSse`, shared
-// unchanged by both `proxy.ts` and `mock.ts`) treats a `401` the same as any other disconnect —
-// it reports `'reconnecting'` through `onStatus` and retries with backoff rather than ever
-// rejecting — so a dead session on a tap or log stream does not reopen the login gate today.
-// That is a real gap `sse.ts` would have to close (a status a caller could recognise as
-// "unauthorized" rather than "merely offline"), not something this wiring point can paper over,
-// and it is out of this bead's owned files. Flagged here and in the final report rather than
-// silently left to be rediscovered.
+// `streamTap`/`streamLogs` still cannot go through `watchSession` — both return a `StreamHandle`
+// synchronously rather than a `Promise`, so there is no rejection for it to sit in front of —
+// and eieio-m9s.39 closed the gap that left: `sse.ts` now ends a stream on a status that cannot
+// succeed by being repeated, reporting `onStatus('closed', {status, error})` instead of
+// retrying with backoff forever, and `watchStreamSession` just below is the streams' counterpart
+// to `watchSession`, turning a `401` in that detail into the same `onSessionRequired` signal a
+// promise-shaped 401 raises. Before it, a dead session showed a tap or log panel 'reconnecting'
+// indefinitely while every other call in the app correctly raised the login gate.
 
 /**
  * `GET /services/{s}` (DAEMON §9.3), parked on `mock.ts` in **both** branches — never
@@ -396,17 +396,54 @@ export function deleteTap(nodeId: string, tapId: string): Promise<void> {
   return useRealBackend() ? watchSession(proxy.deleteTap(nodeId, tapId)) : mock.deleteTap(nodeId, tapId);
 }
 
-/** `GET /taps/{id}/stream` (proxied, DAEMON §9.6), real or fixture per `useRealBackend()`. See
- *  this section's own module doc for why this one, unlike every `Promise`-returning function
- *  above, is not wrapped in `watchSession`. */
-export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHandlers): StreamHandle {
-  return useRealBackend() ? proxy.streamTap(nodeId, tapId, handlers) : mock.streamTap(nodeId, tapId, handlers);
+/**
+ * `watchSession`'s counterpart for the two stream-shaped calls (eieio-m9s.39). A stream never
+ * rejects — it reports through `onStatus` — so the guard sits on the handlers rather than on a
+ * `Promise`: it passes every transition through untouched to the caller's own `onStatus`, and
+ * on the way notifies every `onSessionRequired` subscriber when the detail carries a `401`.
+ *
+ * `sse.ts` is what makes that detail exist: a status that cannot succeed by being repeated ends
+ * the stream as `'closed'` with the status attached, rather than being retried as if it were a
+ * disconnect (that module's own doc holds the permanent-vs-transient rule and its reasoning).
+ * A `401` is the one this cares about, for exactly `watchSession`'s reasons — a dead Designer
+ * session and a stale node credential are indistinguishable on the wire (`proxy.ts`'s module
+ * doc), and both want a fresh login prompt. Every other permanent status ends the stream with
+ * its own error text and leaves the gate alone, the same way a `404` through `watchSession`
+ * does.
+ *
+ * Wraps rather than mutates: the caller's handlers object is never touched, so a component that
+ * reuses one across reconnects (or across both streams) is unaffected.
+ */
+function watchStreamSession<E>(handlers: {
+  onEvent: (event: E) => void;
+  onStatus: (status: StreamStatus, detail?: StreamStatusDetail) => void;
+}): { onEvent: (event: E) => void; onStatus: (status: StreamStatus, detail?: StreamStatusDetail) => void } {
+  return {
+    onEvent: handlers.onEvent,
+    onStatus: (status, detail) => {
+      if (detail?.status === 401) {
+        for (const listener of sessionRequiredListeners) listener();
+      }
+      handlers.onStatus(status, detail);
+    },
+  };
 }
 
-/** `GET /logs/stream` (proxied, DAEMON §9.6), real or fixture per `useRealBackend()`. Same
- *  `watchSession` exception as `streamTap` just above. */
+/** `GET /taps/{id}/stream` (proxied, DAEMON §9.6), real or fixture per `useRealBackend()`. The
+ *  real branch goes through `watchStreamSession` — the streams' `watchSession`, just above —
+ *  rather than `watchSession` itself, which needs a `Promise` this call does not have. */
+export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHandlers): StreamHandle {
+  return useRealBackend()
+    ? proxy.streamTap(nodeId, tapId, watchStreamSession(handlers))
+    : mock.streamTap(nodeId, tapId, handlers);
+}
+
+/** `GET /logs/stream` (proxied, DAEMON §9.6), real or fixture per `useRealBackend()`. Guarded
+ *  the same way as `streamTap` just above. */
 export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStreamHandlers): StreamHandle {
-  return useRealBackend() ? proxy.streamLogs(nodeId, filter, handlers) : mock.streamLogs(nodeId, filter, handlers);
+  return useRealBackend()
+    ? proxy.streamLogs(nodeId, filter, watchStreamSession(handlers))
+    : mock.streamLogs(nodeId, filter, handlers);
 }
 
 export type * from './types';
