@@ -666,9 +666,19 @@ export interface LogFilter {
 export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
 export interface StreamStatusDetail {
-  /** Set once, on the transition into `'closed'`, when it was caused by an
-   * error rather than an explicit release. */
+  /** Why the connection ended: the disconnect being reported on a
+   * `'reconnecting'`, or — set once — the failure that ended the stream for
+   * good on a `'closed'`. Absent on a `'closed'` caused by an explicit
+   * release. */
   error?: string;
+  /** The HTTP status of a response that ended the stream permanently
+   * (`'closed'` only, and only when a *response* ended it — never on a
+   * disconnect, a transport failure, or an explicit release). A stream that
+   * is merely offline reconnects; one that was refused stops, and this is
+   * what tells the two apart. `sse.ts`'s own module doc holds the rule for
+   * which statuses are permanent and why; `client.ts` routes a `401` here to
+   * the login gate. */
+  status?: number;
 }
 
 /** What `streamTap`/`streamLogs` hand back: the one thing a caller can do
