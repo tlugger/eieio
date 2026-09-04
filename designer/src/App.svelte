@@ -96,8 +96,9 @@
   async function handleCreateSystemSubmit(name: string): Promise<SystemSummary> {
     // Deliberately not caught here: a rejection propagates back into `AddSystemModal`'s own
     // `try`/`catch`, which is what renders it — this only runs (closing the modal, refreshing
-    // the tree) on success. A `SessionRequiredError` still reaches `client.ts`'s `watchSession`
-    // and reopens the login gate independently of whatever this function does with it.
+    // the tree) on success. A `SessionRequiredError` reopens the login gate independently of
+    // whatever this function does with it: `backend.ts` raises the signal where it recognises
+    // the 401, before anything here or in the modal sees the rejection (`lib/api/session.ts`).
     const created = await api.createSystem(name);
     addingSystem = false;
     await loadAll();
@@ -203,8 +204,10 @@
   // before its data arrives — the same "no empty list" rule this bead's brief calls out for a
   // 401, applied to the one other moment an empty shell could show through.
   //
-  // `client.ts`'s `onSessionRequired` is the seam every later 401 arrives through, from
-  // whichever call noticed it first (`loadAll` below, an edit, a manifest revalidation) — this
+  // `onSessionRequired` (`lib/api/session.ts`, re-exported by `client.ts`) is the seam every
+  // later 401 arrives through, from whichever of the three transports recognised it first — a
+  // Designer route, the node proxy, or a tap/log stream (`loadAll` below, an edit, a manifest
+  // revalidation, a tap panel left open while the session expired) — this
   // is the one and only place that reacts to it, which is the whole point of that seam: no
   // other component in this shell has to know a session can expire.
   let sessionRequired = $state(true);

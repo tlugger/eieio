@@ -44,13 +44,16 @@
 //     §3.1's session guard wraps the proxy hop like every other `/api`
 //     route) or the node's stored bearer token went stale (DAEMON §9.1).
 //     Nothing on the wire tells those apart (`proxy.ts`'s module doc works
-//     through why), and neither heals without a human. `client.ts` turns
-//     this one into the same `onSessionRequired` signal `watchSession`
-//     raises for a promise-shaped 401 — which is the bug this section
-//     exists for: before it, a dead session left a tap panel
-//     'reconnecting' indefinitely while every other call in the app
-//     correctly raised the login gate, so the app told the operator two
-//     different things at once.
+//     through why), and neither heals without a human. The loop below
+//     calls `session.ts`'s `notifySessionRequired()` on this one — the
+//     same signal a promise-shaped 401 in `backend.ts` or `proxy.ts`
+//     raises — which is the bug this section exists for: before it, a
+//     dead session left a tap panel 'reconnecting' indefinitely while
+//     every other call in the app correctly raised the login gate, so the
+//     app told the operator two different things at once. Note the call
+//     sits *outside* the permanent/transient branch (eieio-m9s.43): the
+//     gate is a fact about the status, not about whether this loop has
+//     decided to give up on it.
 //   - **`404`**: the tap id is gone. DAEMON §9.6: "teardown is either
 //     explicit or a disconnect... a tap holds a subscription and a ring
 //     and nothing else, so releasing it releases everything." A released
@@ -64,6 +67,13 @@
 // the class both examples belong to. `408` and `429` are carved back out
 // because they are precisely the 4xx statuses that mean *this same
 // request, later*. This decision is also recorded in DESIGNER-SPEC §6.
+
+// The one import: `session.ts` is the login gate's signal and nothing else
+// — a dependency-free listener set (it imports nothing itself, so this
+// cannot become a cycle). This module still has no dependency on the API
+// surface: it does not know what a tap or a log is, only that a `401` on
+// any stream means the same thing it means on any request.
+import { notifySessionRequired } from './session';
 
 /** One dispatched SSE event: `event:` (defaulting to `"message"` per the
  * spec when absent), the joined `data:` lines, and the last `id:` seen
@@ -137,7 +147,8 @@ export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 /** What accompanies a status transition.
  *
  * Defined here rather than in `types.ts` because this module is the
- * transport and imports nothing from the API surface; `types.ts` re-exports
+ * transport and imports nothing from the API surface (the one import above
+ * is the login-gate signal, not this surface); `types.ts` re-exports
  * it, so the API surface and the transport cannot drift apart. They were two
  * structurally-identical declarations until the `status` field was added to
  * both by hand — which is exactly the drift a second copy invites, since
@@ -151,8 +162,10 @@ export interface StreamStatusDetail {
    * (`'closed'` only, and only when a *response* ended it — never on a
    * disconnect, a transport failure, or an explicit `close()`). This is
    * what makes a permanently-failing stream distinguishable from one that
-   * is merely offline; see this module's own doc on which statuses qualify
-   * and `client.ts`'s stream wrappers for what a `401` here does. */
+   * is merely offline; see this module's own doc on which statuses qualify.
+   * A `401` raises the login gate from the loop itself, not from a caller
+   * reading this field (eieio-m9s.43) — this is for rendering, not for the
+   * gate. */
   status?: number;
 }
 
@@ -194,8 +207,17 @@ const DEFAULT_BACKOFF_MS = [500, 1000, 2000, 5000, 10000];
  * two "ask again" statuses; everything else, 5xx included, is transient
  * and retried.
  *
- * Exported so a caller can classify a `'closed'` detail's `status` with
- * the same rule this loop applied, rather than re-deciding it.
+ * Exported for `sse.test.ts`, which pins the rule directly — enumerating
+ * `400/401/403/404/408/422/429/499/5xx` against the predicate costs one
+ * line each, where driving a whole stream per status would not. Nothing
+ * in `src/` calls it, and that is now correct rather than an oversight:
+ * it used to be exported "so a caller can classify a `'closed'` detail's
+ * `status` with the same rule", and the one caller that ever wanted to —
+ * `client.ts`'s login-gate adapter — is gone (eieio-m9s.43). The gate no
+ * longer depends on this predicate at all; the `401` above is recognised
+ * before it is consulted, precisely so that changing these carve-outs
+ * cannot silently switch the gate off. Treat this as a test seam on the
+ * reconnect policy, not as a classification service for callers.
  */
 export function isPermanentStreamStatus(status: number): boolean {
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
@@ -230,6 +252,16 @@ export function connectSse(url: string, handlers: ConnectSseHandlers, options: C
         const headers: Record<string, string> = { accept: 'text/event-stream', ...(options.headers ?? {}) };
         if (lastEventId) headers['last-event-id'] = lastEventId;
         const response = await fetchImpl(url, { signal: controller.signal, headers });
+        if (response.status === 401) {
+          // The login gate (DESIGNER §3.1, §6), raised here rather than by whoever wired
+          // these handlers up. This is the one line in this transport that knows what a
+          // *particular* status means, and it is deliberately ABOVE the permanent/transient
+          // decision below: whether a 401 is worth retrying is a reconnection question, and
+          // whether it means "log in again" is a session question. Coupling them is how the
+          // gate used to break — see `session.ts`'s module doc, which has the shape of that
+          // bug written out. Reclassify 401 as transient tomorrow and this still fires.
+          notifySessionRequired();
+        }
         if (!response.ok && isPermanentStreamStatus(response.status)) {
           // A response that arrived and refused. Retrying it would answer
           // the same way forever - end the stream instead, carrying the

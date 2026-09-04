@@ -32,27 +32,38 @@ import type {
   RegistrySummary,
   SystemSummary,
 } from './types';
+import { notifySessionRequired } from './session';
 
 /**
  * Thrown when this Designer's own surface answers `401` — no session cookie, or one naming no
  * session it still remembers (DESIGNER §3.1, `crates/designer/src/session.rs`'s
  * `require_session`). A function here returning `Promise<T[]>` has no in-band way to say
  * "you are not logged in" other than a rejection that says so distinctly: turning a `401` into
- * a resolved empty list is precisely the bug this bead's brief names as the one it could most
- * easily introduce, so this type exists to make silently doing that require deliberately
- * catching and discarding it rather than never noticing at all.
+ * a resolved empty list is precisely the bug this type exists to make hard — silently doing
+ * that now requires deliberately catching and discarding a named error rather than never
+ * noticing at all.
  *
- * Nothing outside `client.ts`'s seam is wired to catch this yet — there is no login form in
- * this SPA today (DESIGNER-SPEC §3.1's `POST /api/session` has no caller anywhere in `src/`).
- * That is a real gap, but it is not this bead's to close: `App.svelte` and the components that
- * would render a login prompt belong to a different worktree's agent. Exporting a named,
- * `instanceof`-able error is this seam doing its part — failing loudly instead of quietly —
- * without reaching into files this bead does not own to build the other half.
+ * **Constructing this is what raises the login gate** (eieio-m9s.43). The constructor calls
+ * `notifySessionRequired()`, so every `onSessionRequired` subscriber — `App.svelte`'s gate —
+ * learns about the `401` from the one place in this file that recognises one, rather than from
+ * a wrapper each of this module's callers had to remember to apply (`session.ts`'s module doc
+ * has the full argument, and DESIGNER §6 makes "a 401 reopens the login gate wherever it
+ * appears" normative).
+ *
+ * A side effect in a constructor is unusual enough to say why it is the right seam here: this
+ * error has exactly one meaning and exactly one reason to exist. There is no case in this SPA
+ * where "a 401 was recognised on a Designer route" is true and "the gate should stay down" is
+ * also true — `login()`'s own `401` is {@link WrongPasswordError}, a different type, precisely
+ * so that the one exception is not an exception to this rule. Constructing this and *not*
+ * notifying would therefore be a bug in every instance, which is the test for whether a fact
+ * belongs in a constructor. Throwing it is still the caller's job, and this does not change it:
+ * the notification is additional to the rejection, never instead of it.
  */
 export class SessionRequiredError extends Error {
   constructor(path: string) {
     super(`${path}: 401 — no live session (POST /api/session with the operator password first)`);
     this.name = 'SessionRequiredError';
+    notifySessionRequired();
   }
 }
 

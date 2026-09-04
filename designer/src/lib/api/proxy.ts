@@ -75,6 +75,7 @@ import type {
   TapStreamHandlers,
   TapSummary,
 } from './types';
+import { notifySessionRequired } from './session';
 import { connectSse } from './sse';
 import { decodeLogFrame, decodeTapFrame } from './stream-events';
 
@@ -85,6 +86,13 @@ import { decodeLogFrame, decodeTapFrame } from './stream-events';
  * type rather than two: the Designer's own session gate and a stale node credential both answer
  * this same shape, and nothing in the wire contract distinguishes them. `message` is whichever
  * of the two bodies above actually came back, verbatim.
+ *
+ * **Constructing this raises the login gate** (eieio-m9s.43), the same way `backend.ts`'s
+ * `SessionRequiredError` does and for the same reason — see that type's own doc and
+ * `session.ts`'s module doc. The two readings of a proxied `401` disagree about *why* the
+ * request failed and agree that a fresh login prompt is the right thing to show, and never
+ * reopening the gate for the ambiguous case is strictly worse than sometimes reopening it when
+ * a re-login would not have helped. DESIGNER §6 makes the rule normative.
  */
 export class ProxyUnauthorizedError extends Error {
   constructor(
@@ -94,6 +102,7 @@ export class ProxyUnauthorizedError extends Error {
   ) {
     super(`node ${nodeId} ${path}: 401 — ${message}`);
     this.name = 'ProxyUnauthorizedError';
+    notifySessionRequired();
   }
 }
 
