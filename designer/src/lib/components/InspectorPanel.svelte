@@ -13,8 +13,23 @@
   // (DELETE /taps/{id} + closing the stream) on cleanup — "closing the
   // panel or deselecting releases the tap" (the plan, item 2) falls out of
   // Svelte's own effect teardown rather than needing a separate "on close"
-  // path to remember.
+  // path to remember. The tap half is a `startTap`/`stopTap` pair the effect
+  // drives, rather than an effect body, because the effect is no longer the
+  // only thing that starts a tap — DESIGNER §6's released-tap case
+  // (`recreateTap`, below) starts one from a button.
+  //
+  // The other half of §6 this component owns is what the status line says
+  // when a stream has stopped for good: eieio-m9s.39 gave a permanently
+  // refused stream a `'closed'` transition carrying its HTTP status, and
+  // `statusText` is where that status becomes the operator's next step
+  // rather than the transport's own words.
   import * as api from '../api/client';
+  // The transport's own permanent-vs-transient rule, imported rather than
+  // restated: `sse.ts` decides which statuses end a stream, and this panel
+  // must not grow a second opinion about that class (its module doc, and
+  // DESIGNER §6, hold the reasoning). `client.ts` re-exports types only, so
+  // the predicate comes from the transport module directly.
+  import { isPermanentStreamStatus } from '../api/sse';
   import type { LogLineEvent, StreamHandle, StreamStatus, TapStreamEvent, TappedConnection } from '../api/types';
   import type { PropertyNameResolver } from '../derive/props';
 
@@ -74,10 +89,18 @@
   let tapLines = $state.raw<PanelLine[]>([]);
   let tapStatus = $state<StreamStatus>('closed');
   let tapStatusError = $state<string | undefined>(undefined);
+  // `StreamStatusDetail.status` (eieio-m9s.39): the HTTP status of a response
+  // that ended the stream for good, and only that — never set by a
+  // disconnect, a transport failure or an explicit `close()`. Held beside the
+  // error text rather than folded into it because the two say different
+  // things to an operator: the text is the transport's words, the status is
+  // what `statusText` branches on to say what actually happened.
+  let tapStatusCode = $state<number | undefined>(undefined);
 
   let logLines = $state.raw<PanelLine[]>([]);
   let logStatus = $state<StreamStatus>('closed');
   let logStatusError = $state<string | undefined>(undefined);
+  let logStatusCode = $state<number | undefined>(undefined);
 
   function appendTap(line: PanelLine) {
     const next = [...tapLines, line];
@@ -140,6 +163,92 @@
   }
 
   // --- Tap lifecycle: one connection at a time, torn down on change -------
+  //
+  // A start/stop pair around a generation counter rather than one inline
+  // effect body, because the effect is no longer the only thing that starts
+  // a tap: a tap the node has already released answers `404` on its stream
+  // and can only come back as a *new* tap (DAEMON §9.6 — "releasing it
+  // releases everything"; `POST /taps` is the only thing that makes
+  // another), so `recreateTap` below runs the identical create-and-stream
+  // sequence from the panel's own button. The generation counter is what the
+  // effect's `cancelled` flag used to be, widened to cover a restart as well
+  // as an unmount: a `createTap` still in flight when its generation goes
+  // stale releases the tap it just made and writes no state.
+  let tapGeneration = 0;
+  let tapHandle: StreamHandle | null = null;
+  let activeTap: { nodePath: string; tapId: string } | null = null;
+
+  function stopTap() {
+    tapGeneration += 1;
+    tapHandle?.close();
+    tapHandle = null;
+    if (activeTap) {
+      // DAEMON §9.6: "a tap holds a subscription and a ring and nothing
+      // else... releasing it releases everything" - explicit on our side
+      // too, rather than counting on the node to notice the client is gone.
+      // A tap the node already released answers `404`; that rejection is the
+      // expected outcome of tearing one of those down, not an error to
+      // surface, so it is swallowed here rather than left unhandled.
+      const { nodePath, tapId } = activeTap;
+      void api.deleteTap(nodePath, tapId).catch(() => {});
+      activeTap = null;
+    }
+  }
+
+  function startTap(nid: number, svc: string, conn: TappedConnection) {
+    const generation = (tapGeneration += 1);
+    const nodePath = String(nid);
+    const connectionString = `${conn.fromId}.${conn.fromPort} -> ${conn.toId}.${conn.toPort}`;
+    const sourceLabel = `${svc}.${conn.fromId}`;
+    tapLines = [];
+    tapStatus = 'connecting';
+    tapStatusError = undefined;
+    tapStatusCode = undefined;
+
+    api
+      .createTap(nodePath, svc, connectionString)
+      .then((tap) => {
+        if (generation !== tapGeneration) {
+          void api.deleteTap(nodePath, tap.tap_id).catch(() => {});
+          return;
+        }
+        activeTap = { nodePath, tapId: tap.tap_id };
+        tapHandle = api.streamTap(nodePath, tap.tap_id, {
+          onEvent: (event) => {
+            if (generation !== tapGeneration) return;
+            appendTap(tapEventToLine(event, sourceLabel));
+          },
+          onStatus: (status, detail) => {
+            if (generation !== tapGeneration) return;
+            tapStatus = status;
+            tapStatusError = detail?.error;
+            tapStatusCode = detail?.status;
+          },
+        });
+      })
+      .catch((err) => {
+        if (generation !== tapGeneration) return;
+        tapStatus = 'closed';
+        tapStatusError = err instanceof Error ? err.message : String(err);
+        tapStatusCode = undefined;
+      });
+  }
+
+  /** The operator's move after a `404`: the released id is gone, so this
+   * tears down what is left of the old tap and asks the node for a new one
+   * on the same connection. The Designer is a peer client (SCOPE §4) and
+   * already owns tap creation — telling the operator to go and re-click the
+   * connection would be describing a gesture instead of making the call the
+   * panel can make itself. */
+  function recreateTap() {
+    const conn = tappedConnection;
+    const nid = nodeId;
+    const svc = serviceName;
+    if (!conn || !nid || !svc) return;
+    stopTap();
+    startTap(nid, svc, conn);
+  }
+
   $effect(() => {
     const conn = tappedConnection;
     const nid = nodeId;
@@ -147,49 +256,12 @@
     if (!conn || !nid || !svc) {
       tapStatus = 'closed';
       tapStatusError = undefined;
+      tapStatusCode = undefined;
       return;
     }
 
-    let cancelled = false;
-    let handle: StreamHandle | null = null;
-    let createdTapId: string | null = null;
-    tapLines = [];
-    tapStatus = 'connecting';
-    tapStatusError = undefined;
-    const connectionString = `${conn.fromId}.${conn.fromPort} -> ${conn.toId}.${conn.toPort}`;
-    const sourceLabel = `${svc}.${conn.fromId}`;
-
-    const nidPath = String(nid);
-    api
-      .createTap(nidPath, svc, connectionString)
-      .then((tap) => {
-        if (cancelled) {
-          void api.deleteTap(nidPath, tap.tap_id);
-          return;
-        }
-        createdTapId = tap.tap_id;
-        handle = api.streamTap(nidPath, tap.tap_id, {
-          onEvent: (event) => appendTap(tapEventToLine(event, sourceLabel)),
-          onStatus: (status, detail) => {
-            tapStatus = status;
-            tapStatusError = detail?.error;
-          },
-        });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        tapStatus = 'closed';
-        tapStatusError = err instanceof Error ? err.message : String(err);
-      });
-
-    return () => {
-      cancelled = true;
-      handle?.close();
-      // DAEMON §9.6: "a tap holds a subscription and a ring and nothing
-      // else... releasing it releases everything" - explicit on our side
-      // too, rather than counting on the node to notice the client is gone.
-      if (createdTapId) void api.deleteTap(nidPath, createdTapId);
-    };
+    startTap(nid, svc, conn);
+    return () => stopTap();
   });
 
   // --- Log stream: runs while the panel is open and a service is picked --
@@ -200,12 +272,14 @@
     if (!open || !nid || !svc) {
       logStatus = 'closed';
       logStatusError = undefined;
+      logStatusCode = undefined;
       return;
     }
 
     logLines = [];
     logStatus = 'connecting';
     logStatusError = undefined;
+    logStatusCode = undefined;
     const handle = api.streamLogs(
       String(nid),
       { service: svc, instance: instanceFilter },
@@ -222,6 +296,7 @@
         onStatus: (status, detail) => {
           logStatus = status;
           logStatusError = detail?.error;
+          logStatusCode = detail?.status;
         },
       },
     );
@@ -235,11 +310,47 @@
     return d.toISOString().slice(11, 23); // HH:MM:SS.mmm - stream-local, not calendar-relevant here
   }
 
-  function statusText(status: StreamStatus, error: string | undefined): string {
+  /**
+   * The status line. DESIGNER §6 draws two different things here and they
+   * must not collapse into one: a stream whose *connection* failed is
+   * retried and says so ("reconnecting"), while a stream a *response*
+   * refused has stopped and needs a person.
+   *
+   * For the stopped case this renders what the operator does next, not what
+   * the transport said, because the transport's words ("stream request
+   * refused: 401") name a fact the operator cannot act on:
+   *
+   *   - **`401`** — `client.ts` has already raised §3.1's login gate off the
+   *     same detail, so the screen is about to ask for a sign-in. Say that,
+   *     rather than a number that does not explain the dialog appearing.
+   *   - **`404` on a tap** — DAEMON §9.6: the id is released and releasing
+   *     it released everything, so it can never answer again and only `POST
+   *     /taps` makes another. That is permanent *and* actionable, and the
+   *     action is offered beside this line (`recreateTap`).
+   *   - **anything else permanent** — the class is deliberately wider than
+   *     those two (`isPermanentStreamStatus`: 4xx except `408`/`429`),
+   *     because a client cannot enumerate what a node, this Designer or a
+   *     reverse proxy in front of either will answer — a corporate proxy's
+   *     `403` is the same situation with a different number. So the
+   *     unanticipated case still gets the two things that matter: it will
+   *     not fix itself by waiting, and here is the status to go and look up.
+   *
+   * A `'closed'` with no status is `close()` or a failed `createTap`; it
+   * keeps the plain text it already had.
+   */
+  function statusText(
+    status: StreamStatus,
+    error: string | undefined,
+    code: number | undefined,
+    surface: 'tap' | 'log',
+  ): string {
     if (status === 'connecting') return 'Connecting…';
     if (status === 'open') return 'Live';
     if (status === 'reconnecting') return error ? `Disconnected (${error}) — reconnecting…` : 'Reconnecting…';
-    return error ? `Stopped: ${error}` : 'Stopped';
+    if (code === undefined || !isPermanentStreamStatus(code)) return error ? `Stopped: ${error}` : 'Stopped';
+    if (code === 401) return 'Session expired — sign in again to resume.';
+    if (code === 404 && surface === 'tap') return 'This tap was released and cannot be reconnected — re-create it to resume.';
+    return `Stopped — refused with HTTP ${code}, which repeating cannot change. Check the node, then reopen this panel.`;
   }
 
   function clearActive() {
@@ -250,6 +361,12 @@
   const activeLines = $derived(tab === 'taps' ? tapLines : logLines);
   const activeStatus = $derived(tab === 'taps' ? tapStatus : logStatus);
   const activeStatusError = $derived(tab === 'taps' ? tapStatusError : logStatusError);
+  const activeStatusCode = $derived(tab === 'taps' ? tapStatusCode : logStatusCode);
+  /** The `404`-on-a-tap case, and only it: a released tap is the one stopped
+   * stream with a next step this panel can take on the operator's behalf. */
+  const tapWasReleased = $derived(
+    tab === 'taps' && tapStatus === 'closed' && tapStatusCode === 404 && tappedConnection !== null,
+  );
 </script>
 
 {#if open}
@@ -266,7 +383,10 @@
 
       <div class="inspector__status" class:inspector__status--live={activeStatus === 'open'} class:inspector__status--down={activeStatus === 'reconnecting' || activeStatus === 'closed'}>
         <span class="inspector__dot" aria-hidden="true"></span>
-        {statusText(activeStatus, activeStatusError)}
+        {statusText(activeStatus, activeStatusError, activeStatusCode, tab === 'taps' ? 'tap' : 'log')}
+        {#if tapWasReleased}
+          <button type="button" class="inspector__button inspector__recreate" onclick={recreateTap}>Re-create tap</button>
+        {/if}
       </div>
 
       <div class="inspector__actions">
@@ -428,6 +548,10 @@
 
   .inspector__close {
     padding: 3px 7px;
+  }
+
+  .inspector__recreate {
+    margin-left: 2px;
   }
 
   .inspector__subheader {
