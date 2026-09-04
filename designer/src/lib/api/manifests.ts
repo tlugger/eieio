@@ -167,6 +167,14 @@ export async function revalidateBeforeAct(params: {
  * match, same reasoning `derive/capabilities.ts`'s `resolveManifest` gives for its own lookup:
  * a reference is never reduced to a bare name or split apart, because two different references
  * are two different blocks even when they share a name, a tag, or both.
+ *
+ * **Deliberately uncalled today** (eieio-m9s.25). Nothing in this app installs a block — no
+ * flow calls `POST /blocks/pull` — so there is no pull for this to answer about yet. The
+ * obligation is DESIGNER §3.3's, not this function's: "an install flow MUST invalidate the
+ * pulled reference's cache entry as part of the same action, re-fetching that reference from
+ * the node the pull was issued against and re-`PUT`ing it, before the palette or any of the
+ * three sites reads it again." This is that rule as a function, tested, waiting for the flow
+ * that discharges it — and §3.3 is where whoever builds one is told to.
  */
 export function supersedesOnPull(cachedReference: string, pulledReference: string): boolean {
   return cachedReference === pulledReference;

@@ -496,6 +496,12 @@
   }
 
   async function handleReload() {
+    // No `ensureFreshManifest` here, and that is a decision rather than an omission (DESIGNER
+    // §3.3, eieio-m9s.25): a reload reads no cached manifest — it sends a service name and
+    // re-reads the file's text and the listing — and everything it acts on the node re-derives
+    // from the WASM it is about to instantiate, capability refusal included. The one way a
+    // reload can move a node's answer for a reference is by pulling one the node did not have,
+    // and §3.3 already has a rule for a pull.
     if (!selected) return;
     await withBusy(async () => {
       await api.reloadService(String(selected!.nodeId), selected!.serviceName);
