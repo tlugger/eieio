@@ -80,7 +80,7 @@ fn args(name: &str) -> RunBlock {
         instance: None,
         service: String::from("test"),
         // Explicit, because ABI §9.7 gives them no floor to fall back on (SCOPE §3.4).
-        limits: Limits::new(64 * 1024, 1024),
+        limits: Limits::new(64 * 1024, 1024, None),
         // Likewise ABI §10: budgets are host configuration. Generous, because these tests
         // are about the ABI rather than about the budgets — the ones that *are* about the
         // budgets state their own.
@@ -363,12 +363,12 @@ fn a_batch_beyond_the_instances_limits_is_never_delivered() {
     let mut args = args("echo.wat");
     args.props = echo_props();
     args.batch = Some(String::from(r#"[{"a": 1}, {"a": 2}, {"a": 3}]"#));
-    args.limits = Limits::new(64 * 1024, 2);
+    args.limits = Limits::new(64 * 1024, 2, None);
 
     let error = run_block(&args).expect_err("three signals, max_batch of two");
     assert!(error.to_string().contains("max_batch"), "{error}");
 
-    args.limits = Limits::new(4, 1024);
+    args.limits = Limits::new(4, 1024, None);
     let error = run_block(&args).expect_err("the encoding is longer than four bytes");
     assert!(error.to_string().contains("max_payload"), "{error}");
 }
@@ -496,7 +496,7 @@ fn spec_from(wasm: Vec<u8>) -> InstanceSpec {
         props: BTreeMap::new(),
         instance: None,
         service: String::from("test"),
-        limits: Limits::new(64 * 1024, 1024),
+        limits: Limits::new(64 * 1024, 1024, None),
     }
 }
 
@@ -769,7 +769,7 @@ async fn a_batch_beyond_the_limits_is_refused_without_entering_the_guest() {
     let (instance, mut events) = executor
         .spawn(InstanceSpec {
             props: echo_props(),
-            limits: Limits::new(4, 1024),
+            limits: Limits::new(4, 1024, None),
             ..spec("echo.wat")
         })
         .await

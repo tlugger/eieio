@@ -206,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
                 input_port: args.input_port,
                 instance: args.instance,
                 service: args.service,
-                limits: Limits::new(args.max_payload, args.max_batch),
+                limits: Limits::new(args.max_payload, args.max_batch, node::MAX_EMISSION_BYTES),
                 budgets: Budgets {
                     fuel: args.fuel,
                     deadline: Duration::from_millis(args.deadline_ms),

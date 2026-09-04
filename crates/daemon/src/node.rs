@@ -58,6 +58,22 @@ pub const DEFAULT_MAX_PAYLOAD: u32 = 64 * 1024;
 /// The largest number of signals in one batch (ABI §9.7).
 pub const DEFAULT_MAX_BATCH: u32 = 1024;
 
+/// What this daemon bounds one callback's emissions at (ABI §9.7 rule 9): **nothing**.
+///
+/// A daemon states this value the way a leaf states 4 096 (LEAF §4.3), and `None` is the
+/// statement rather than the absence of one — the descriptor publishes no
+/// `max_emission_bytes`, and a block reading it learns that this host does not refuse an
+/// emission for the queue's sake.
+///
+/// It is not a knob, and that is the finding rather than an omission. A number here would be
+/// a backpressure policy, and backpressure is **OPEN** (SCOPE §3.4): on a leaf the bound is
+/// forced by a fixed heap and a `handle_alloc_error` that resets the node, while on a daemon
+/// the queue lives on an OS allocator behind ABI §10's fuel budget, so what to do when a
+/// block emits faster than the graph drains is the open question and not a number to pick in
+/// passing. When §3.4 closes, this becomes `[limits] max_emission_bytes` in `node.toml` and a
+/// field on `GET /node` beside the other two.
+pub const MAX_EMISSION_BYTES: Option<u32> = None;
+
 /// How many work items one instance's mailbox holds (DAEMON §5).
 pub const DEFAULT_MAILBOX: usize = 64;
 
@@ -423,7 +439,11 @@ impl File {
             id: self.id,
             name: self.name,
             listen,
-            limits: Limits::new(self.limits.max_payload, self.limits.max_batch),
+            limits: Limits::new(
+                self.limits.max_payload,
+                self.limits.max_batch,
+                MAX_EMISSION_BYTES,
+            ),
             budgets: Budgets {
                 fuel: self.budgets.fuel,
                 deadline: std::time::Duration::from_millis(self.budgets.deadline_ms),
@@ -691,7 +711,7 @@ mod tests {
         assert_eq!(node.budgets, Budgets::default());
         assert_eq!(
             node.limits,
-            Limits::new(DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_BATCH)
+            Limits::new(DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_BATCH, MAX_EMISSION_BYTES)
         );
     }
 
@@ -704,7 +724,7 @@ mod tests {
         assert_eq!(node.budgets, Budgets::default(), "budgets");
         assert_eq!(
             node.limits,
-            Limits::new(DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_BATCH),
+            Limits::new(DEFAULT_MAX_PAYLOAD, DEFAULT_MAX_BATCH, MAX_EMISSION_BYTES),
             "limits"
         );
         assert_eq!(node.mailbox, DEFAULT_MAILBOX, "mailbox");
@@ -737,7 +757,7 @@ mod tests {
         .expect("a fully stated node.toml");
         assert_eq!(node.name.as_deref(), Some("kitchen-pi"));
         assert_eq!(node.listen.to_string(), "0.0.0.0:9000");
-        assert_eq!(node.limits, Limits::new(128, 7));
+        assert_eq!(node.limits, Limits::new(128, 7, MAX_EMISSION_BYTES));
         assert_eq!(node.budgets.fuel, 5);
         assert_eq!(node.budgets.deadline, std::time::Duration::from_millis(250));
         assert_eq!(node.budgets.expr.eval().max_fuel, 11000);
