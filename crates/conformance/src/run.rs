@@ -31,7 +31,7 @@ use crate::host::{Budget, Host, HostError};
 use crate::record::{Ledger, Recording};
 use crate::report::{Outcome, Report, Violation};
 use crate::scenario::{
-    Action, DeathKind, Expect, RefusalKind, RefusalLayer, RefusalSpec, RunExpect, Scenario,
+    Action, Cause, DeathKind, Expect, RefusalKind, RefusalLayer, RefusalSpec, RunExpect, Scenario,
     Scripted, Step,
 };
 
@@ -68,8 +68,17 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
 
     // ABI §4, in full, before anything is compiled: exports with the right signatures,
     // imports within `eio:*` and within the declared capabilities, paired callbacks in both
-    // directions, embedded and registry manifests in agreement.
-    let validated = eio_manifest::validate(&loaded.wasm, loaded.registry.as_ref());
+    // directions, embedded and registry manifests in agreement — and, where the scenario
+    // configures one, §4.1's per-instance page ceiling. The ceiling is the host limit a
+    // scenario supplies that no descriptor publishes (§9.7 rule 10), and it is `None` for
+    // every scenario that instantiates, because a module that never loads is the only thing
+    // it can be about.
+    let admission = match scenario.refuses.as_ref().and_then(|spec| spec.memory_pages) {
+        Some(pages) => eio_manifest::Admission::CURRENT.with_max_pages(pages),
+        None => eio_manifest::Admission::CURRENT,
+    };
+    let validated =
+        eio_manifest::validate_against(&loaded.wasm, loaded.registry.as_ref(), admission);
 
     // A refusal scenario ends here, and the loader's answer is half of what it asserts —
     // which half depends on the layer §4.3 puts the refusal in (§13.1).
@@ -297,7 +306,23 @@ fn refused<H: Host>(
     validated: Result<Manifest, eio_manifest::ModuleError>,
 ) -> Report {
     let scenario = &loaded.scenario;
-    let proposal = &refusal.proposal;
+    let cause = match refusal.cause() {
+        Ok(cause) => cause,
+        Err(complaint) => return failed(report, None, complaint.to_string()),
+    };
+
+    // §4.1's ceiling is host configuration and no engine has an opinion about it, so a
+    // memory refusal is the loader's on every host. A scenario asking any other layer for
+    // it is asking for something no host can answer.
+    if matches!(cause, Cause::Memory { .. }) && refusal.layer != RefusalLayer::Loader {
+        return failed(
+            report,
+            None,
+            "a refusal for declared linear memory is the loader's on every host — the \
+             ceiling is host configuration, not an engine's feature set (ABI §4.1, §13.1)"
+                .to_string(),
+        );
+    }
 
     // §13.1: a refusal scenario "carries `refuses` and no steps", and publishes no limits.
     // Enforced rather than assumed, for the reason this module's own strictness exists — a
@@ -322,11 +347,18 @@ fn refused<H: Host>(
                 return failed(
                     report,
                     None,
-                    format!(
-                        "the loader accepted a module using {proposal}, which ABI §4.3 puts in \
-                         the loader's layer — the leaf engine runs that one rather than \
-                         refusing it, so nothing downstream will catch it"
-                    ),
+                    match cause {
+                        Cause::Proposal(proposal) => format!(
+                            "the loader accepted a module using {proposal}, which ABI §4.3 puts \
+                             in the loader's layer — the leaf engine runs that one rather than \
+                             refusing it, so nothing downstream will catch it"
+                        ),
+                        Cause::Memory { max_pages } => format!(
+                            "the loader admitted a module under a ceiling of {max_pages} \
+                             page(s), which ABI §4.1 makes a load-time refusal — a host that \
+                             lets it through has nothing left that will"
+                        ),
+                    },
                 );
             };
             error.to_string()
@@ -348,12 +380,16 @@ fn refused<H: Host>(
                 );
             }
 
+            let Cause::Proposal(proposal) = cause else {
+                unreachable!("a memory refusal is the loader's layer, checked above");
+            };
+
             // A host whose engine does not refuse this proposal at all. Skipped with the
             // proposal named, the same answer §13.1 gives an unimplemented capability, and
             // for the same reason: a suite that scored an unreachable scenario as a pass
             // would claim coverage the platform has not got. The gap is a conformance bug;
             // this is what keeps it visible while it is open.
-            if !host.refuses_proposal(*proposal) {
+            if !host.refuses_proposal(proposal) {
                 return Report::skipped(
                     &scenario.name,
                     host.name(),
@@ -395,8 +431,8 @@ fn refused<H: Host>(
                 report,
                 None,
                 format!(
-                    "a loader refusal names the proposal unconditionally (§4.3), so a \
-                     loader-layer scenario has to assert it: {proposal} needs `names`"
+                    "a loader refusal names what it refused unconditionally (§4.3, §13.1), so \
+                     a loader-layer scenario has to assert it: {cause} needs `names`"
                 ),
             );
         }
@@ -418,7 +454,7 @@ fn refused<H: Host>(
     failed(
         report,
         None,
-        format!("refusing {proposal} has to name it, and the {layer} said: {detail}"),
+        format!("refusing {cause} has to name it, and the {layer} said: {detail}"),
     )
 }
 

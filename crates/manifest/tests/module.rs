@@ -5,7 +5,8 @@
 //! differs from `valid.wat` by exactly one flaw is legible as such.
 
 use eio_manifest::{
-    Abi, Capability, ExportKind, MANIFEST_SECTION, Module, parse, validate, validate_against,
+    Abi, Admission, Capability, ExportKind, MANIFEST_SECTION, Module, parse, validate,
+    validate_against,
 };
 
 /// Assembles a fixture, or panics with the assembler's complaint.
@@ -97,14 +98,17 @@ fn declared_but_unused_capability_needs_no_callback() {
 fn minor_version_acceptance() {
     let module = wasm("future_minor.wat");
 
-    let older = Abi { major: 1, minor: 5 };
+    let older = Admission {
+        abi: Abi { major: 1, minor: 5 },
+        max_pages: None,
+    };
     assert_eq!(
         validate_against(&module, None, older).map(|m| m.abi).ok(),
         Some(Abi { major: 1, minor: 3 }),
         "a 1.5 host runs a block built against 1.3",
     );
     assert!(
-        validate_against(&module, None, Abi::CURRENT).is_err(),
+        validate_against(&module, None, Admission::CURRENT).is_err(),
         "a 1.0 host must refuse a block built against 1.3",
     );
 }
@@ -176,6 +180,43 @@ fn reader_reports_module_contents() {
     assert_eq!(MANIFEST_SECTION, "eio:manifest");
 }
 
+/// ABI §4.1: a host's per-instance page ceiling is admission policy, and a module declaring
+/// more than it is refused at load — never granted less, never left to trap later.
+#[test]
+fn declared_memory_is_admitted_against_the_hosts_ceiling() {
+    let two = wasm("two_pages.wat");
+    let one = wasm("minimal.wat");
+
+    assert_eq!(
+        Module::read(&two).unwrap().min_pages,
+        Some(2),
+        "the fixture is the one that declares two pages",
+    );
+
+    // A host that bounds nothing here refuses nothing here — the daemon's answer, and the
+    // default a caller gets without asking (DAEMON §4).
+    validate(&two, None).expect("a host with no ceiling admits a two-page module");
+
+    let leaf = Admission::CURRENT.with_max_pages(1);
+    assert!(
+        matches!(
+            validate_against(&two, None, leaf),
+            Err(eio_manifest::ModuleError::MemoryCeiling {
+                declared: 2,
+                ceiling: 1,
+            }),
+        ),
+        "a one-page host refuses a module declaring two (ABI §4.1)",
+    );
+    validate_against(&one, None, leaf).expect("and admits one declaring one");
+
+    // The refusal names both numbers, because "too much memory" without them is a message
+    // a deployer cannot act on.
+    let detail = validate_against(&two, None, leaf).unwrap_err().to_string();
+    assert!(detail.contains("2 page(s)"), "{detail}");
+    assert!(detail.contains("1 page(s)"), "{detail}");
+}
+
 /// Every fixture assembles. Cheap, and it means a broken fixture reports itself rather
 /// than showing up as a mysterious rejection in some other test.
 #[test]
@@ -193,5 +234,5 @@ fn every_fixture_assembles() {
         wasm(path.file_name().unwrap().to_str().unwrap());
         count += 1;
     }
-    assert!(count >= 19, "expected the full fixture set, found {count}");
+    assert!(count >= 20, "expected the full fixture set, found {count}");
 }

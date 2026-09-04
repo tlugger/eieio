@@ -110,15 +110,18 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<Built> {
     println!("    module   {}", artifact.wasm.display());
     println!("    manifest {}", manifest_json.display());
     // The declared minimum linear memory, printed on every build rather than checked
-    // against a ceiling. `cargo eio build` produces ABI §11.1's *portable* module, which
-    // both tiers run and which a daemon has no reason to size against a chip; the ceiling
-    // is LEAF §4.2's, applied where a per-instance page budget is actually known. What
-    // belongs here is the number — a block author who has raised the shadow stack, or whose
-    // `RUSTFLAGS` displaced §5.2's default, sees the cost of it in the same breath as the
-    // module's size instead of at somebody else's firmware build.
+    // against a ceiling. ABI §4.1 makes the ceiling *host* configuration and a build is not
+    // a host: `cargo eio build` produces ABI §11.1's portable module, which both tiers run,
+    // so it passes no ceiling to `validate_unaided` above and admits every module a
+    // ceiling-less host would (§9.7 rule 10). The judgement happens where a per-instance
+    // page budget is actually known — a leaf's firmware build (LEAF §4.2). What belongs here
+    // is the number: a block author who has raised the shadow stack, or whose `RUSTFLAGS`
+    // displaced SDK §5.2's default, sees the cost of it in the same breath as the module's
+    // size instead of at somebody else's firmware build.
     //
     // A second walk of the module for one integer, which a build command can afford: the
-    // alternative is threading it out of a validation whose subject is the manifest.
+    // alternative is a validation that returns the number as well as the manifest, and every
+    // caller that only wants the manifest paying for the shape of this one.
     if let Some(pages) = eio_manifest::Module::read(&wasm)
         .ok()
         .and_then(|module| module.min_pages)

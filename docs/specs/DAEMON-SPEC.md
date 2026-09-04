@@ -159,6 +159,8 @@ max_payload = 65536              # bytes
 max_batch = 1024                 # signals
                                  # There is no max_emission_bytes key: this node does not
                                  # bound what one callback emits, and §6.2 says why
+                                 # There is no max_pages key either: this node sets no ceiling
+                                 # on a module's declared linear memory (ABI §4.1), and §4 says why
 
 [budgets]                        # ABI §10, per guest entry
 fuel = 100000000
@@ -214,6 +216,8 @@ A service that parses and validates but is not marked `autostart` is **loaded an
 - Load-time validation is exactly ABI §4: exports present, imports ⊆ `eio:*`, imports ⊆ manifest capabilities, ABI version accepted, embedded manifest (if present) matches registry manifest.
 - Caches wasmtime-precompiled modules keyed by (digest, engine config hash) — cold-start matters on a Pi.
 - Airgap/offline: cache is authoritative when the registry is unreachable; a service whose blocks are cached starts fine offline.
+
+**This node has no per-instance page ceiling, and refuses no module for its declared linear memory** (ABI §4.1, §9.7 rule 10). ABI §4.1 makes the ceiling host configuration and both answers conforming; this is the daemon stating the other one from the leaf's, as it already does for `max_emission_bytes` (§6.2). Two reasons, and the second is why it is a decision rather than an omission. A page here is 64 KiB of an OS's virtual memory on a node that is running a browser-class runtime already, and the engine is the thing that knows what it can allocate — a ceiling in front of it would be this document guessing at a number wasmtime can answer exactly, and answering it wrongly costs a block that would have run. And the number a leaf's ceiling is derived from does not exist here: LEAF §4.2 divides a fixed 192 KiB heap, while a daemon-class node has no fixed heap to divide and no build that could know the graph in advance. So the validation this node runs is ABI §4.3's cross-check with **no ceiling passed**, and a module declaring more memory than the machine has fails where it would anyway — at instantiation, in the engine, before any guest code runs, which ABI §4.1 already calls a refusal rather than a death. If a node ever needs one — a shared node carving memory between tenants is the case that would ask — it is a `[limits] max_pages` key in `node.toml` and one argument to the call that already validates; until then the value is stated here and not configurable, and a block MUST NOT read that as a promise (ABI §9.7 rule 10: the same block is refused at one page by a leaf's firmware build).
 
 **How a reference names a cache entry.** §2's layout is `blocks/<name>/<version>/block.wasm`, and a service file carries a reference (SERVICE §4), so the mapping between them is normative:
 

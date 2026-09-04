@@ -91,6 +91,61 @@ fn a_refusal_in_the_wrong_layer_is_a_failure_in_both_directions() {
     );
 }
 
+/// ABI §4.1's ceiling is host configuration, so the harness has to be the thing that supplies
+/// it — and the three ways of getting that wrong all have to reach the report as failures
+/// rather than as quiet passes.
+#[test]
+fn a_memory_refusal_states_a_ceiling_and_is_the_loaders() {
+    let mut host = Reference::new().expect("a wasmtime engine");
+
+    // A host with no ceiling admits the module, which is the daemon's answer (DAEMON §4) —
+    // so a scenario that dropped `memory_pages` would be asserting a refusal nothing produces.
+    let mut loaded = scenario("34_memory_ceiling.json");
+    loaded
+        .scenario
+        .refuses
+        .as_mut()
+        .expect("a refusal scenario")
+        .memory_pages = None;
+    let report = run(&loaded, &mut host);
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.detail.contains("`memory_pages`")),
+        "the failure has to say what the scenario failed to state: {:?}",
+        report.violations
+    );
+
+    // No engine has an opinion about a number the host was configured with, so a memory
+    // refusal asked of the engine is asking for something no host can answer.
+    let report = run(
+        &mislayered("34_memory_ceiling.json", RefusalLayer::Engine),
+        &mut host,
+    );
+    assert_eq!(report.outcome, Outcome::Failed);
+    assert!(
+        report
+            .violations
+            .iter()
+            .any(|violation| violation.detail.contains("is the loader's on every host")),
+        "the failure has to say why the layer is fixed: {:?}",
+        report.violations
+    );
+
+    // And a refusal is about one thing: a scenario naming both is naming neither.
+    let mut loaded = scenario("34_memory_ceiling.json");
+    loaded
+        .scenario
+        .refuses
+        .as_mut()
+        .expect("a refusal scenario")
+        .proposal = Some(Proposal::TailCall);
+    let report = run(&loaded, &mut host);
+    assert_eq!(report.outcome, Outcome::Failed);
+}
+
 #[test]
 fn a_loader_scenario_that_asserts_no_proposal_name_is_a_failure() {
     // §4.3 makes naming the proposal unconditional for a loader refusal, so a loader-layer

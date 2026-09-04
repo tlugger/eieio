@@ -1,0 +1,11 @@
+{
+  "name": "a-module-declaring-more-memory-than-the-host-admits-is-refused",
+  "spec": "§4.1, §9.7, §13.1",
+  "note": "The ceiling is host configuration and both answers are conforming — a daemon bounds nothing (DAEMON §4), a leaf bounds one page (LEAF §4.2) — so the scenario supplies the number rather than reading it off whichever host is running. It is the one host limit no instance descriptor publishes, because a module past it never instantiates and has no descriptor to read (§9.7 rule 10). The refusal is the loader's on every host and therefore names both numbers.",
+  "module": "blocks/two_pages.wat",
+  "refuses": {
+    "memory_pages": 1,
+    "names": "2 page(s)",
+    "layer": "loader"
+  }
+}

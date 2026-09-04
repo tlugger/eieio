@@ -467,6 +467,19 @@ pub enum ModuleError {
     /// no manifest has no ports, no properties, and no declared capabilities.
     NoManifest,
 
+    /// The module's declared minimum linear memory exceeds the per-instance page ceiling
+    /// this host admits under (§4.1).
+    ///
+    /// A load-time refusal and never a trap: the instance is never created, so there is
+    /// nothing to kill. A host that bounds nothing here (`Admission::max_pages` of `None`,
+    /// which is the daemon's answer) never produces this.
+    MemoryCeiling {
+        /// The minimum the module declares, in 64 KiB pages.
+        declared: u64,
+        /// The ceiling this host admits under, in the same unit.
+        ceiling: u64,
+    },
+
     /// The manifest declares an ABI version this host does not accept (§12).
     UnacceptableAbi {
         /// The version the manifest declares.
@@ -565,6 +578,12 @@ impl fmt::Display for ModuleError {
             ModuleError::NoManifest => write!(
                 f,
                 "no manifest: the module has no eio:manifest section and none was supplied",
+            ),
+            ModuleError::MemoryCeiling { declared, ceiling } => write!(
+                f,
+                "the module declares a minimum linear memory of {declared} page(s), {} KiB, and this host admits {ceiling} page(s), {} KiB (§4.1)",
+                declared.saturating_mul(64),
+                ceiling.saturating_mul(64),
             ),
             ModuleError::UnacceptableAbi { module, host } => write!(
                 f,

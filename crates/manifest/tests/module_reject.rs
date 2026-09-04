@@ -5,7 +5,9 @@
 //! test cannot pass because the module was wrong in some other way. The `.wat` files
 //! carry a comment naming the rule they break.
 
-use eio_manifest::{Abi, Capability, ExportKind, ModuleError, parse, validate, validate_against};
+use eio_manifest::{
+    Abi, Admission, Capability, ExportKind, ModuleError, parse, validate, validate_against,
+};
 
 /// Assembles a fixture. Duplicated from `module.rs` rather than shared, because an
 /// integration test is its own crate and a shared helper would need a `mod` file that
@@ -302,7 +304,7 @@ fn unacceptable_major_version() {
 
 #[test]
 fn minor_version_newer_than_the_host() {
-    match validate_against(&wasm("future_minor.wat"), None, Abi::CURRENT) {
+    match validate_against(&wasm("future_minor.wat"), None, Admission::CURRENT) {
         Err(ModuleError::UnacceptableAbi { module, .. }) => {
             assert_eq!(module, Abi { major: 1, minor: 3 })
         }
