@@ -16,5 +16,5 @@
     }
   ],
   "targets": [ "wasm32-unknown-unknown" ],
-  "aot": [ "esp32s3" ]
+  "aot": [ "riscv32imc-unknown-none-elf" ]
 }

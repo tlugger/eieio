@@ -36,7 +36,7 @@ fn spec_example() {
     assert_eq!(manifest.outputs[0].name, "true");
     assert_eq!(manifest.outputs[1].name, "false");
     assert_eq!(manifest.targets, [PORTABLE_TARGET]);
-    assert_eq!(manifest.aot, ["esp32s3"]);
+    assert_eq!(manifest.aot, ["riscv32imc-unknown-none-elf"]);
 
     let property = &manifest.properties[0];
     assert_eq!(property.name, "predicate");

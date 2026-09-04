@@ -80,7 +80,7 @@
       }
     },
     "aot": {
-      "description": "Leaf targets for which a prebuilt ahead-of-time compiled artifact is published alongside the portable module — e.g. \"esp32s3\". An addition, never a replacement: the portable module is always there.",
+      "description": "Leaf targets for which a prebuilt ahead-of-time compiled artifact is published alongside the portable module — e.g. \"riscv32imc-unknown-none-elf\". An eieio leaf target is spelled as its Rust triple (LEAF-SPEC §6.2.1); the pattern stays open because a registry may carry artifacts for targets this platform has not defined. An addition, never a replacement: the portable module is always there.",
       "type": "array",
       "uniqueItems": true,
       "items": {

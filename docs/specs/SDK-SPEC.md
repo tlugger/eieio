@@ -259,7 +259,7 @@ cargo eio publish <registry> OCI artifact, push, optional cosign signature   §5
 **PROPOSED**, and unimplemented:
 
 ```
-cargo eio aot --target esp32s3   WAMR AOT artifact for leaf targets
+cargo eio aot --target riscv32imc-unknown-none-elf   WAMR AOT artifact for a leaf target (LEAF §6.2)
 ```
 
 `aot` stays marked because it depends on AOT variants the leaf tier has not specified yet.
