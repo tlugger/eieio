@@ -15,6 +15,7 @@ fn limits() -> Limits {
     Limits {
         max_payload: 64 * 1024,
         max_batch: 1024,
+        max_emission_bytes: None,
     }
 }
 
@@ -123,6 +124,7 @@ fn a_batch_over_max_batch_is_still_handed_to_the_host() {
     let mut ctx = Ctx::new(Limits {
         max_payload: 64 * 1024,
         max_batch: 2,
+        max_emission_bytes: None,
     });
 
     let batch = batch_of((0..3).map(|n| signal_with("n", Value::Int(n))));
@@ -140,6 +142,7 @@ fn a_payload_over_max_payload_is_err_limit_before_the_host_is_called() {
     let mut ctx = Ctx::new(Limits {
         max_payload: 4,
         max_batch: 1024,
+        max_emission_bytes: None,
     });
 
     let batch = batch_of([signal_with("a_long_key_name", Value::Int(1))]);
@@ -156,6 +159,7 @@ fn the_limits_are_readable_because_abi_9_7_gives_them_no_floor() {
     let ctx = Ctx::new(Limits {
         max_payload: 512,
         max_batch: 1,
+        max_emission_bytes: None,
     });
     assert_eq!(ctx.limits().max_payload, 512);
     assert_eq!(ctx.limits().max_batch, 1);

@@ -92,9 +92,9 @@ impl SignalIdx {
 
 /// The limits the host published for this instance (ABI §5.2, §9.7).
 ///
-/// **Neither has a floor.** ABI §9.7 makes both host configuration and says a block "may
-/// assume nothing about their size" — an MCU host may publish numbers a server host would
-/// consider unusably small. A block reads them here and honours them; it does not
+/// **None of them has a floor.** ABI §9.7 makes all three host configuration and says a
+/// block "may assume nothing about their size" — an MCU host may publish numbers a server
+/// host would consider unusably small. A block reads them here and honours them; it does not
 /// hard-code a size it believes is safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -102,6 +102,18 @@ pub struct Limits {
     pub max_payload: u64,
     /// The largest signal count per batch (ABI §9.7).
     pub max_batch: u64,
+    /// The largest total payload this host accepts from `emit` **within one callback**, or
+    /// `None` where it does not bound that at all (ABI §9.7 rule 9).
+    ///
+    /// `emit` enqueues rather than delivers (ABI §6.2), so everything a callback emits is
+    /// held by the host until the callback returns; this is what the host will hold. Past it
+    /// `emit` answers `ERR_LIMIT` and the block lives (ABI §8).
+    ///
+    /// **`None` means this host does not bound it, not that the block was not told.** ABI
+    /// §5.2 makes the key's absence the statement, which is why this is an `Option` and not
+    /// a number with a special value. A block with more to emit than a callback's budget
+    /// does what ABI §10 already advises for long work: chunks it across timers.
+    pub max_emission_bytes: Option<u64>,
 }
 
 /// The instance descriptor, as delivered to `eio_configure` (ABI §5.2).
@@ -150,6 +162,7 @@ impl Descriptor {
             limits: Limits {
                 max_payload: limit(limits, "max_payload")?,
                 max_batch: limit(limits, "max_batch")?,
+                max_emission_bytes: optional_limit(limits, "max_emission_bytes")?,
             },
         })
     }
@@ -221,6 +234,15 @@ fn limit(map: &eio_signal::Map, key: &str) -> Result<u64, BlockError> {
         None => Err(BlockError::Decode(alloc::format!(
             "descriptor limits are missing {key:?}"
         ))),
+    }
+}
+
+/// The same, for a key ABI §5.2 makes optional: absent is an answer, anything else present
+/// is held to the same rules as a required limit.
+fn optional_limit(map: &eio_signal::Map, key: &str) -> Result<Option<u64>, BlockError> {
+    match map.get(key) {
+        None => Ok(None),
+        Some(_) => limit(map, key).map(Some),
     }
 }
 

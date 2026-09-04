@@ -133,11 +133,13 @@ An unassigned negative code MUST be carried rather than collapsed: a foreign hos
 
 ### 2.3 Limits are read, never assumed
 
-ABI §9.7 gives `max_payload` and `max_batch` **no floor**: both are host configuration, and a block "may assume nothing about their size" (SCOPE §3.4 is OPEN on the policy around them, not on this). An MCU host may publish numbers a server host would consider unusable.
+ABI §9.7 gives `max_payload`, `max_batch` and `max_emission_bytes` **no floor**: all three are host configuration, and a block "may assume nothing about their size" (SCOPE §3.4 is OPEN on the policy around them, not on this). An MCU host may publish numbers a server host would consider unusable.
 
 The SDK therefore surfaces both on `Ctx`, and checks the one the ABI makes checkable: `Ctx::emit` compares the batch's encoded length against `max_payload` before calling the host and refuses with `ERR_LIMIT` — the same code ABI §6.2 requires a host to return, so a block sees one answer whichever side noticed. The length is exact and known before the encode, so an oversized batch does not cost a serialization first.
 
 `max_batch` is deliberately **not** checked. ABI §6.2's table of refusals whose code the spec fixes has three entries and the signal count is not among them, and §9.7's operative sentence about `max_batch` is that a host "never delivers batches beyond" it — the inbound direction. An SDK that refused locally would report an `ERR_LIMIT` no host produced, inventing a fourth refusal in the one place §6.2 says the answer must not vary. Whether `max_batch` bounds emissions at all is a genuine gap, tracked as eieio-7d8.13; until it closes, the limit is readable and the decision is the block's.
+
+`max_emission_bytes` is surfaced and **not** checked either, for the reason above and one more. ABI §9.7 rule 9 bounds what one *callback* may emit, so a guest-side check would mean the SDK keeping its own running total and its own idea of where a callback begins — a second copy of the host's bookkeeping, in the guest, free to disagree with it. What the SDK does instead is carry the host's answer faithfully: `emit` returns `ERR_LIMIT`, a status code and therefore life (ABI §8), and a block that means to keep emitting chunks the rest across timers (ABI §10). `Option<u64>` and not a number, because ABI §5.2 makes the key's absence the statement — a block can tell "this host does not bound emission" from "this host did not say", and neither is a size it may assume.
 
 A block that hard-codes a size it believes is safe is a block that works on one tier and fails on another. There is no size that is safe to assume.
 
@@ -490,7 +492,7 @@ divergence a conformance bug.
 |`.inputs([..])` / `.outputs([..])`|Port names, position = index (ABI §5.2)|
 |`.property(name, ty, source)`|A property and its expression. A literal is a trivial expression (ABI §11)|
 |`.unset_property(name, ty)`|ABI §7.1's "no value at all": keeps its `prop_id`, answers `ERR_NOT_FOUND`|
-|`.limits(max_payload, max_batch)`|What the descriptor publishes (ABI §9.7). Neither has a floor, and setting them small is the only way to find out whether a block reads them|
+|`.limits(max_payload, max_batch)`|What the descriptor publishes (ABI §9.7). Neither has a floor, and setting them small is the only way to find out whether a block reads them. `max_emission_bytes` (rule 9) is not offered: this host records emissions rather than queueing them, so it would be publishing a bound it never enforces|
 |`.scripted(..)`|Capability answers, before the lifecycle runs — `configure` and `start` use capabilities too|
 |`.seed_state(key, value)`|What `eio:state` already holds before the block runs, as raw bytes — the same standing state a conformance scenario's `state` field sets up (ABI §7.2)|
 |`.configure()` / `.start()`|ABI §5.1's lifecycle, stopping after the first or running both|

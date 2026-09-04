@@ -148,10 +148,18 @@ impl<B: Block> Builder<B> {
     ///
     /// Neither has a floor, so a test that wants to exercise a block against a small host
     /// sets them small — which is the only way to find out whether a block reads them.
+    ///
+    /// `max_emission_bytes` (ABI §9.7 rule 9) is not among them, and stays `None`. This host
+    /// records what a block emits rather than queueing it, so it has no queue to fill and
+    /// would be publishing a bound it never enforces — the one thing worse than not
+    /// modelling a refusal is modelling it as never happening. A block whose chunking
+    /// depends on that bound is exercised against a real host, where `33_emission_budget`
+    /// pins the behaviour.
     pub fn limits(mut self, max_payload: u64, max_batch: u64) -> Self {
         self.limits = Limits {
             max_payload,
             max_batch,
+            max_emission_bytes: None,
         };
         self
     }
@@ -300,6 +308,7 @@ impl<B: Block> TestHost<B> {
             limits: Limits {
                 max_payload: 1 << 20,
                 max_batch: 1 << 16,
+                max_emission_bytes: None,
             },
             instance_id: String::from("test-instance"),
             name: String::from("block-under-test"),
