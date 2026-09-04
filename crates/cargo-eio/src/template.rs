@@ -62,8 +62,9 @@ pub struct File {
 ///
 /// The source of `.gitignore` is `gitignore.in` for a mundane reason: a directory of dotfiles
 /// is a directory whose contents `ls` does not show, and a template file nobody sees is a
-/// template file nobody maintains. Where it *lands* is [`File::path`] like every other.
-pub const FILES: [File; 7] = [
+/// template file nobody maintains. Where it *lands* is [`File::path`] like every other, and
+/// `.cargo/config.toml` is `cargo-config.toml.in` for the same reason.
+pub const FILES: [File; 8] = [
     File {
         path: "Cargo.toml",
         source: include_str!("../template/Cargo.toml.in"),
@@ -91,6 +92,10 @@ pub const FILES: [File; 7] = [
     File {
         path: ".gitignore",
         source: include_str!("../template/gitignore.in"),
+    },
+    File {
+        path: ".cargo/config.toml",
+        source: include_str!("../template/cargo-config.toml.in"),
     },
 ];
 

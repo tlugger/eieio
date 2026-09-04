@@ -26,6 +26,24 @@ const PROFILE: [&str; 4] = [
     "profile.release.strip=true",
 ];
 
+/// SDK §5.2's shadow-stack default, as a `build.rustflags` cargo `--config` override.
+///
+/// `wasm-ld` defaults the shadow stack to 1 MiB, which is not a size anybody chose for a
+/// block: it is a desktop linker's default, and it is what made every one of ABI §13.2's
+/// five golden blocks declare a **minimum linear memory of 17 pages, 1088 KiB** — three and
+/// a half times the whole of LEAF §4.2's v1 target chip. 16 KiB takes all five to one page
+/// with no source change and no measurable size difference.
+///
+/// `build.rustflags` and not `target.<triple>.rustflags` is the whole of the override story,
+/// and it is deliberate: cargo resolves rustflags from the *first* source that has any, in
+/// the order `RUSTFLAGS` env → `target.<triple>.rustflags` → `build.rustflags`. So a block
+/// that genuinely needs a deeper stack raises it in its own `.cargo/config.toml` under
+/// `[target.wasm32-unknown-unknown]` — which outranks this even though this arrives on the
+/// command line, and which a plain `cargo build --release --target wasm32-unknown-unknown`
+/// honours identically. That is the property SDK §5.1 asks of the template's
+/// `[profile.release]`, kept for the one setting a `Cargo.toml` cannot carry.
+const SHADOW_STACK: &str = "build.rustflags=[\"-C\", \"link-arg=-zstack-size=16384\"]";
+
 /// The manifest file `build` writes beside the module (ABI §11, §4.4).
 const MANIFEST_JSON: &str = "manifest.json";
 
@@ -91,6 +109,25 @@ pub fn run(args: &BuildArgs) -> anyhow::Result<Built> {
     );
     println!("    module   {}", artifact.wasm.display());
     println!("    manifest {}", manifest_json.display());
+    // The declared minimum linear memory, printed on every build rather than checked
+    // against a ceiling. `cargo eio build` produces ABI §11.1's *portable* module, which
+    // both tiers run and which a daemon has no reason to size against a chip; the ceiling
+    // is LEAF §4.2's, applied where a per-instance page budget is actually known. What
+    // belongs here is the number — a block author who has raised the shadow stack, or whose
+    // `RUSTFLAGS` displaced §5.2's default, sees the cost of it in the same breath as the
+    // module's size instead of at somebody else's firmware build.
+    //
+    // A second walk of the module for one integer, which a build command can afford: the
+    // alternative is threading it out of a validation whose subject is the manifest.
+    if let Some(pages) = eio_manifest::Module::read(&wasm)
+        .ok()
+        .and_then(|module| module.min_pages)
+    {
+        println!(
+            "    memory   {pages} page(s), {} KiB minimum",
+            pages.saturating_mul(64)
+        );
+    }
 
     Ok(Built {
         root: artifact.root,
@@ -123,6 +160,7 @@ fn compile(args: &BuildArgs) -> anyhow::Result<Artifact> {
     for setting in PROFILE {
         command.args(["--config", setting]);
     }
+    command.args(["--config", SHADOW_STACK]);
 
     let output = command
         .spawn()

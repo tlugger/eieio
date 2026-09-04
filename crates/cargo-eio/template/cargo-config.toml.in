@@ -1,0 +1,17 @@
+# SDK §5.2's shadow-stack default, restated so that a plain
+# `cargo build --release --target wasm32-unknown-unknown` produces the same module
+# `cargo eio build` does — the same property §5.1 asks of `[profile.release]`, kept for
+# the one setting a `Cargo.toml` cannot carry.
+#
+# `wasm-ld` defaults the shadow stack to 1 MiB, which is a desktop linker's default and
+# not a size anybody chose for a block: it makes a module declare 17 pages of linear
+# memory, 1088 KiB, three and a half times the whole of a leaf's SRAM (LEAF §4.2). At
+# 16 KiB a block declares one page and nothing else about it changes.
+#
+# Raise it here if this block genuinely needs a deeper stack. `[target.<triple>]`
+# outranks the `build.rustflags` `cargo eio build` passes, so editing this array is the
+# one edit that moves both build paths together. A block that declares more than one
+# page is still a valid block — a leaf firmware build is where it is refused, and that
+# is the only place that knows the per-instance page budget to refuse it against.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=16384"]
