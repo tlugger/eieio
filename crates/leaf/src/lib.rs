@@ -180,13 +180,37 @@ pub struct Bindings<C, R, S> {
 /// is the divergence ABI §13 calls a conformance bug by definition, bought in exchange for
 /// stack headroom.
 ///
-/// That trade may still be worth making on real hardware, where 128 levels of recursive
-/// decode is exactly the stack overflow LEAF §4.1 exists to bound and "not a caught error"
-/// on an MCU. But it is a per-target decision that needs a measured stack, which is LEAF
-/// §11's memory-budget expansion item, and it is a decision about *interoperability*, not
-/// only about safety. Until then the leaf agrees with the daemon.
+/// **That trade is now resolved, and the bound stays at 128** (eieio-x7g.2.7). The stack
+/// LEAF §4.1 was waiting for was measured off the v1 target's object code rather than
+/// estimated: built for `riscv32imc-unknown-none-elf`, `Value::decode_at` — the directly
+/// self-recursive frame, one per level of nesting — is 160 bytes, so 128 levels cost ≈ 20 KiB
+/// against the 32 KiB stack LEAF §4.2 reserves, and the floor would have cost ≈ 5 KiB. Host
+/// parity is therefore worth 15 KiB of a 313 KiB part, and the bound is a *constant* on every
+/// leaf target rather than a per-target one: what varies per target is the stack reserved for
+/// it, which is a linker number and not an interoperability guarantee.
 pub fn leaf_budgets() -> ExprBudgets {
     ExprBudgets::new(EvalLimits::FLOORS, eio_signal::MAX_DEPTH)
+}
+
+/// A leaf's own ABI §5.2 limits (LEAF §4.2): `max_payload` 4 096, `max_batch` 8.
+///
+/// ABI §9.7 makes both host configuration with **no floor**, and SCOPE §3 keeps the question
+/// of whether a floor should exist OPEN. This function is not an answer to that question: it
+/// is one host supplying its two values, which is what ABI §9.7 says a host does.
+///
+/// `max_payload` is 4 096 because that is EXPR §9's `MAX_VALUE_BYTES` **floor**, the size of
+/// value a conforming expression may build. A leaf below it would make a value the language
+/// guarantees can be built impossible to emit — the same shape of divergence
+/// [`leaf_budgets`] declines to buy for the decode bound. `max_batch` is 8 because LEAF §4.4
+/// derives the watchdog deadline from it: it is the one number that appears in both budgets,
+/// and raising it costs wall-clock time as well as RAM.
+///
+/// These are far below the host bring-up's previous `Limits::new(64 * 1024, 256)`, which was
+/// a daemon's numbers on a leaf. Running the conformance suites at a leaf's real limits is
+/// the same argument LEAF §9 makes for running `expr-tests/` at `EvalLimits::FLOORS`: a limit
+/// that only holds on a generous host has not been tested.
+pub const fn leaf_limits() -> Limits {
+    Limits::new(4096, 8)
 }
 
 /// Loads, configures and starts one instance from a compiled block module.
@@ -433,7 +457,7 @@ pub fn run_demo<E: Engine>(
     let counter_wasm = fixtures::wasm("counter");
     let transform_wasm = fixtures::wasm("transform");
 
-    let limits = Limits::new(64 * 1024, 256);
+    let limits = leaf_limits();
     let empty = BTreeMap::new();
 
     let counter = spawn_host(

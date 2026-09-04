@@ -13,11 +13,12 @@
 //!
 //! # This is not LEAF §4's watchdog
 //!
-//! LEAF §4's watchdog decides when a *running* guest callback is killed — a hardware timer
-//! armed before entering `eio_process_signals` or `eio_on_timer` and disarmed on return, which
-//! this crate does not build, and neither of its engines could stand in for: wasm3 has no
-//! interruption entry point at all, and WAMR's instruction-count limit is compiled out
-//! (LEAF §4, §11). [`pump`] decides something else entirely: when the *next* callback
+//! LEAF §4.4's watchdog decides when a *running* guest callback is killed — MWDT0's two
+//! stages, armed before entering `eio_process_signals` or `eio_on_timer` and disarmed on
+//! return, which this crate does not build, and neither of its engines could stand in for:
+//! neither meets LEAF §4.5's requirements on an engine binding. wasm3 has no interruption
+//! entry point at all, and WAMR's instruction-count limit is compiled out.
+//! [`pump`] decides something else entirely: when the *next* callback
 //! *starts*. `Running::on_timer` is still the only way into the guest — a scheduler picks the
 //! moment, never the mechanism — and ABI §1.2's one-caller-at-a-time rule holds simply because
 //! nothing here is concurrent: [`pump`] runs to completion, synchronously, strictly between two

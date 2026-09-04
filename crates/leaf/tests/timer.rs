@@ -23,9 +23,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use eio_host_core::{
-    Connection, Delivering, Endpoint, Engine, Limits, Outcome, Port, Routes, Status,
-};
+use eio_host_core::{Connection, Delivering, Endpoint, Engine, Outcome, Port, Routes, Status};
 use eio_leaf::{fixtures, spawn_host, timer};
 use eio_signal::Value;
 
@@ -50,7 +48,7 @@ fn a_timer_fires_and_the_emission_routes_to_a_second_instance<E: Engine>(
     let emitter_wasm = fixtures::wasm("emitter");
     let transform_wasm = fixtures::wasm("transform");
 
-    let limits = Limits::new(64 * 1024, 256);
+    let limits = eio_leaf::leaf_limits();
     let empty = BTreeMap::new();
 
     let emitter = spawn_host(&emitter_wasm, "emitter", &empty, limits, None, &instantiate)
@@ -199,7 +197,7 @@ fn a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found<E: 
     instantiate: impl Fn(&[u8]) -> Result<E, String>,
 ) {
     let emitter_wasm = fixtures::wasm("emitter");
-    let limits = Limits::new(64 * 1024, 256);
+    let limits = eio_leaf::leaf_limits();
     let empty = BTreeMap::new();
 
     let emitter = spawn_host(&emitter_wasm, "emitter", &empty, limits, None, &instantiate)

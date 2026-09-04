@@ -76,8 +76,13 @@ impl<E: Engine> Host for LeafHost<E> {
     /// read: `wasm3x` 0.1.0 exposes no interruption, abort or termination entry point at all,
     /// and WAMR's `wasm_runtime_set_instruction_count_limit` is compiled out behind
     /// `WASM_ENABLE_INSTRUCTION_METERING` — confirmed in eieio-x7g.3 by a linker error.
+    ///
+    /// LEAF §4.5 lists what a binding has to expose before this can answer `true`, and
+    /// neither meets it: with no termination entry point callable from outside the running
+    /// call, nothing about ISR-safety, trap-shaped unwinding or a bounded check interval even
+    /// arises. §4.5's last rule is that such a binding says so here rather than hanging.
     /// `07_budget_exhausted` is therefore skipped by name on both, and stops being skipped
-    /// when LEAF §4's watchdog exists (eieio-x7g.2.13), not when an engine changes.
+    /// when LEAF §4.4's watchdog exists (eieio-x7g.2.13), not when an engine changes.
     fn enforces_budgets(&self) -> bool {
         false
     }
