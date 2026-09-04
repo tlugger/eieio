@@ -5,10 +5,18 @@
 //! LEAF-SPEC §2 lists `eio-abi`, `eio-signal`, `eio-expr`, `eio-manifest` and `eio-host-core`
 //! as the ★ crates a leaf links unchanged, on the theory that the daemon/host-core split is
 //! load-bearing rather than aspirational (DAEMON §1). This crate is the experiment: it links
-//! all five, unmodified, binds `wasm3` through `eio_host_core::Engine`, bakes a two-instance
-//! graph by hand, and drives it through ABI §5.1's whole lifecycle with a signal routed
-//! between the two instances. See `tests/end_to_end.rs` for the assertion that closes the
-//! loop.
+//! all five, unmodified, binds **both** of LEAF §3's engines through `eio_host_core::Engine`
+//! ([`wasm3`] and [`wamr`]), bakes a two-instance graph by hand, and drives it through ABI
+//! §5.1's whole lifecycle with a signal routed between the two instances. See
+//! `tests/end_to_end.rs` for the assertion that closes the loop — it makes it twice, once per
+//! engine, and asserts the same answer.
+//!
+//! **Two engines is a measurement rig's shape, not a leaf's** (LEAF §3.2). A firmware image
+//! links exactly one; this host build links both because LEAF §9's suites have to run against
+//! each, and "divergence between hosts is a conformance bug by definition" (ABI §13) can
+//! only be checked *inside* the leaf tier if both are in the same test run. Which one a call
+//! site uses is an argument — [`spawn`] and [`spawn_host`] take the `instantiate` function —
+//! and never a compiled-in assumption.
 //!
 //! **With the default `std` feature this is still a host build**, targeting the same
 //! `x86_64`/`aarch64` triple as the daemon, and it is still not a cross-compile: nothing here
@@ -43,13 +51,13 @@
 //!
 //! | Gated behind `std` | Why it cannot cross |
 //! |---|---|
-//! | [`engine`] — the wasm3 binding | `wasm3x` 0.1.0 builds its wrapper and the wasm3 C sources against `std`. LEAF §3's engine for a real leaf is WAMR anyway, and the binding for it is a separate bead. |
+//! | [`wasm3`] and [`wamr`] — the two engine bindings | `wasm3x` 0.1.0 builds its wrapper and the wasm3 C sources against `std`; `wamrx-sys` builds WAMR's C core and this binding drives it with `CString`, `Mutex` and `Once`. Neither crosses today, and a bare-metal engine binding is settled by LEAF §11's MCU cross-compile — where the C runtime is cross-compiled too, which is a different problem from this one. |
 //! | [`state`] — the flat-file store | `std::fs`. LEAF §5 backs `eio:state` by *flash*; the file is named as a stand-in in its own module docs, and flash layout is a §11 expansion item. |
 //! | [`core_fns::SystemClock`] | `std::time::{Instant, SystemTime}`. DAEMON §1.1's two things a `no_std` crate with no platform beneath it cannot answer; a leaf reads a hardware clock. |
 //! | [`core_fns::BringUpEntropy`] | Seeded from `SystemTime`. Same reason — a leaf reads a hardware entropy source. |
 //! | [`fixtures`] | `std::process::Command`, shelling out to `cargo`. A firmware image has no build system inside it; blocks are baked (LEAF §1, §6). |
 //! | [`run_demo`], [`DemoOutcome`], [`spawn_host`], `main.rs` | The host bring-up itself: `fixtures`, `std::fs`, `println!`. `main.rs` is skipped on a bare-metal target by `required-features`, not by a `cfg` — a `no_std` binary needs a `#[panic_handler]` and an entry point, and *which* ones is per-target build configuration (LEAF §2's allocator paragraph, §11's memory-budget item). |
-//! | The `tests/` directory | Every suite drives the wasm3 binding or reads `expr-tests/` off disk. LEAF §9's suites run on the host build; running them on hardware is part of the MCU bring-up, not of drawing this line. |
+//! | The `tests/` directory | Every suite drives an engine binding or reads `expr-tests/` off disk. LEAF §9's suites run on the host build; running them on hardware is part of the MCU bring-up, not of drawing this line. |
 //!
 //! The honest summary: what crosses is everything that is *about the ABI*, and what does not
 //! is everything that is about a *platform*. That is the split LEAF §2 predicts, and this is
@@ -59,8 +67,11 @@
 //!
 //! # What is genuinely a leaf's own, versus a bring-up's stand-in
 //!
-//! - [`engine`] binds wasm3 (LEAF §3's bring-up/debugging engine — AOT and WAMR are both out
-//!   of scope for this milestone).
+//! - [`wasm3`] and [`wamr`] bind LEAF §3's two engines, both in interpreter mode. AOT is out
+//!   of scope for both: it is WAMR's, it needs a `wamrc` this machine cannot build
+//!   (eieio-7d8.21), and LEAF §6.1 stays `PROPOSED` until a leaf loads an artifact the
+//!   pipeline produced. [`wamr`] is the fifth sanctioned `unsafe` site in this repository
+//!   (CLAUDE.md) and its module docs say which published-crate gap forces the raw FFI.
 //! - [`core_fns`] supplies `eio:core`'s clock and entropy (DAEMON §1.1): the six host
 //!   functions themselves are `eio_host_core::Core`'s, shared with the daemon and the
 //!   reference conformance harness since eieio-35h.15 — this crate's own copy of them was
@@ -84,12 +95,14 @@ extern crate alloc;
 
 pub mod core_fns;
 #[cfg(feature = "std")]
-pub mod engine;
-#[cfg(feature = "std")]
 pub mod fixtures;
 #[cfg(feature = "std")]
 pub mod state;
 pub mod timer;
+#[cfg(feature = "wamr")]
+pub mod wamr;
+#[cfg(feature = "wasm3")]
+pub mod wasm3;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -187,8 +200,11 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// function `no_std`: LEAF §2 lists the engine binding among the things a leaf adds on top of
 /// the ★ crates, so naming one here would put a platform inside the portable half. It is
 /// called after the manifest cross-check and not before, so a module this host will refuse is
-/// refused before any engine is asked to compile it. [`engine::instantiate`] is this crate's
-/// own implementation for the host build; a firmware build passes its own.
+/// refused before any engine is asked to compile it — including a module using ABI §4.3's
+/// carved-out remainder (`table.copy` and its neighbours), which WAMR runs and wasm3 refuses,
+/// and which the loader therefore refuses on both. [`wasm3::instantiate`] and
+/// [`wamr::instantiate`] are this crate's own two implementations for the host build; a
+/// firmware build passes exactly one (LEAF §3.2).
 ///
 /// Every failure is collapsed to a `String`: this is bring-up code answering the composition
 /// question, not a production error type, and every caller here is `main.rs` or a test that
@@ -302,29 +318,38 @@ where
 // draws: what is above it is about the ABI, what is below it is about a platform that has a
 // filesystem, a wall clock and a process to shell out from.
 
-/// [`Instance`] as the host bring-up instantiates it — wasm3, the host's clock, the bring-up
-/// entropy source.
-#[cfg(feature = "std")]
-pub type HostInstance = Instance<engine::Guest, core_fns::SystemClock, core_fns::BringUpEntropy>;
-
-/// [`spawn`] with this crate's host bindings filled in: wasm3, [`core_fns::SystemClock`],
-/// [`core_fns::BringUpEntropy`] and a [`state::FileStateStore`] under `state_dir`.
+/// [`Instance`] as the host bring-up instantiates it: any engine, over the host's clock, the
+/// bring-up entropy source and the flat-file store.
 ///
-/// The signature every caller in this crate had before the `no_std` boundary was drawn, kept
-/// so that `main.rs` and `tests/` say what they mean rather than restating the platform at
-/// every call site.
+/// Generic over the engine and not over the other two, because that is where LEAF §2 draws
+/// the line and not a convenience: the clock, the entropy source and the store are *the
+/// platform*, and a host build has exactly one of each. The engine is the leaf's own choice
+/// (LEAF §3.2), and this crate links both of them.
+#[cfg(feature = "std")]
+pub type HostInstance<E> = Instance<E, core_fns::SystemClock, core_fns::BringUpEntropy>;
+
+/// [`spawn`] with this crate's *platform* bindings filled in — [`core_fns::SystemClock`],
+/// [`core_fns::BringUpEntropy`] and a [`state::FileStateStore`] under `state_dir` — and the
+/// engine still the caller's to name.
+///
+/// The split of what this fills in from what it does not is LEAF §2's, exactly: a leaf adds a
+/// clock, an entropy source, a store *and* an engine binding, and only the first three are a
+/// property of the machine the code is running on. So a call site here says which engine it
+/// wants ([`wasm3::instantiate`] or [`wamr::instantiate`]) and nothing else about the
+/// platform, which is what makes `tests/` able to run the same graph on both.
 ///
 /// `state_dir` is required exactly when the manifest declares the `state` capability —
 /// [`core_fns`]'s module docs are the reason a leaf may not skip that store even for a
 /// bring-up: a write that is not persisted must be refused, not silently accepted.
 #[cfg(feature = "std")]
-pub fn spawn_host(
+pub fn spawn_host<E: Engine>(
     wasm: &[u8],
     instance_id: &str,
     supplied: &BTreeMap<String, String>,
     limits: Limits,
     state_dir: Option<&std::path::Path>,
-) -> Result<HostInstance, String> {
+    instantiate: impl FnOnce(&[u8]) -> Result<E, String>,
+) -> Result<HostInstance<E>, String> {
     let store = match state_dir {
         Some(dir) => Some(
             state::for_instance(dir, instance_id)
@@ -342,7 +367,7 @@ pub fn spawn_host(
             entropy: core_fns::BringUpEntropy::new(instance_id),
             state: store,
         },
-        engine::instantiate,
+        instantiate,
     )
 }
 
@@ -378,8 +403,19 @@ pub struct DemoOutcome {
 ///
 /// `state_dir` backs `counter`'s `eio:state` (LEAF §5); see the [`state`] module for what
 /// backs it and why.
+///
+/// `instantiate` is the engine (LEAF §3.2) — [`wasm3::instantiate`] or [`wamr::instantiate`].
+/// Taking it as an argument is what makes this the *graph* test rather than one engine's:
+/// `tests/end_to_end.rs` runs the identical demo on both and asserts the identical
+/// [`DemoOutcome`], which is ABI §13's "divergence between hosts is a conformance bug"
+/// checked between two leaf engines rather than only between a leaf and the daemon.
+///
+/// `Fn` rather than `FnOnce`, because two instances are spawned from it.
 #[cfg(feature = "std")]
-pub fn run_demo(state_dir: &std::path::Path) -> Result<DemoOutcome, String> {
+pub fn run_demo<E: Engine>(
+    state_dir: &std::path::Path,
+    instantiate: impl Fn(&[u8]) -> Result<E, String>,
+) -> Result<DemoOutcome, String> {
     use alloc::rc::Rc;
 
     use eio_host_core::{Delivering, Outcome};
@@ -399,8 +435,22 @@ pub fn run_demo(state_dir: &std::path::Path) -> Result<DemoOutcome, String> {
     let limits = Limits::new(64 * 1024, 256);
     let empty = BTreeMap::new();
 
-    let counter = spawn_host(&counter_wasm, "counter", &empty, limits, Some(state_dir))?;
-    let transform = spawn_host(&transform_wasm, "transform", &empty, limits, None)?;
+    let counter = spawn_host(
+        &counter_wasm,
+        "counter",
+        &empty,
+        limits,
+        Some(state_dir),
+        &instantiate,
+    )?;
+    let transform = spawn_host(
+        &transform_wasm,
+        "transform",
+        &empty,
+        limits,
+        None,
+        &instantiate,
+    )?;
 
     // The baked connection table (LEAF §6): one connection, named the way a service file
     // would name it, resolved once against both descriptors before any signal moves.
