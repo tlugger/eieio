@@ -70,8 +70,9 @@
 //!   one, with a placeholder wear-budget policy that exists only to make `ERR_THROTTLED`
 //!   reachable (see that module's docs for why the policy itself is not a proposal).
 //! - The baked graph in [`spawn`] and `main.rs` is a hand-written `const`-shaped table, which
-//!   LEAF §6 explicitly allows for this milestone — the *generator* that emits one from a
-//!   service file is a later expansion item, not this.
+//!   LEAF §6 explicitly allows for this milestone. LEAF §6.4 now specifies the shape a
+//!   *generated* one takes and §6.3 settles that a block's artifact is linked into the image
+//!   rather than read from flash; neither the types nor the generator exists here yet.
 //! - [`timer`] backs `eio:timer` with a single-threaded, poll-driven scheduler (eieio-x7g.2's
 //!   second milestone) — see that module's own docs for why its [`timer::pump`] is a
 //!   legitimate scheduler and not a second lifecycle driver, and for why it is not LEAF §4's

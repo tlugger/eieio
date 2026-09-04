@@ -13,7 +13,7 @@ The leaf runtime is the leaf-class node runtime (SCOPE §3.7): a `no_std` Rust f
 |                | Daemon-class | Leaf-class |
 |---|---|---|
 | Service graph | read from a file at boot, changeable at runtime | compiled into the image |
-| Blocks | pulled from a registry, hot-loaded | AOT-compiled and linked in |
+| Blocks | pulled from a registry, hot-loaded | AOT-compiled and linked into the image (§6.3) |
 | Deploy | `PUT` a file, start it | build firmware, flash it |
 | Management API | the whole of DAEMON §9 | none (§7) |
 | Filesystem | a data directory (DAEMON §2) | none required |
@@ -39,7 +39,7 @@ The leaf runtime is a Rust binary crate — `crates/leaf`, which exists, has a `
 
 What the leaf adds on top, and what it MUST NOT:
 
-- **Adds:** an engine binding (§3), a `StateStore` against flash (§5), a `Timers` implementation against a hardware timer, a transport client (§8), and a generated `main` that constructs the baked graph (§6).
+- **Adds:** an engine binding (§3), a `StateStore` against flash (§5), a `Timers` implementation against a hardware timer, a transport client (§8), and a `main` that hands the baked graph (§6.4) to `spawn` — the graph is generated, the `main` is not.
 - **MUST NOT add:** a second lifecycle driver, a second property-resolution rule, a second router, a second expression interpreter, a second CBOR encoder, or **a second implementation of `eio:core`'s host functions** (DAEMON §1.1 — a leaf supplies a clock and an entropy source and shares the rest). Every one of those exists in a ★ crate precisely so that two hosts cannot disagree, and reimplementing one for size or speed is the divergence ABI §13 calls a conformance bug by definition.
 
 **No allocator is not an option.** The ★ crates permit `alloc`, and ABI §6.3's batches are dynamically sized. A leaf therefore ships a global allocator over a fixed heap. Which allocator, and the heap's size, are per-target build configuration.
@@ -120,6 +120,8 @@ A daemon reads `node.toml` (DAEMON §2.1) and a service file (SERVICE-SPEC) at b
 - **The node's identity and limits**: what `node.toml` would have carried.
 - **The transport configuration** (§8): what `pubsub.toml` would have carried.
 
+**Those three are *what* is baked; §6.4 is the form they take.** §6.3 settles the question underneath both — a block's compiled artifact is part of the firmware image rather than something a leaf reads out of flash — because that choice decides the shape of the baked graph, the flash layout (§11) and what the pipeline produces.
+
 **The service file is still the source, and stays the portable artifact.** The same file deploys to a daemon; SERVICE-SPEC parses it; the firmware build is one more consumer. It is not parsed *on* the leaf — `eio-service` is a `std` crate and deliberately so (CLAUDE.md: nothing parses a service file on a leaf tier) — it is parsed by the build host, which then emits Rust.
 
 **Property expressions are baked as source text, not as a compiled form.** ABI §11 makes every property an expression evaluated per signal, and EXPR-SPEC's parser is a ★ crate that runs on the leaf. Pre-parsing to an AST at build time is a plausible optimisation and is explicitly **not** specified here: it would put a second representation of an expression into the platform, and the first thing to measure is whether parse cost matters at all when properties are parsed once at configure time (ABI §5.1) rather than per signal.
@@ -128,9 +130,9 @@ A daemon reads `node.toml` (DAEMON §2.1) and a service file (SERVICE-SPEC) at b
 
 `cargo eio aot --target <leaf>` produces a WAMR AOT artifact per block, and ABI §11.1's manifest carries an `aot` list naming the prebuilt targets published alongside the portable module. §6.2 says which targets those are and §6.2.1 how each is spelled. The portable `wasm32-unknown-unknown` module **MUST always ship** (ABI §11.1): an AOT artifact is an optimisation for one target, never a replacement for the thing every host can run.
 
-**AOT artifacts are version-sensitive, and the pairing is normative.** A WAMR AOT artifact is tied to the WAMR version that compiled it and to the LLVM that WAMR was built against — **WAMR 2.4.5 pins LLVM `release/18.x`**. A leaf image and the artifacts it loads MUST come from the same WAMR version. Recording the pair is not bookkeeping: a mismatched artifact is a load failure in the field, after flashing.
+**AOT artifacts are version-sensitive, and the pairing is normative.** A WAMR AOT artifact is tied to the WAMR version that compiled it and to the LLVM that WAMR was built against — **WAMR 2.4.5 pins LLVM `release/18.x`**. A leaf image and the artifacts it links MUST come from the same WAMR version. Recording the pair is not bookkeeping: a mismatched artifact would be a load failure in the field, after flashing. **§6.3 makes that pairing a property of a single build** — one `wamrc` produces the artifacts, one toolchain builds the engine they are linked beside, and the mismatch becomes a thing the build host can refuse rather than a check the device would have to carry. *Where* the pair is recorded is still §11’s pipeline item.
 
-This section is **PROPOSED and unimplemented**: `wamrc` has not been built on any developer machine here (six distinct blockers recorded on `eieio-7d8.21`), so the artifact layout is specified from WAMR's documentation rather than from something this repository has produced. **It ratifies when a leaf loads an artifact this pipeline built**, and not before. The interpreter path (§3) needs none of it and is what a first leaf bring-up should use.
+This section is **PROPOSED and unimplemented**: `wamrc` has not been built on any developer machine here (six distinct blockers recorded on `eieio-7d8.21`), so the artifact layout is specified from WAMR's documentation rather than from something this repository has produced. **It ratifies when a leaf image links an artifact this pipeline built and runs it** — §6.3 settles that linking, and not runtime loading, is what a leaf does with an artifact — and not before. The interpreter path (§3) needs none of it and is what a first leaf bring-up should use.
 
 ### 6.2 The v1 target list
 
@@ -174,7 +176,7 @@ Why this one:
 
 ABI §11.1 is unchanged in force: `aot[]` stays an open name pattern rather than a closed set, because the registry may carry artifacts for targets this platform has not defined. This section binds the spelling of the ones it *has* defined.
 
-**This spelling is robust to a question §11 has not answered.** Whether a leaf links its AOT artifacts in at firmware build time (§1's table) or loads them from flash at runtime (§6.1's wording) changes *who compares the name and when*, and not what the name is. That contradiction is real and is tracked; it does not reach this section.
+**That question is now answered, and this spelling was robust to it.** §6.3 settles that a leaf links its AOT artifacts into the image at firmware build time rather than loading them from flash at runtime, so the comparison is the *build host's*: the generator selects the artifact whose `aot` entry equals the triple the image is being built for, by string equality against a value the build already holds, and the image carries no target string and does no lookup. What the name is did not change — only who compares it and when, which is what this section predicted it would be.
 
 #### 6.2.2 Adding a target
 
@@ -185,6 +187,129 @@ Adding one is a checklist, not an argument. A family joins the list when all fiv
 3. A `Timers` against a hardware timer, a `StateStore` against its flash, and a transport client (§8).
 4. A board someone can flash, running all three of §9's suites at the leaf's own budgets.
 5. An entry in §6.2's table and the triple added to `check-nostd`'s target list, so the `no_std` claim is gated for it too.
+
+### 6.3 A block's code is linked into the image, not loaded from flash
+
+Three sections said this three ways: §1's table said a leaf's blocks are "AOT-compiled and linked in", §6.1 said the section ratifies when a leaf "loads an artifact this pipeline built", and §11's flash-layout item asked where AOT artifacts "sit". Those are not three spellings of one design. They are two designs — artifacts *in* the firmware image, versus artifacts in a flash region the runtime reads at boot — and the difference decides the shape of the baked graph (§6.4), the flash layout (§11) and what the pipeline produces.
+
+**The answer is §1's.** Every block's compiled artifact is part of the firmware image, reached from the baked graph as a `&'static [u8]`, and **a leaf never reads a block's code out of a flash region it did not link**. §6.1 and §11 are amended to agree.
+
+Why, in the order the reasons bind:
+
+- **There is no channel that could deliver a block on its own.** §7 removes the management API by design rather than by omission — it "cannot be authenticated safely enough to be worth it" and "would have nothing to serve". §8's bus is the only other thing a leaf listens to, and it is at-most-once, never-retained and authenticated by a per-*bus* pre-shared key (SCOPE §3.11); pushing executable code down it would make every holder of the bus key a code-execution path on every device in the System, which is the surface §7 declined, reinvented. So the only way bytes reach a leaf is a flash operation, and once that is true a separate artifact region buys a smaller *write*, never a new capability. §1's deploy row — "build firmware, flash it" — was already the whole of it.
+
+- **A separate region is a configuration surface, which is the one thing a leaf does not have.** §1's stated design consequence is that "a leaf has no configuration surface at runtime". An artifact region writable independently of the image is exactly that: state the device holds that the image did not decide. It also manufactures a mismatch class this tier cannot check — image built against one WAMR, region written by another — which is the failure §6.1 names as the one that matters, "a load failure in the field, after flashing". Linked in, that pair is a property of a single build and the check moves to the build host.
+
+- **The graph and the code must not be able to disagree, and only one design makes that structural.** §6.4's instances carry each block's port names *in index order*, and that order is the manifest's (ABI §5.2). They are computed on the build host from the manifest that accompanied the artifact. If the code arrived separately, the baked port numbering and the loaded module could disagree with nothing on the device able to notice — a silent misdelivery rather than a load error. Linked in, the description and the bytes it describes are one artifact by construction.
+
+- **The manifest may not survive the AOT compile, so the cross-check is a build-host act either way.** §3.1 already requires `eio_manifest::validate` at firmware build time "where a refusal costs a build rather than a field failure", and that check reads the module's import section and its `eio:manifest` custom section (ABI §4.3, §11) — neither of which a `.aot` is guaranteed to carry. **That is read from WAMR's documentation and has not been measured here**, for the reason §6.1 records. It cannot make the case *for* loading in any event: a device that cannot re-derive a manifest from the artifact it loaded has no way to check that it is the artifact its graph describes.
+
+- **It costs less code on the tier least able to pay.** Loading needs a region reader, an index format and a parser for it, an integrity check and the version check above — all in the image, all `no_std`. Linking needs none of them: `include_bytes!` puts the artifact in `.rodata`, which on the v1 target (§6.2) is memory-mapped flash, so the `&'static [u8]` the baked graph carries is already a pointer into flash and no RAM is spent holding it. Whether the engine then copies the text into executable RAM is the engine's question and is identical under both designs, so it is not a discriminator between them.
+
+**What is given up, stated plainly:** a leaf cannot be updated one block at a time, and a one-line property change reflashes the whole image. That is not a cost this section introduces — §1's deploy row and SCOPE §3.7's "extra flashing steps are acceptable" already said it — but it is the cost, and the argument that would reverse it is the argument for giving a leaf a management surface. It would be taken in §7, not here.
+
+**This is engine-independent, and that is what makes §6.4 buildable now.** A bring-up leaf (§3) links the portable `wasm32-unknown-unknown` module through the same include; an AOT leaf links a `.aot` for §6.2's triple. Nothing else in the baked graph differs between the two, so the generator and the representation it emits can be written and tested against the interpreter today, with no `wamrc` — which is otherwise what §6.1's PROPOSED status blocks. **This section does not ratify §6.1**: no pipeline has produced an artifact, and none has been linked.
+
+**What it settles for §11's flash-layout item.** A leaf's flash holds exactly two regions with distinct lifecycles: the **image** — runtime, baked graph and every block artifact, replaced wholesale by a flash — and the **state region** (§5's `StateStore`), which is not part of the image and which the image must be able to find. What is left to settle is where that region sits, how the image finds it, and what an update does to what is in it. An artifact partition, an on-device artifact index and a cross-region version pairing are no longer among the questions.
+
+**And for §6.2.1's open note:** the artifact-name comparison is the *build host's*, always. The generator selects, for each instance's block, the artifact whose `aot` entry equals the Rust triple the image is being built for — string equality against a value the build already holds — and the image carries no target string and performs no lookup. §6.2.1 predicted its spelling was robust to this decision, and it is: the name is unchanged, and ABI §11.1's `aot` list stays what it was, a build-host input describing what a registry can supply rather than a runtime key.
+
+### 6.4 The baked graph
+
+§11 asked what the baked graph looks like as Rust, "and whether it is generated source or a const table". The two are not alternatives: **it is generated Rust source containing one `static` of hand-written types.** The types live in `crates/leaf` and are versioned like any other code; the generated file declares data of them, and nothing else.
+
+**The generated file contains no `fn` and no control flow.** That is the rule that keeps §2's MUST-NOT list true — generated logic is where a second lifecycle driver, a second router and a second property-resolution rule are born, one convenience at a time. **A leaf's `main` is not generated.** It is hand-written per target, and what it does with the graph is hand it to `spawn`. §11's item is called "the generated `main`", and that name is the thing this section corrects.
+
+#### 6.4.1 The one rule a generator obeys
+
+**Everything in the baked graph that could have been computed is `host-core`'s own output, serialised.** A generator does not read a manifest, does not number ports, and does not apply ABI §11.1's required/default rule. It calls `eio_manifest::validate`, `Descriptor::from_manifest` and `eio_host_core::resolve` on the build host — the same functions on the same crates the daemon calls — and prints what they returned. Anything it computed for itself would be a second implementation of a ★ crate's job, running at a different time on a different machine with nothing comparing the two: §2's MUST-NOT list evaded by being early rather than by being different.
+
+The converse is equally load-bearing. **What is cheap to derive on the device stays underived**, and two things are:
+
+- **Connections are baked as names and resolved on the device** by `Routes::resolve`, exactly as `crates/leaf`'s own demo does today. Precomputing `Endpoint` pairs would put the router's numbering into generated code. What resolution refuses — an unknown id or port, `err` as a destination, a duplicate edge — is refused on the build host too, because the service file was validated there (SERVICE §7, §10); a refusal on the device therefore means the generator is wrong, and a leaf treats it as fatal at boot rather than running a partial table.
+- **Property expressions are compiled on the device**, at configure time, by `PropContext::compile_with_limits` under §4's budgets. §6 already settles that they are baked as source text and says why pre-parsing is not specified.
+
+#### 6.4.2 The shape
+
+```rust
+pub struct BakedGraph {
+    pub node: BakedNode,
+    pub instances: &'static [BakedInstance],
+    pub connections: &'static [BakedConnection],
+    pub overflow: Overflow,                        // SERVICE §5: one policy per service
+    pub transport: Option<BakedTransport>,         // None = no bridge (DAEMON §7.1)
+}
+
+pub struct BakedNode {
+    pub id: &'static str,                          // DAEMON §2.1's node id — see §6.4.3
+    pub name: Option<&'static str>,                // a label; nothing resolves by it
+    pub service: &'static str,                     // the service's name; §5's key component
+    pub limits: Limits,                            // ABI §9.7, per instance
+}
+
+pub struct BakedInstance {
+    pub id: &'static str,                          // SERVICE §2: the id, never the name
+    pub block: &'static str,                       // the registry reference, for diagnostics
+    pub module: &'static [u8],                     // the artifact itself (§6.3)
+    pub inputs: &'static [&'static str],           // manifest order is the port index
+    pub outputs: &'static [&'static str],          // (ABI §5.2)
+    pub props: &'static [PropertySource<'static>], // manifest order is the prop_id
+    pub capabilities: &'static [Capability],
+}
+
+pub struct BakedConnection {
+    pub from: (&'static str, &'static str),        // (instance id, port name)
+    pub to: (&'static str, &'static str),
+}
+
+pub struct BakedTransport {
+    pub bus: &'static str,                         // DAEMON §7.1's pubsub.toml, baked
+    pub candidates: &'static [&'static str],
+    pub pinned: Option<&'static str>,
+    pub key: Option<&'static [u8]>,                // SCOPE §3.11's bus pre-shared key
+}
+```
+
+and the whole of a generated file is the module byte arrays plus
+
+```rust
+pub static GRAPH: BakedGraph = BakedGraph { /* … */ };
+```
+
+The notes below are normative, not commentary:
+
+- **`Limits`, `Overflow`, `PropertySource` and `Capability` are `host-core`'s and `eio-manifest`'s own types**, used directly rather than mirrored. `PropertySource` in particular has `const` constructors and `&'a str` fields, so a resolved property list is expressible as a `static` with no conversion at all — which is why §6.4.1's "serialise what `resolve` returned" is a shape a generator can actually emit. `Descriptor` and `Connection` own their strings and so cannot be `static`; `BakedInstance` and `BakedConnection` are their borrowed mirrors, and a leaf builds the owned forms once at boot.
+- **Instance order is the numbering.** `Routes::resolve` indexes descriptors positionally, so a `BakedInstance`'s position *is* its `Endpoint::instance`. The order is therefore part of the artifact and not an implementation detail: it is ascending instance-id order, which is what `eio-service` already yields (its `blocks` is a `BTreeMap`), so rebuilding the same file numbers the same instances the same way.
+- **One artifact, one `static`.** Instances of the same block share one byte array, and a generator emits each distinct artifact exactly once. Three instances of `filter` are three `BakedInstance`s pointing at one module, not three copies of it in flash.
+- **`include_bytes!` alone is not enough.** It yields an align-1 array, and both engines read multi-byte fields directly out of the buffer they are handed; §6.2's target gives no unaligned-access guarantee. `crates/leaf` therefore provides the macro that wraps the include in an over-aligned type, and a generator MUST emit that rather than a bare `include_bytes!`. **The alignment requirement is read from the engines' documentation and has not been measured on hardware** — §6.1's caveat, in the one place where being wrong about it is a fault at boot rather than a build error.
+- **The generated file is a build artifact and MUST NOT be checked in.** It is derived from the service file, the manifests and the artifacts, and a checked-in copy is a second source of truth for a graph whose whole point is that the service file is the source (§6). It is written into the build directory and `include!`d, which is why every path inside it — the module includes above — MUST be absolute.
+
+#### 6.4.3 Identity, limits, and the rest of what `node.toml` carried
+
+DAEMON §2.1 mints a node `id` on first boot and writes it into `node.toml`, reasoning that "an id that changed per boot would identify nothing". A leaf has no first boot that can write anything. **The node id is therefore a required input to the firmware build, and a generator MUST NOT mint one.** A build that minted would hand a device a new identity every time it was reflashed — DAEMON §2.1's failure one level up, with a Designer registry entry, a state namespace and a bus identity all quietly ceasing to refer to the same thing. Where the id is *kept* between builds is the pipeline's question (§11), not this section's.
+
+The rest of `node.toml` divides cleanly, and the divisions are why this section carries four fields rather than a file:
+
+|`node.toml`|On a leaf|
+|---|---|
+|`id`, `name`|Baked, above. `id` is a required build input|
+|`[limits]`|Baked. ABI §9.7 says a block "may assume nothing about their size", so a leaf states both; *what* they should be is §11's memory-budget item|
+|`[budgets.expr]`|**Not a build input.** §4 fixes a leaf's evaluation budgets at EXPR §9's floors and its decode bound at the daemon's, and a service file is the wrong place to weaken either|
+|`[budgets]` fuel, `deadline_ms`|Not a build input either: a leaf's budget is a watchdog rather than fuel (§4), and its granularity is §11's watchdog item — a property of the runtime and its target, not of the graph|
+|`[api] listen`|Nothing to configure; there is no API (§7)|
+|`[blocks]` pull policy|No registry to pull from at runtime (§1). Digest and signature verification happen on the build host (§10)|
+|`[executor] mailbox`|A host's own queueing. `host-core`'s router core stops at the table (DAEMON §6), and what a leaf does with a full one is §11's|
+
+`autostart` is ignored: a leaf has one service and nothing else it could be doing. `[ui]` never reaches the image — SERVICE §6 makes it annotations no host interprets, and a generator drops it rather than carrying it.
+
+#### 6.4.4 What a generator has to prove
+
+A generator is correct when, for every service file it accepts:
+
+1. every `BakedInstance`'s `inputs`, `outputs` and `props` equal the fields `Descriptor::from_manifest` and `eio_host_core::resolve` produce from that instance's manifest and its service-supplied properties; and
+2. `Routes::resolve` over the emitted instances and connections succeeds, and yields the table a daemon resolves from the same file.
+
+Both are testable on the host build against `examples/services/`, with no target, no board and no `wamrc` (§6.3), and together they are what makes §6.4.1's "serialise, do not compute" rule checkable rather than merely stated.
 
 ## 7. There is no management API
 
@@ -249,10 +374,10 @@ Needed before implementation, and deliberately not guessed at in this draft:
 
 - ~~**The target list.**~~ — **resolved** (eieio-x7g.2.2): §6.2 names it. v1 is one target, `riscv32imc-unknown-none-elf` (ESP32-C3 class); `thumbv7em-none-eabihf` stays a `check-nostd` gate target and is not a leaf target; `riscv32imac-unknown-none-elf` (ESP32-C6/H2) is the named next candidate; Xtensa is deferred for the esp-rs toolchain fork, measured rather than assumed. §6.2.1 fixes how an `aot` entry is spelled and §6.2.2 what adding a target costs.
 - **Firmware build pipeline mechanics** — toolchain pinning, AOT artifact caching, reproducibility, and how `cargo eio aot` is invoked from a Designer deploy.
-- **The generated `main`**: what the baked graph looks like as Rust, and whether it is generated source or a const table.
+- ~~**The generated `main`**~~ — **resolved** (eieio-x7g.2.3): §6.4 gives the baked graph as one `static` of hand-written types, emitted as generated Rust source with no `fn` and no control flow in it, and §6.4.1 fixes the rule that keeps it from becoming a second router or a second property-resolution rule — a generator serialises what `host-core` computed on the build host and computes nothing itself. The `main` is not generated at all: it is hand-written per target and hands `GRAPH` to `spawn`. §6.3 settles the ambiguity underneath it — a block's artifact is linked into the image, never loaded from a flash region.
 - **Memory budget**: heap sizing per target, and what a leaf does when a batch will not fit.
 - **The transport client** (§8), once one has been measured.
 - **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on. **A host bring-up cannot stand in for this one**, measured rather than assumed: `wasm3x` 0.1.0 exposes no interruption, abort or termination entry point at all, so nothing outside a running guest call can end it, and the host leaf therefore answers `enforces_budgets = false` and has ABI §13's budget scenario skipped by name — which is §4's honest-binding rule working as intended, not a gap in the leaf. The watchdog becomes implementable at the same moment the target does: a hardware timer and an engine that can be told to stop.
 - **Observability without an API** (§7): what a leaf publishes about itself, and on which topic.
 - ~~**A class-aware CLI**~~ — **resolved** (eieio-x7g.5): it learns the class. A node entry in `nodes.toml` carries an optional `class`, `"daemon"` or `"leaf"`, absent meaning `"daemon"`, and `eio` refuses a leaf by naming the class rather than reporting a failed request. SCOPE §3.7 records the decision and why the two alternatives — requiring the key, or inferring the class from a refused connection — are each worse.
-- **Flash layout**: where AOT artifacts, state and configuration sit, and how a firmware update treats existing state.
+- **Flash layout**: where the state region sits, how the image finds it, and how a firmware update treats what is in it — including state left under a `(service, instance)` key that the new image's graph has no instance for (§5, §6.4.2: a build may change the instance set). **AOT artifacts and configuration are no longer part of this question** (§6.3): both are in the image, which a flash replaces wholesale, so a leaf's flash has two regions with distinct lifecycles rather than four.
