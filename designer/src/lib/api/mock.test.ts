@@ -325,9 +325,10 @@ describe('startService / stopService / reloadService — the lifecycle App.svelt
     expect((await listServices('node-porch')).find((s) => s.name === 'greenhouse')?.state).toBe('stopped');
   });
 
-  it('reloadService resolves without throwing and leaves state untouched', async () => {
+  it('reloadService resolves with the ServiceSummary and leaves state untouched (eieio-m9s.38)', async () => {
     const before = (await listServices('node-porch')).find((s) => s.name === 'kitchen')?.state;
-    await expect(reloadService('node-porch', 'kitchen')).resolves.toBeUndefined();
+    const summary = await reloadService('node-porch', 'kitchen');
+    expect(summary).toMatchObject({ name: 'kitchen', state: before });
     const after = (await listServices('node-porch')).find((s) => s.name === 'kitchen')?.state;
     expect(after).toBe(before);
   });

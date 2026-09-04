@@ -24,6 +24,22 @@ import {
   streamLogs,
   streamTap,
 } from './proxy';
+import {
+  createTap as clientCreateTap,
+  deleteTap as clientDeleteTap,
+  getNodeInfo as clientGetNodeInfo,
+  getService as clientGetService,
+  getServiceErrors as clientGetServiceErrors,
+  listServices as clientListServices,
+  listTaps as clientListTaps,
+  onSessionRequired,
+  putService as clientPutService,
+  reloadService as clientReloadService,
+  startService as clientStartService,
+  stopService as clientStopService,
+  streamLogs as clientStreamLogs,
+  streamTap as clientStreamTap,
+} from './client';
 
 function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', ...headers } });
@@ -42,6 +58,7 @@ function unparseableResponse(status: number): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 function fetchCall(fetchMock: ReturnType<typeof vi.fn>, index = 0): [string, RequestInit] {
@@ -561,5 +578,264 @@ describe('streamLogs — GET /api/nodes/{id}/daemon/logs/stream, filtered', () =
     await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
     expect(events).toEqual([expect.objectContaining({ level: 'ERROR' })]);
     handle.close();
+  });
+});
+
+// --- client.ts dispatch (eieio-m9s.38) ---------------------------------------------------------
+//
+// eieio-m9s.35 built every call above with no importer; wiring the eleven that need no parsed
+// service file into `client.ts`'s `useRealBackend()` dispatch is this bead's own job, and these
+// are the tests for *that* seam — not the calls themselves (already covered above) but whether
+// `client.ts` picks the right implementation and, for a real one, still goes through the same
+// session guard every other gated call does. Mirrors `backend.test.ts`'s own "client.ts — a
+// later 401 re-raises the gate" suite (a file this bead does not own) for the identical reason:
+// `App.svelte` has no component harness yet, so the wiring is pinned as plain functions.
+// `VITE_EIO_BACKEND=real` forces the real-fetch branch under `vitest run`'s otherwise-mock
+// default (`client.ts`'s own module doc); every mock-branch assertion below relies on that
+// default holding with no override at all — the same property `client.ts`'s own doc calls out
+// as the one that must hold regardless of anything else.
+
+describe('client.ts — the eleven unparsed calls dispatch to proxy.ts under a real backend', () => {
+  it('listServices', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, [{ name: 'kitchen', state: 'running', autostart: true }]));
+    vi.stubGlobal('fetch', fetchMock);
+    await clientListServices('5');
+    const [path] = fetchCall(fetchMock);
+    expect(path).toBe('/api/nodes/5/daemon/services');
+  });
+
+  it('startService / stopService / reloadService', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    // `mockImplementation`, not `mockResolvedValue`: a `Response` body can only be read once,
+    // and this test drives three calls through the same mock — `mockResolvedValue` would hand
+    // every call the identical `Response` instance and the second `.json()` would throw "Body
+    // has already been read".
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(() => Promise.resolve(jsonResponse(200, { name: 'kitchen', state: 'running', autostart: true })));
+    vi.stubGlobal('fetch', fetchMock);
+    await clientStartService('5', 'kitchen');
+    await clientStopService('5', 'kitchen');
+    await clientReloadService('5', 'kitchen');
+    const paths = fetchMock.mock.calls.map((call: any[]) => call[0] as string);
+    expect(paths).toEqual([
+      '/api/nodes/5/daemon/services/kitchen/start',
+      '/api/nodes/5/daemon/services/kitchen/stop',
+      '/api/nodes/5/daemon/services/kitchen/reload',
+    ]);
+  });
+
+  it('getServiceErrors', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { error: 'unresolvable', message: 'x' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await clientGetServiceErrors('5', 'kitchen');
+    const [path] = fetchCall(fetchMock);
+    expect(path).toBe('/api/nodes/5/daemon/services/kitchen/errors');
+  });
+
+  it('getNodeInfo', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { name: 'porch', capabilities: [], limits: {}, budgets: {}, require_signed: false }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    await clientGetNodeInfo('5');
+    const [path] = fetchCall(fetchMock);
+    expect(path).toBe('/api/nodes/5/daemon/node');
+  });
+
+  it('createTap / listTaps / deleteTap', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(200, { id: 'tap-1', service: 'kitchen', connection: 'a.out -> b.in', instance: 'a', port: 'out' }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, []))
+      .mockResolvedValueOnce(noBodyResponse(204));
+    vi.stubGlobal('fetch', fetchMock);
+    await clientCreateTap('5', 'kitchen', 'a.out -> b.in');
+    await clientListTaps('5');
+    await clientDeleteTap('5', 'tap-1');
+    const paths = fetchMock.mock.calls.map((call: any[]) => call[0] as string);
+    expect(paths).toEqual(['/api/nodes/5/daemon/taps', '/api/nodes/5/daemon/taps', '/api/nodes/5/daemon/taps/tap-1']);
+  });
+
+  it('streamTap / streamLogs', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi.fn().mockResolvedValue(sseResponse(['data: {}\n\n']));
+    vi.stubGlobal('fetch', fetchMock);
+    const h1 = clientStreamTap('5', 'tap-1', { onEvent: () => {}, onStatus: () => {} });
+    const h2 = clientStreamLogs('5', {}, { onEvent: () => {}, onStatus: () => {} });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    const urls = fetchMock.mock.calls.map((call: any[]) => call[0] as string);
+    expect(urls).toEqual(
+      expect.arrayContaining(['/api/nodes/5/daemon/taps/tap-1/stream', '/api/nodes/5/daemon/logs/stream']),
+    );
+    h1.close();
+    h2.close();
+  });
+});
+
+describe('client.ts — the same eleven calls stay on mock.ts with no real-backend override (the vitest default)', () => {
+  it('none of them touch fetch, and each resolves the fixture shape mock.ts always answered', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const services = await clientListServices('node-porch');
+    expect(services.find((s) => s.name === 'kitchen')).toBeDefined();
+
+    const started = await clientStartService('node-porch', 'greenhouse');
+    expect(started).toMatchObject({ name: 'greenhouse', state: 'running' });
+    const stopped = await clientStopService('node-porch', 'greenhouse');
+    expect(stopped).toMatchObject({ name: 'greenhouse', state: 'stopped' });
+    const reloaded = await clientReloadService('node-porch', 'kitchen');
+    expect(reloaded).toMatchObject({ name: 'kitchen' });
+
+    const errors = await clientGetServiceErrors('node-attic', 'attic-fan');
+    expect(errors.error).toBe('unresolvable');
+
+    const info = await clientGetNodeInfo('node-porch');
+    expect(info.capabilities).toBeDefined();
+
+    const tap = await clientCreateTap('node-porch', 'kitchen', 'b7k2.out->f3m9.in');
+    expect(tap.tap_id).toMatch(/^tap-/);
+    const taps = await clientListTaps('node-porch');
+    expect(taps.find((t) => t.tap_id === tap.tap_id)).toBeDefined();
+    await clientDeleteTap('node-porch', tap.tap_id);
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('streamTap / streamLogs also never touch fetch', () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const h1 = clientStreamTap('node-porch', 'no-such-tap', { onEvent: () => {}, onStatus: () => {} });
+    const h2 = clientStreamLogs('node-porch', {}, { onEvent: () => {}, onStatus: () => {} });
+    h1.close();
+    h2.close();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('client.ts — getService/putService stay on mock.ts in both branches (parked on eieio-m9s.37)', () => {
+  // --- Prove it can fail (3): the guard on eieio-m9s.37 not having landed yet. ------------------
+  //
+  // Real transcript with `getService` in `client.ts` temporarily rewired to
+  // `useRealBackend() ? watchSession(proxy.getService(nodeId, serviceName)) : mock.getService(nodeId, serviceName)`,
+  // matching every one of the eleven functions just above it (both tests in this `describe`
+  // fail the same way, since `putService`'s own test calls `getService` first to get a real
+  // `etag`):
+  //
+  //   FAIL  src/lib/api/proxy.test.ts > client.ts — getService/putService stay on mock.ts in
+  //   both branches (parked on eieio-m9s.37) > getService never touches fetch under a real
+  //   backend
+  //   TypeError: Cannot read properties of undefined (reading 'ok')
+  //    ❯ Module.getService src/lib/api/proxy.ts:320:17
+  //       318|   const daemonPath = `services/${encodeURIComponent(serviceName)}`;
+  //       319|   const response = await proxyFetch(nodeId, daemonPath, { method: 'GET…
+  //       320|   if (!response.ok) {
+  //          |                 ^
+  //       321|     await throwFor(nodeId, proxyPath(nodeId, daemonPath), response);
+  //       322|   }
+  //    ❯ watchSession src/lib/api/client.ts:118:12
+  //    ❯ src/lib/api/proxy.test.ts:745:20
+  //
+  // (Fails because this suite's `fetchMock` is a bare `vi.fn()` with no configured response —
+  // the whole point of the assertion just below is that a real backend must never call it at
+  // all, so it was never given one to answer with. The failure mode is exactly what "yours to
+  // notice" looks like: not `expect(fetchMock).not.toHaveBeenCalled()` failing cleanly, but the
+  // call happening at all and blowing up downstream — proxy.ts's `getService` has no code path
+  // that behaves reasonably when the thing to fetch was never supposed to be fetched.)
+  it('getService never touches fetch under a real backend', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await clientGetService('node-porch', 'kitchen');
+    // `ServiceDefinition`'s parsed shape (`blocks`), not `RemoteServiceDetail`'s raw
+    // `definition` text — the shape a real `GET /services/{s}` cannot supply until
+    // eieio-m9s.37 (see `proxy.ts`'s own `RemoteServiceDetail` doc for the full argument).
+    expect(result).toMatchObject({ name: 'kitchen' });
+    expect(result.blocks).toBeDefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('putService never touches fetch under a real backend', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const before = await clientGetService('node-porch', 'kitchen');
+    const result = await clientPutService('node-porch', 'kitchen', before.text, before.etag);
+    expect(result.ok).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('client.ts — a proxied 401 reopens the login gate too (eieio-m9s.38, extending eieio-m9s.31)', () => {
+  // `proxy.ts`'s own module doc: a proxied 401 is structurally identical whether it means "you
+  // are logged out of the Designer" or "this node's stored bearer token went stale" — nothing on
+  // the wire tells the two apart (a dead Designer session never reaches a node at all;
+  // `require_session` answers the same `{error: "unauthorized", message}` shape directly).
+  // `client.ts`'s `watchSession` treats `ProxyUnauthorizedError` as the same signal
+  // `SessionRequiredError` already is, on the reasoning that never reopening the gate for the
+  // ambiguous case is strictly worse than sometimes reopening it when a re-login would not have
+  // actually helped.
+  it('notifies onSessionRequired when a newly-wired call hits a 401 through the proxy', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'no live session' })),
+    );
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    try {
+      // --- Prove it can fail (4): drop `watchSession(...)` from `listServices`'s real-backend
+      // branch in `client.ts` (call `proxy.listServices(nodeId)` bare) and this fails:
+      //
+      //   FAIL  src/lib/api/proxy.test.ts > client.ts — a proxied 401 reopens the login gate
+      //   too (eieio-m9s.38, extending eieio-m9s.31) > notifies onSessionRequired when a
+      //   newly-wired call hits a 401 through the proxy
+      //   AssertionError: expected false to be true // Object.is equality
+      //
+      //   - Expected
+      //   + Received
+      //
+      //   - true
+      //   + false
+      //
+      //       at src/lib/api/proxy.test.ts:<line>
+      await expect(clientListServices('5')).rejects.toBeInstanceOf(ProxyUnauthorizedError);
+      expect(notified).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('does not notify on an unrelated proxied failure (a 404 is not the gate)', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(404, { error: 'not_found', message: 'no such node' })),
+    );
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    try {
+      await expect(clientListServices('5')).rejects.toBeInstanceOf(ProxyRequestError);
+      expect(notified).toBe(false);
+    } finally {
+      unsubscribe();
+    }
   });
 });

@@ -231,15 +231,17 @@ export function listServices(nodeId: string): Promise<ServiceSummary[]> {
 
 /**
  * `POST /services/{s}/start`, `.../stop`, `.../reload` (DAEMON §9) all answer `200
- * ServiceSummary` on success. `mock.ts`'s `startService`/`stopService`/`reloadService` are typed
- * `Promise<void>` and simply discard that body — the mock never had one to discard, since it
- * mutates its own fixture in place and returns nothing. **This is a real divergence, not a typo
- * to silently match**: this module returns the `ServiceSummary` the daemon actually sends, so a
- * caller gets the service's post-operation state (running/stopped/errored, `autostart`, the
- * structured `error`) without a second `GET /services`. Reported in this bead's final report as
- * a signature decision for the driving agent — keep the richer return, or wrap these to discard
- * it for parity with the mock's existing `Promise<void>` call sites; either is a one-line choice
- * at the wiring point, not a design question this module can settle unilaterally.
+ * ServiceSummary` on success. **eieio-m9s.38 settled the signature decision this module's own
+ * comment used to defer**: `mock.ts`'s `startService`/`stopService`/`reloadService` now return
+ * `Promise<ServiceSummary>` too (mutating their fixture in place and handing back the
+ * post-mutation record), rather than the `Promise<void>` they were typed as before this bead —
+ * keeping the richer type rather than discarding it, so a caller gets the service's
+ * post-operation state (running/stopped/errored, `autostart`, the structured `error`) without a
+ * second `GET /services`, and `client.ts`'s re-exported signature is now the same
+ * `Promise<ServiceSummary>` against a real node and against the mock. Discarding it would have
+ * thrown away state the caller does not otherwise have for free; there was no cost to keeping it,
+ * since nothing in `src/` reads `startService`/`stopService`/`reloadService`'s return value today
+ * (`App.svelte` just `await`s them) so nothing needed to change at the call sites.
  */
 function lifecycle(nodeId: string, serviceName: string, verb: 'start' | 'stop' | 'reload'): Promise<ServiceSummary> {
   return proxyJson<ServiceSummary>(nodeId, `services/${encodeURIComponent(serviceName)}/${verb}`, {

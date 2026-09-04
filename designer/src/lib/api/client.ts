@@ -11,6 +11,16 @@
 // signatures, `listNodes`'s included (see `./backend.ts`'s doc comment on why that one needs
 // client-side filtering to keep it that way).
 //
+// `parseServiceText` (eieio-m9s.37) is a fourth: `POST /api/service-parse` is not proxied
+// either (DESIGNER §3.2 amended — it reaches no node, the same as `service-edit`), so it is
+// dispatched the identical way. Its mock branch is NOT re-exported from `mock.ts`, unlike
+// `serviceEdit`/`getService`/etc. just below: `mock.ts` is another agent's file in this bead's
+// worktree, and its own module doc already commits to a specific stand-in for "a service
+// file's text" (`JSON.stringify` of the file-content fields, never real TOML — see that file's
+// header). `mockParseServiceText`, defined in this file, reads exactly that same stand-in
+// back — the mirror image of what `mock.ts`'s own `serviceEdit`/`putService` already do with
+// `JSON.parse` — without this file needing to add a function to a module it does not own.
+//
 // **Real versus mock is chosen by `import.meta.env.PROD`, with an explicit override.** The
 // default is the property that must hold regardless of anything else: neither `vite dev`'s
 // server nor `vitest run` ever sets `PROD` true, so a developer's everyday loop and the whole
@@ -34,33 +44,34 @@
 // this file's bodies end up doing.
 
 import type {
+  ApiError,
+  BlockInstance,
   BlockManifest,
+  Connection,
+  LogFilter,
+  LogStreamHandlers,
   NewNodeInput,
   NewRegistryInput,
+  NodeInfo,
   NodeSummary,
+  OverflowPolicy,
+  ParseServiceResult,
+  PutServiceResult,
   RegistrySummary,
+  ServiceDefinition,
+  ServiceSummary,
+  StreamHandle,
   SystemSummary,
+  TapStreamHandlers,
+  TapSummary,
 } from './types';
 import * as backend from './backend';
 import * as mock from './mock';
+import * as proxy from './proxy';
 import { SessionRequiredError } from './backend';
+import { ProxyUnauthorizedError } from './proxy';
 
-export {
-  listServices,
-  getService,
-  startService,
-  stopService,
-  reloadService,
-  serviceEdit,
-  putService,
-  getNodeInfo,
-  getServiceErrors,
-  createTap,
-  listTaps,
-  deleteTap,
-  streamTap,
-  streamLogs,
-} from './mock';
+export { serviceEdit } from './mock';
 
 /** See this file's own module doc for what each branch means and why the default is safe. */
 function useRealBackend(): boolean {
@@ -96,15 +107,31 @@ export function onSessionRequired(listener: SessionRequiredListener): () => void
   return () => sessionRequiredListeners.delete(listener);
 }
 
-/** Wraps a real-backend call so a `SessionRequiredError` it throws also notifies every
- *  `onSessionRequired` subscriber — in addition to, never instead of, rethrowing it, so a
- *  caller with its own `try`/`catch` (`backend.test.ts`'s own assertions included) still sees
- *  exactly the rejection `backend.ts` produced. */
+/**
+ * Wraps a real-backend call so a `SessionRequiredError` it throws also notifies every
+ * `onSessionRequired` subscriber — in addition to, never instead of, rethrowing it, so a
+ * caller with its own `try`/`catch` (`backend.test.ts`'s own assertions included) still sees
+ * exactly the rejection `backend.ts` produced.
+ *
+ * **`ProxyUnauthorizedError` (eieio-m9s.38) reopens the gate too.** `proxy.ts`'s own module
+ * doc works through why: `require_session` (DESIGNER §3.1) wraps the catch-all daemon proxy
+ * exactly like every other `/api` route, so a browser with no live Designer session never
+ * reaches a node at all — it gets the *Designer's* `401` back, in the same `{error, message}`
+ * shape a node's own stale bearer token would produce. Nothing on the wire tells those two
+ * apart (proxy.ts: "neither DESIGNER-SPEC §3.1 nor DAEMON-SPEC §9.1/§9.2 gives a client any
+ * field to tell them apart... §9.2 explicitly forbids [parsing `message`]"), so
+ * `ProxyUnauthorizedError` is folded into the same signal `SessionRequiredError` already is
+ * rather than left to fall through unnoticed: the two readings disagree on *why*, but agree
+ * that a fresh login prompt is the right thing to show, and the alternative — never reopening
+ * the gate for a proxied 401 — silently fails exactly the case eieio-m9s.31 exists to catch.
+ * This is still the one guard, not a second: same listener set, same rethrow contract, one
+ * more `instanceof` it now recognises.
+ */
 async function watchSession<T>(call: Promise<T>): Promise<T> {
   try {
     return await call;
   } catch (error) {
-    if (error instanceof SessionRequiredError) {
+    if (error instanceof SessionRequiredError || error instanceof ProxyUnauthorizedError) {
       for (const listener of sessionRequiredListeners) listener();
     }
     throw error;
@@ -139,6 +166,73 @@ export function listNodes(systemId: number): Promise<NodeSummary[]> {
  *  `./backend.ts`'s own doc for what the real endpoint's row shape is before flattening. */
 export function listBlockManifests(): Promise<BlockManifest[]> {
   return useRealBackend() ? watchSession(backend.listBlockManifests()) : mock.listBlockManifests();
+}
+
+// --- Reading a service file's text (eieio-m9s.37) --------------------------------------------
+//
+// `POST /api/service-parse` (DESIGNER §3.2, amended): the read counterpart of `serviceEdit`
+// just below (re-exported from `mock.ts`), reshaping a service file's text into the structure
+// a canvas draws rather than a structural edit of it. Dispatched the same `useRealBackend()`
+// way as the three reads above it, because this crate's own backend answers it directly —
+// see `./backend.ts`'s own doc on `parseServiceText` for why it is not proxied.
+
+/** `mock.ts`'s own stand-in for a service file's text: `JSON.stringify` of exactly the
+ *  file-content fields (`name`, `autostart`, `overflow`, `blocks`, `connections`, `ui`) — never
+ *  real TOML (see that file's module doc). Declared here, not imported, because `mock.ts` does
+ *  not export it; it is this file's own copy of the *shape* `mock.ts` already committed to,
+ *  read rather than written. */
+interface MockServiceFile {
+  name: string;
+  autostart: boolean;
+  overflow: OverflowPolicy;
+  blocks: Record<string, BlockInstance>;
+  connections: Connection[];
+  // `Record<string, unknown>`, not `UiLayout`: `ParsedService.ui` is the opaque, JSON-reshaped
+  // `[ui]` a *read* answers (see that type's own doc — it is NOT the `{x, y, zoom}` shape the
+  // *write* path uses), and `UiLayout`'s own named properties are not structurally assignable
+  // to an index signature. `mock.ts`'s fixtures happen to already be shaped like `UiLayout`,
+  // and that shape is itself valid `Record<string, unknown>` data — this is a wider type for
+  // the same values, not a different value.
+  ui?: Record<string, unknown>;
+}
+
+/**
+ * The mock branch of `parseServiceText`, below. Mirrors `mock.ts`'s own `serviceEdit`/
+ * `putService`: `JSON.parse` the fake "toml", `{ok: false, errors: [{message}]}` on a parse
+ * failure the identical way those two already answer one — this is the same stand-in read
+ * back, not a second format invented for this one function.
+ *
+ * Deliberately does not validate anything past `JSON.parse` succeeding — `mock.ts`'s own
+ * `serviceEdit`/`putService` do not either, because there is no `eio-service` stage 1 to run
+ * against a fixture and inventing a second, partial one here would be exactly the kind of
+ * second implementation SERVICE §9's one-editor rule exists to prevent, even in a mock.
+ */
+function mockParseServiceText(toml: string): Promise<ParseServiceResult> {
+  let file: MockServiceFile;
+  try {
+    file = JSON.parse(toml) as MockServiceFile;
+  } catch {
+    return Promise.resolve({ ok: false, errors: [{ message: 'malformed service text' }] });
+  }
+  return Promise.resolve({
+    ok: true,
+    service: {
+      name: file.name,
+      autostart: file.autostart,
+      overflow: file.overflow,
+      blocks: file.blocks,
+      connections: file.connections,
+      ui: file.ui,
+    },
+  });
+}
+
+/** `POST /api/service-parse` (DESIGNER §3.2, amended), real or the mock stand-in above per
+ *  `useRealBackend()`. */
+export function parseServiceText(toml: string): Promise<ParseServiceResult> {
+  return useRealBackend()
+    ? watchSession(backend.parseServiceText(toml))
+    : mockParseServiceText(toml);
 }
 
 // --- Onboarding: creating Systems, nodes and registries (eieio-m9s.34) --------------------
@@ -192,6 +286,127 @@ export function addRegistry(input: NewRegistryInput): Promise<RegistrySummary> {
  *  route does not exist on the real backend yet, and what calling it does in the meantime. */
 export function deleteRegistry(id: number): Promise<void> {
   return useRealBackend() ? watchSession(backend.deleteRegistry(id)) : mock.deleteRegistry(id);
+}
+
+// --- Services, taps, logs, node identity (DAEMON §9, eieio-m9s.35 / eieio-m9s.38) -----------
+//
+// eieio-m9s.35 built `./proxy.ts` — every call below except `getService`/`putService` reached
+// through DESIGNER §3.1's catch-all, `/api/nodes/{id}/daemon/{*path}`, forwarded to a node's
+// own daemon (DAEMON §9) — but left it unwired: nothing in this file imported it yet. This is
+// that wiring, for the eleven of proxy.ts's thirteen exports that need no parsed service file
+// (eieio-m9s.38's own bead). Same shape as every `useRealBackend()` branch above: real traffic
+// goes through `watchSession` exactly like `backend.ts`'s calls do — see that function's own
+// doc, just above, for why a proxied `401` (`ProxyUnauthorizedError`) reopens the same gate a
+// Designer-own one (`SessionRequiredError`) does, through the one guard rather than a second.
+//
+// `streamTap`/`streamLogs` are the two exceptions to the `watchSession` pattern: both return a
+// `StreamHandle` synchronously rather than a `Promise`, so there is no rejection for
+// `watchSession` to sit in front of. A stream's own transport (`sse.ts`'s `connectSse`, shared
+// unchanged by both `proxy.ts` and `mock.ts`) treats a `401` the same as any other disconnect —
+// it reports `'reconnecting'` through `onStatus` and retries with backoff rather than ever
+// rejecting — so a dead session on a tap or log stream does not reopen the login gate today.
+// That is a real gap `sse.ts` would have to close (a status a caller could recognise as
+// "unauthorized" rather than "merely offline"), not something this wiring point can paper over,
+// and it is out of this bead's owned files. Flagged here and in the final report rather than
+// silently left to be rediscovered.
+
+/**
+ * `GET /services/{s}` (DAEMON §9.3), parked on `mock.ts` in **both** branches — never
+ * `useRealBackend()`-switched — until eieio-m9s.37 lands. `proxy.ts`'s own `getService` already
+ * exists and is correct against the wire, but it answers `RemoteServiceDetail` (raw TOML
+ * `definition` text), not `ServiceDefinition` (parsed `blocks`/`connections`/`ui`): see that
+ * function's doc comment in `./proxy.ts` for the full argument that this SPA has no
+ * TOML-to-graph parser and, per SERVICE §9's one-editor rule, must not grow a second one.
+ * `ServiceCanvas.svelte` renders against `ServiceDefinition` today, so routing a real node's
+ * answer here would hand the canvas a shape it cannot use. Asserted in `proxy.test.ts`'s
+ * "getService/putService stay on mock.ts in both branches" suite (this bead's own negative
+ * proof: point this at `proxy.ts` instead and that suite fails) so the exception outlives
+ * whoever reads this comment next.
+ */
+export function getService(nodeId: string, serviceName: string): Promise<ServiceDefinition> {
+  return mock.getService(nodeId, serviceName);
+}
+
+/** `PUT /services/{s}` (DAEMON §9.3) — parked on `mock.ts` for the same reason as `getService`
+ *  just above, and the same bead (eieio-m9s.37). */
+export function putService(
+  nodeId: string,
+  serviceName: string,
+  definition: string,
+  ifMatch: string,
+): Promise<PutServiceResult> {
+  return mock.putService(nodeId, serviceName, definition, ifMatch);
+}
+
+/** `GET /services` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */
+export function listServices(nodeId: string): Promise<ServiceSummary[]> {
+  return useRealBackend() ? watchSession(proxy.listServices(nodeId)) : mock.listServices(nodeId);
+}
+
+/**
+ * `POST /services/{s}/start` (proxied, DAEMON §9), real or fixture per `useRealBackend()`.
+ * Answers `Promise<ServiceSummary>` on both branches — see `./proxy.ts`'s own `lifecycle` doc
+ * for why the richer daemon return was kept rather than discarded for parity with this
+ * function's pre-eieio-m9s.38 `Promise<void>` mock signature: nothing in `src/` reads the
+ * resolved value (`App.svelte` just `await`s it), so keeping it costs no call site anything
+ * and a caller that does want it now can have it without a second round trip to `listServices`.
+ */
+export function startService(nodeId: string, serviceName: string): Promise<ServiceSummary> {
+  return useRealBackend() ? watchSession(proxy.startService(nodeId, serviceName)) : mock.startService(nodeId, serviceName);
+}
+
+/** `POST /services/{s}/stop` (proxied, DAEMON §9) — see `startService` just above for the
+ *  return-type decision, which applies identically here. */
+export function stopService(nodeId: string, serviceName: string): Promise<ServiceSummary> {
+  return useRealBackend() ? watchSession(proxy.stopService(nodeId, serviceName)) : mock.stopService(nodeId, serviceName);
+}
+
+/** `POST /services/{s}/reload` (proxied, DAEMON §9) — see `startService` above for the
+ *  return-type decision, which applies identically here. */
+export function reloadService(nodeId: string, serviceName: string): Promise<ServiceSummary> {
+  return useRealBackend() ? watchSession(proxy.reloadService(nodeId, serviceName)) : mock.reloadService(nodeId, serviceName);
+}
+
+/** `GET /services/{s}/errors` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */
+export function getServiceErrors(nodeId: string, serviceName: string): Promise<ApiError> {
+  return useRealBackend()
+    ? watchSession(proxy.getServiceErrors(nodeId, serviceName))
+    : mock.getServiceErrors(nodeId, serviceName);
+}
+
+/** `GET /node` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */
+export function getNodeInfo(nodeId: string): Promise<NodeInfo> {
+  return useRealBackend() ? watchSession(proxy.getNodeInfo(nodeId)) : mock.getNodeInfo(nodeId);
+}
+
+/** `POST /taps` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */
+export function createTap(nodeId: string, service: string, connection: string): Promise<TapSummary> {
+  return useRealBackend()
+    ? watchSession(proxy.createTap(nodeId, service, connection))
+    : mock.createTap(nodeId, service, connection);
+}
+
+/** `GET /taps` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */
+export function listTaps(nodeId: string): Promise<TapSummary[]> {
+  return useRealBackend() ? watchSession(proxy.listTaps(nodeId)) : mock.listTaps(nodeId);
+}
+
+/** `DELETE /taps/{id}` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */
+export function deleteTap(nodeId: string, tapId: string): Promise<void> {
+  return useRealBackend() ? watchSession(proxy.deleteTap(nodeId, tapId)) : mock.deleteTap(nodeId, tapId);
+}
+
+/** `GET /taps/{id}/stream` (proxied, DAEMON §9.6), real or fixture per `useRealBackend()`. See
+ *  this section's own module doc for why this one, unlike every `Promise`-returning function
+ *  above, is not wrapped in `watchSession`. */
+export function streamTap(nodeId: string, tapId: string, handlers: TapStreamHandlers): StreamHandle {
+  return useRealBackend() ? proxy.streamTap(nodeId, tapId, handlers) : mock.streamTap(nodeId, tapId, handlers);
+}
+
+/** `GET /logs/stream` (proxied, DAEMON §9.6), real or fixture per `useRealBackend()`. Same
+ *  `watchSession` exception as `streamTap` just above. */
+export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStreamHandlers): StreamHandle {
+  return useRealBackend() ? proxy.streamLogs(nodeId, filter, handlers) : mock.streamLogs(nodeId, filter, handlers);
 }
 
 export type * from './types';

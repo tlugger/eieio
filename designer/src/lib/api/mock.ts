@@ -656,11 +656,13 @@ function findServiceRecord(nodeId: string, serviceName: string): MockService | u
   return (SERVICES[normalizeNodeRouteKey(nodeId)] ?? []).find((s) => s.file.name === serviceName);
 }
 
+function summaryOf(s: MockService): ServiceSummary {
+  return { name: s.file.name, state: s.state, autostart: s.file.autostart, error: s.error };
+}
+
 export async function listServices(nodeId: string): Promise<ServiceSummary[]> {
   const services = SERVICES[normalizeNodeRouteKey(nodeId)] ?? [];
-  return delay(
-    services.map((s) => ({ name: s.file.name, state: s.state, autostart: s.file.autostart, error: s.error })),
-  );
+  return delay(services.map(summaryOf));
 }
 
 export async function getService(nodeId: string, serviceName: string): Promise<ServiceDefinition> {
@@ -670,27 +672,41 @@ export async function getService(nodeId: string, serviceName: string): Promise<S
   return delay({ ...svc.file, state: svc.state, error: svc.error, text, etag: etagFor(text) });
 }
 
-function setState(nodeId: string, serviceName: string, state: ServiceState): void {
+/**
+ * Mutates `state` and hands back the post-mutation {@link ServiceSummary} — matching what
+ * `proxy.ts`'s `lifecycle` actually gets from a real daemon (DAEMON §9: `POST
+ * /services/{s}/{start,stop,reload}` all answer `200 ServiceSummary`, not `204`). Until
+ * eieio-m9s.38, this returned `Promise<void>`, discarding a body the mock never had — that
+ * was the fifth drift this bead's proxy.ts flagged as a decision rather than silently
+ * matching. Keeping the richer type means a caller (real or mock) gets the service's
+ * settled state — `running`/`stopped`/`errored`, `autostart`, a structured `error` — without
+ * a second `listServices` round trip, and `client.ts`'s signature now agrees with both sides
+ * instead of being `Promise<void>` against one and `Promise<ServiceSummary>` against the other.
+ */
+function setState(nodeId: string, serviceName: string, state: ServiceState): ServiceSummary {
   const svc = findServiceRecord(nodeId, serviceName);
-  if (svc) svc.state = state;
+  if (!svc) throw new Error(`no such service: ${nodeId}/${serviceName}`);
+  svc.state = state;
+  return summaryOf(svc);
 }
 
-export async function startService(nodeId: string, serviceName: string): Promise<void> {
-  setState(nodeId, serviceName, 'running');
-  return delay(undefined, 200);
+export async function startService(nodeId: string, serviceName: string): Promise<ServiceSummary> {
+  return delay(setState(nodeId, serviceName, 'running'), 200);
 }
 
-export async function stopService(nodeId: string, serviceName: string): Promise<void> {
-  setState(nodeId, serviceName, 'stopped');
-  return delay(undefined, 200);
+export async function stopService(nodeId: string, serviceName: string): Promise<ServiceSummary> {
+  return delay(setState(nodeId, serviceName, 'stopped'), 200);
 }
 
-export async function reloadService(nodeId: string, serviceName: string): Promise<void> {
+export async function reloadService(nodeId: string, serviceName: string): Promise<ServiceSummary> {
   // Touches nothing else — `reloadService` has never needed a fixture — but it is still a
   // proxy-routed call (DAEMON §9.4) and must resolve through the same choke point as every
-  // other one, or a leaf would be refused everywhere except here.
-  normalizeNodeRouteKey(nodeId);
-  return delay(undefined, 200);
+  // other one, or a leaf would be refused everywhere except here. Its own state is whatever
+  // the record already holds; a reload does not change `state` in this fixture set any more
+  // than it does against a real daemon's already-running service.
+  const svc = findServiceRecord(nodeId, serviceName);
+  if (!svc) throw new Error(`no such service: ${nodeId}/${serviceName}`);
+  return delay(summaryOf(svc), 200);
 }
 
 // --- Service editing (DESIGNER §3.2 / SERVICE §9) ------------------------
