@@ -384,6 +384,12 @@ eio-test-host = { path = "crates/test-host", version = "0.1.0" }
 # It depends on neither of them, which is what lets both have it without a cycle and without
 # the reference harness measuring the leaf's own code; that crate's `Cargo.toml` is the long
 # version.
+#
+# The `version` here is for `eio-leaf`, which takes this crate as a normal dependency.
+# `eio-conformance` deliberately does NOT inherit this entry — it writes a path-only
+# dev-dependency instead, so cargo strips the edge when it packages, because this crate is not
+# in `just`'s `publish_set` and should not be (eieio-7d8.39; the reasoning is written out at
+# the use site in `crates/conformance/Cargo.toml`).
 eio-wamr-host = { path = "crates/wamr-host", version = "0.1.0" }
 
 # `eio mcp` (SCOPE §4): MCP over stdio, as a mode of the CLI rather than an endpoint of the

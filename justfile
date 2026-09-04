@@ -61,6 +61,14 @@ nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk 
 # need it, and a set duplicated across two workflows is one that drifts. `eio-conformance` is
 # in it because `cargo-eio` depends on it for `cargo eio test`, which SDK §5's prose does not
 # make obvious.
+#
+# It is the closure of those roots over *normal* dependencies, and dev edges are deliberately
+# not in it: a consumer links a published crate's library and never runs its tests. That is
+# why `eio-wamr-host` is absent even though `eio-conformance` dev-depends on it — publishing
+# an FFI crate that builds WAMR's C core, reachable from nothing on the registry, is a support
+# commitment bought for nothing (eieio-7d8.39). The corresponding obligation is on the use
+# site: such an edge must be path-only so cargo strips it when packaging, and
+# `publish-dry-run` fails if one is not.
 publish_set := "eio-abi eio-signal eio-expr eio-manifest eio-sdk-macros eio-host-core eio-sdk eio-conformance eio-test-host cargo-eio"
 
 # The subset with no `eio-*` dependency of its own. Before the first publish these are the only
@@ -286,19 +294,91 @@ check-guest:
 
 # ── the gate ─────────────────────────────────────────────────────────────────
 
-# The one command CI runs. Dependencies run in order; the first failure aborts.
-# Prove the publish set is publishable, as far as that can be proven before the first publish.
+# Three checks, because none covers the others. `cargo publish --dry-run` is the real thing but
+# reaches only `dry_runnable`; the two static checks below need no network and so cover every
+# crate in the set. Publishability then rots loudly here rather than at release time, which is
+# the point (SCOPE §7.2).
 #
-# Two checks, because neither covers the other. `cargo publish --dry-run` is the real thing but
-# reaches only `dry_runnable`; `cargo metadata` needs no network and so covers every crate,
-# confirming the three fields crates.io requires are present. Publishability then rots loudly
-# here rather than at release time, which is the point (SCOPE §7.2).
+# The static half is one Python program with two jobs:
+#
+#   1. The three fields crates.io's publish endpoint requires — `description`, `license`,
+#      `repository` — are present on every crate in the set.
+#
+#   2. **The set is closed over the edges that survive packaging, and ordered.** This is the
+#      leg eieio-7d8.39 added, and it exists because the first one did not catch that bug:
+#      `eio-conformance` is in the set and grew a *versioned* dev-dependency on
+#      `eio-wamr-host`, which is not, so a `sdk-v*` tag would have failed on an unpublished
+#      dependency months after anyone remembered adding the edge. The rule is read off cargo's
+#      own packaging behaviour rather than a convention: a workspace dependency whose `req` is
+#      `*` (path-only) is *stripped* when cargo packages, and one that carries a version is
+#      *kept* — so every kept edge into another workspace member must land on a crate that is
+#      in the set and published before it, and every stripped one must be a dev-dependency,
+#      because a path-only normal or build dependency is rejected outright. That covers the
+#      ordering too, which nothing checked before: `publish_set` is a hand-written topological
+#      sort and `release-sdk.yml` publishes in exactly that order.
+#
+#      Dependencies on crates that are not workspace members are not this check's business —
+#      they are on the registry already, which is what makes them buildable at all.
+
+# Prove the publish set is publishable, as far as that can be proven before the first publish.
 publish-dry-run:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo metadata --no-deps --format-version 1 > /tmp/eio-publish-meta.json
-    python3 -c 'import json,sys; m=json.load(open("/tmp/eio-publish-meta.json")); want=sys.argv[1].split(); pk={p["name"]:p for p in m["packages"]}; bad=[(n,f) for n in want for f in ("description","license","repository") if not pk.get(n,{}).get(f)]; missing=[n for n in want if n not in pk]; [sys.stderr.write("not in this workspace: %s\n" % n) for n in missing]; [sys.stderr.write("%s has no %s\n" % (n,f)) for n,f in bad]; sys.exit(1 if (bad or missing) else 0)' "{{ publish_set }}"
-    echo "  registry metadata present for every crate in the publish set"
+    meta="$(mktemp)"
+    trap 'rm -f "$meta"' EXIT
+    cargo metadata --no-deps --format-version 1 > "$meta"
+    python3 - "$meta" "{{ publish_set }}" <<'PUBLISH_SET_CHECK'
+    import json, sys
+
+    meta_path, publish_set = sys.argv[1], sys.argv[2].split()
+    meta = json.load(open(meta_path))
+    pkgs = dict((p["name"], p) for p in meta["packages"])
+    members = set(pkgs)
+    errors = []
+
+    for name in publish_set:
+        if name not in pkgs:
+            errors.append("%s is in publish_set but is not a member of this workspace" % name)
+
+    for i, name in enumerate(publish_set):
+        p = pkgs.get(name)
+        if p is None:
+            continue
+        for field in ("description", "license", "repository"):
+            if not p.get(field):
+                errors.append("%s has no %s, which crates.io requires" % (name, field))
+        for dep in p["dependencies"]:
+            dname = dep["name"]
+            if dname not in members:
+                continue
+            kind = dep.get("kind")
+            label = "dev-dependency" if kind == "dev" else ("%s dependency" % (kind or "normal"))
+            if dep["req"] == "*":
+                if kind != "dev":
+                    errors.append(
+                        "%s has a path-only %s on workspace crate %s. cargo strips a "
+                        "version-less edge only for dev-dependencies; a normal or build one "
+                        "is rejected at publish. Give it the workspace version."
+                        % (name, label, dname))
+                continue
+            if dname not in publish_set:
+                errors.append(
+                    "%s is in publish_set and has a %s on workspace crate %s that carries a "
+                    "version, so the edge survives packaging - but %s is not in publish_set. "
+                    "cargo publish -p %s would fail on an unpublished dependency. Either add "
+                    "%s to publish_set ahead of %s, or drop the version key at the use site "
+                    "so cargo strips the edge, which is legal for a dev-dependency only."
+                    % (name, label, dname, dname, name, dname, name))
+            elif publish_set.index(dname) > i:
+                errors.append(
+                    "publish_set is out of dependency order: %s is published before %s, but "
+                    "%s is a %s of it" % (name, dname, dname, label))
+
+    for e in errors:
+        sys.stderr.write("error: %s\n" % e)
+    sys.exit(1 if errors else 0)
+    PUBLISH_SET_CHECK
+    echo "  registry metadata present, and the publish set is closed and ordered"
     for crate in {{ dry_runnable }}; do
         echo "  $crate → cargo publish --dry-run"
         cargo publish --dry-run -p "$crate"

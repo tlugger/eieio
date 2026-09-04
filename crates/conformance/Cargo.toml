@@ -57,7 +57,27 @@ wasm3x = "0.1.0"
 # `tests/wamr.rs` from measuring the leaf's own code: everything in that file that measures
 # WAMR's *engine* — ABI §4.3's instruction table, the carved-out remainder, all nine refused
 # proposals — still drives raw `wamrx-sys` itself. What is shared is the instrument.
-eio-wamr-host.workspace = true
+#
+# **Path-only, and deliberately NOT `.workspace = true`** (eieio-7d8.39). This crate is in
+# `just`'s `publish_set`; `eio-wamr-host` is not, and should not be. The publish set is the
+# closure of `eio-sdk`, `cargo-eio`, `eio-test-host` and `eio-conformance` over *normal*
+# dependencies — release-sdk.yml's header reads that graph off `cargo metadata` and lists no
+# dev edge in it, because a consumer of a published crate links its library and never runs its
+# tests. `eio-wamr-host` reaches this crate only through this one dev edge, so publishing it
+# would put an FFI crate that builds WAMR's C core on crates.io with no published crate able
+# to reach it — a permanent support commitment bought for nothing.
+#
+# The workspace entry keeps its `version` (`eio-leaf` takes this crate as a *normal*
+# dependency and that edge must stay publishable); this member drops it, because cargo strips
+# a dev-dependency with no version requirement when it packages, which is exactly what should
+# happen here. The cost is that a published `eio-conformance`'s `tests/wamr.rs` will not
+# compile from the .crate file — the fourth-engine measurement is this repository's own check
+# on its reference host, not a thing a downstream consumer runs.
+#
+# `just publish-dry-run` enforces the invariant behind all of the above: any `eio-*`
+# dependency of a `publish_set` crate that still carries a version after packaging must itself
+# be in the set, and must be published before it. Put the version back and that gate fails.
+eio-wamr-host = { path = "../wamr-host" }
 
 # The fourth host (ABI §13, eieio-x7g.3): WAMR's fast interpreter, the AOT engine SCOPE §3.2
 # and SDK §5 name for ESP32-class leaf targets — AOT itself is eieio-7d8.21, parked on a
