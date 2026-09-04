@@ -436,7 +436,7 @@ JSON. Published in the registry alongside the OCI artifact (SCOPE §3.6) and emb
     }
   ],
   "targets": [ "wasm32-unknown-unknown" ],
-  "aot": [ "esp32s3" ]
+  "aot": [ "riscv32imc-unknown-none-elf" ]
 }
 ```
 
@@ -446,7 +446,7 @@ Notes:
 - `default` is an expression string in the platform's micro-Lisp (SCOPE §3.5; expression language grammar is specified separately).
 - `capabilities` ⊇ imported `eio:*` namespaces minus `eio:core` (§4.3).
 - Port order in `inputs`/`outputs` defines port indices (§5.2).
-- `aot` lists prebuilt AOT artifacts for leaf targets published alongside the portable module.
+- `aot` lists prebuilt AOT artifacts for leaf targets published alongside the portable module. The list stays an open name pattern here — a registry may carry artifacts for targets this platform has not defined — but **an entry naming an eieio leaf target is spelled as that target's Rust triple**, which LEAF §6.2.1 fixes and LEAF §6.2 enumerates.
 - Property order defines `prop_id` — appending properties is backward compatible, reordering or removing is not; this is the block's (not the ABI's) versioning concern.
 
 The JSON Schema for the manifest ships in the repo as **`schemas/manifest.schema.json`** (draft 2020-12), beside the schemas of the other published formats. It lives at the repository root rather than inside a crate because its consumers are not Rust: the Designer's config panels, agent tooling, and editor autocomplete all read it directly.

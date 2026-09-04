@@ -35,7 +35,7 @@ The leaf runtime is a Rust binary crate — `crates/leaf`, which exists and is b
                  router core, the StateStore and Timers traits
 ```
 
-**This is the entire reason those crates are `no_std`.** DAEMON §1 calls the host-core/daemon split "load-bearing"; a leaf runtime is the load it bears. `just check-nostd` compiles them for `thumbv7em-none-eabihf` and `riscv32imc-unknown-none-elf` on every gate run, which is the guard that keeps this section implementable rather than aspirational.
+**This is the entire reason those crates are `no_std`.** DAEMON §1 calls the host-core/daemon split "load-bearing"; a leaf runtime is the load it bears. `just check-nostd` compiles them for `thumbv7em-none-eabihf` and `riscv32imc-unknown-none-elf` on every gate run, which is the guard that keeps this section implementable rather than aspirational. **The two gate targets are not both leaf targets** — §6.2 says which one v1 builds a leaf for, and why the other keeps earning its place in the gate anyway.
 
 What the leaf adds on top, and what it MUST NOT:
 
@@ -109,11 +109,65 @@ A daemon reads `node.toml` (DAEMON §2.1) and a service file (SERVICE-SPEC) at b
 
 ### 6.1 The AOT artifact
 
-`cargo eio aot --target <leaf>` produces a WAMR AOT artifact per block, and ABI §11.1's manifest carries an `aot` list naming the prebuilt targets published alongside the portable module. The portable `wasm32-unknown-unknown` module **MUST always ship** (ABI §11.1): an AOT artifact is an optimisation for one target, never a replacement for the thing every host can run.
+`cargo eio aot --target <leaf>` produces a WAMR AOT artifact per block, and ABI §11.1's manifest carries an `aot` list naming the prebuilt targets published alongside the portable module. §6.2 says which targets those are and §6.2.1 how each is spelled. The portable `wasm32-unknown-unknown` module **MUST always ship** (ABI §11.1): an AOT artifact is an optimisation for one target, never a replacement for the thing every host can run.
 
 **AOT artifacts are version-sensitive, and the pairing is normative.** A WAMR AOT artifact is tied to the WAMR version that compiled it and to the LLVM that WAMR was built against — **WAMR 2.4.5 pins LLVM `release/18.x`**. A leaf image and the artifacts it loads MUST come from the same WAMR version. Recording the pair is not bookkeeping: a mismatched artifact is a load failure in the field, after flashing.
 
 This section is **PROPOSED and unimplemented**: `wamrc` has not been built on any developer machine here (six distinct blockers recorded on `eieio-7d8.21`), so the artifact layout is specified from WAMR's documentation rather than from something this repository has produced. **It ratifies when a leaf loads an artifact this pipeline built**, and not before. The interpreter path (§3) needs none of it and is what a first leaf bring-up should use.
+
+### 6.2 The v1 target list
+
+**v1 is one target**, and naming one rather than three is the decision rather than a shortening of it: every remaining §11 item — heap sizing, watchdog mechanics, flash layout, the transport client — is a *per-target* question, so a second target does not add a target, it doubles four unanswered questions before any of them has been answered once.
+
+|eieio leaf target|Rust triple|Toolchain|Exemplar silicon|
+|---|---|---|---|
+|ESP32-C3 class|`riscv32imc-unknown-none-elf`|stock rustup, prebuilt `core`/`alloc`|ESP32-C3, ESP32-C2|
+
+Why this one:
+
+- **It is the tier SCOPE §3.7 names.** "Leaf-class (MCU: ESP32 etc.)" names a *family*, never a triple; this section is where the family becomes a target.
+- **Stock rustup reaches it**, so `rust-toolchain.toml`'s single exact pin keeps meaning what it means. That pin exists because "clippy and rustfmt change behaviour between releases, and every host implementation has to agree byte for byte"; a target needing a second toolchain buys a chip at the cost of that property.
+- **The ★ crates already compile for it** on every gate run (`just check-nostd`), and it is the leg with **no atomics at all** — rv32imc lacks the `A` extension — which is what caught `log::set_logger` being unavailable without compare-and-swap. A leaf target whose constraints the gate already enforces is one where a `no_std` regression fails in CI rather than at flash time.
+- **One vendor supplies the whole stack.** §5 needs a flash driver, §4 a hardware timer, §8 a network stack; here they come from one ecosystem and one decision instead of four independent ones.
+
+**`riscv32imc-unknown-none-elf` and not `riscv32imc-esp-espidf`**, and the difference is not cosmetic: the `esp-espidf` triple is a `std` target. Taking it would make this document's opening sentence — "a `no_std` Rust firmware image" — false, and would make `check-nostd` a gate that no longer describes the thing it guards. **The cost of that choice is recorded here rather than discovered later**: WAMR's platform ports (`esp-idf`, `zephyr`, `nuttx`, `riot`, `freertos`) are OS-shaped and none of them is bare metal, so a `no_std` leaf owes the engine a platform shim, and it forgoes ESP-IDF's MQTT client and flash API that a `std` build would inherit. That is §11's engine-binding and transport work, not something a target list can hand it. If the shim proves prohibitive when someone measures it, the honest response is to reopen this section with `riscv32imc-esp-espidf` as the named alternative — not to weaken §2.
+
+**The WAMR half of the target, stated as far as it is honest to state it.** §3.1 already fixes the feature set and it is not per-target; what a target adds is `WAMR_BUILD_TARGET=RISCV32_ILP32` — soft float, matching `imc`'s absent `F` — a `WAMR_BUILD_PLATFORM` port, and for the AOT path a `wamrc --target=riscv32 --target-abi=ilp32`. **Those three strings are read from WAMR's documentation and have not been run here**, for the reason §6.1 already records: `wamrc` has never been built on a machine in this project. They are §11's pipeline and engine-binding items to confirm, and nothing in this section depends on them — §3's interpreter is what a bring-up uses, and it needs no `wamrc` at all.
+
+**No board is recorded anywhere in this repository or its tracker.** A target list nobody can flash is a list, not a decision, so this one is chosen partly for being the cheapest devkit to put on a desk; the first image that boots is the milestone that makes the choice real, and it is the milestone that reports what it cost in flash and RAM.
+
+**Deferred, with the reason**, because "not v1" and "rejected" are different claims:
+
+|Family|Triple|Why not v1|
+|---|---|---|
+|Cortex-M4F|`thumbv7em-none-eabihf`|Stays a `check-nostd` **gate** target and is not a leaf target. The gate's value — rejecting `std`, rejecting hard-float assumptions — is unaffected by whether a leaf is built for it. As a *leaf* target the triple names a CPU and nothing else: no board, no RTOS, no network stack, no flash part, and WAMR's MCU ports are RTOS-shaped, so adopting it is really adopting Zephyr, NuttX or RIOT — a decision nothing in this repository has made and no issue owns.|
+|ESP32-C6 / H2|`riscv32imac-unknown-none-elf`|The **cheapest second target**, and the migration path below is written for it: same vendor stack, and `rustup target add` reaches it. It is a separate entry rather than free coverage because the ISAs differ — C6's native target has the `A` extension and C3's does not — which is exactly why an `aot` entry is spelled as a triple and not as a chip name.|
+|Classic ESP32, S2, S3|`xtensa-esp32*-none-elf`|Xtensa, and **measured rather than assumed**: on the pinned 1.97.1 toolchain `rustup target list` offers no `xtensa` entry at all, and `rustc --target xtensa-esp32-none-elf` answers `can't find crate for 'std' … the target may not be installed` — the target *spec* is known, the standard library for it is not shipped. Upstream LLVM carries no enabled Xtensa backend, so these need the esp-rs fork (`espup`) and `-Zbuild-std` — a second toolchain channel, with its own `clippy` and `rustfmt`, against the one pin that makes two host implementations agree byte for byte. Deferred rather than refused: S3 is the most capable part in the family and the criteria below say what adding it costs.|
+
+#### 6.2.1 How an `aot` entry is spelled
+
+**An `aot` entry naming an eieio leaf target MUST be that target's Rust triple, verbatim as the table above gives it** — `"aot": ["riscv32imc-unknown-none-elf"]`. It names *the leaf the artifact is loadable by*, which is why a Rust triple is the right key even though `wamrc` and not `rustc` produced the bytes: a leaf image is a Rust build for a triple, and the match is a string comparison against a value the firmware build already holds.
+
+- **One vocabulary per document.** ABI §11.1's `targets` already carries triples and already requires `wasm32-unknown-unknown` among them. Two adjacent lists in one manifest spelled two different ways is a trap, and the difference between the lists should be *portable module versus AOT artifact*, not *triple versus nickname*.
+- **A triple states the facts that decide whether an artifact loads** — instruction subset, atomics, float ABI. A chip name does not: one `esp32c6` string cannot say whether the artifact assumes the `A` extension, and the answer decides whether it also runs on a C3.
+- **No mapping table to drift.** rustup, `rust-toolchain.toml`, `check-nostd` and `cargo eio` all speak triples already, so `cargo eio aot --target riscv32imc-unknown-none-elf` needs no lookup that could disagree with this section.
+- **They fit the contract as written.** ABI §11.1's name pattern and 64-byte bound admit both triples above unchanged, so this convention needs no schema change.
+
+**The name is a necessary key, not a sufficient one.** §6.1's WAMR-and-LLVM pairing is not carried in the string and MUST still be checked; *where* that pair is recorded is §11's pipeline item.
+
+ABI §11.1 is unchanged in force: `aot[]` stays an open name pattern rather than a closed set, because the registry may carry artifacts for targets this platform has not defined. This section binds the spelling of the ones it *has* defined.
+
+**This spelling is robust to a question §11 has not answered.** Whether a leaf links its AOT artifacts in at firmware build time (§1's table) or loads them from flash at runtime (§6.1's wording) changes *who compares the name and when*, and not what the name is. That contradiction is real and is tracked; it does not reach this section.
+
+#### 6.2.2 Adding a target
+
+Adding one is a checklist, not an argument. A family joins the list when all five hold:
+
+1. A Rust triple `rustup` ships, or a written reason it cannot be one.
+2. A WAMR build for it at §3.1's feature set — `WAMR_BUILD_TARGET` plus a platform port — that passes the ABI §4.3 instruction checks as built.
+3. A `Timers` against a hardware timer, a `StateStore` against its flash, and a transport client (§8).
+4. A board someone can flash, running all three of §9's suites at the leaf's own budgets.
+5. An entry in §6.2's table and the triple added to `check-nostd`'s target list, so the `no_std` claim is gated for it too.
 
 ## 7. There is no management API
 
@@ -176,7 +230,7 @@ The build pipeline's own mechanics — how the toolchain is pinned, where AOT ar
 
 Needed before implementation, and deliberately not guessed at in this draft:
 
-- **The target list.** Which MCU families are v1: `riscv32imc` (ESP32-C3/C6) and `thumbv7em` are what `check-nostd` already compiles for, but classic ESP32 is Xtensa and needs the esp-rs toolchain fork. Bears on §6.1's `aot` list.
+- ~~**The target list.**~~ — **resolved** (eieio-x7g.2.2): §6.2 names it. v1 is one target, `riscv32imc-unknown-none-elf` (ESP32-C3 class); `thumbv7em-none-eabihf` stays a `check-nostd` gate target and is not a leaf target; `riscv32imac-unknown-none-elf` (ESP32-C6/H2) is the named next candidate; Xtensa is deferred for the esp-rs toolchain fork, measured rather than assumed. §6.2.1 fixes how an `aot` entry is spelled and §6.2.2 what adding a target costs.
 - **Firmware build pipeline mechanics** — toolchain pinning, AOT artifact caching, reproducibility, and how `cargo eio aot` is invoked from a Designer deploy.
 - **The generated `main`**: what the baked graph looks like as Rust, and whether it is generated source or a const table.
 - **Memory budget**: heap sizing per target, and what a leaf does when a batch will not fit.
