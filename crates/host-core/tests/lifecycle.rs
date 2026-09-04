@@ -361,7 +361,7 @@ fn a_batch_beyond_the_published_limits_never_reaches_the_guest() {
     // `descriptor()` declares one input port and a max_batch of 256; the payload case needs
     // a smaller `max_payload` than any batch encodes to.
     let mut tight = descriptor();
-    tight.limits = eio_host_core::Limits::new(4, 2);
+    tight.limits = eio_host_core::Limits::new(4, 2, None);
 
     for (descriptor, port, signals, expected) in [
         (

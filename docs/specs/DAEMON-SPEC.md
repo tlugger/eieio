@@ -112,6 +112,8 @@ ABI §7.0's six functions — `log`, `emit`, `error`, the two clocks and `rand` 
 
 Everything else — argument decoding, the §8 status and size convention, the memory-bounds proofs, the emission ledger — is the same code on every host, beside `StateStore` (§10) and `Timers`, which are the same pattern for the same reason.
 
+**A number a host chooses is not a second implementation, and the emission budget is the case that proves it.** ABI §9.7 rule 9 bounds what one callback may `emit`; a leaf sets it to 4 096 because its heap is fixed (LEAF §4.3) and this daemon sets it to nothing at all (§6.2). Those are two hosts with two answers and one `emit`: the check is a field of `eio_host_core::Limits` and a branch in `Core::emit`, and what each host supplies is the number. LEAF §4.3 first stated the bound as an obligation on the leaf runtime, which §2's own MUST-NOT list made unimplementable — there is no leaf-side `emit` to put it in — and the fix was to move the rule up into the ABI rather than to let one host grow a private copy of a shared function. That is the shape every "but this host is different" argument should be made to take.
+
 ## 2. On-disk layout (source of truth, SCOPE §3.8)
 
 ```
@@ -155,6 +157,8 @@ listen = "127.0.0.1:7373"        # Management API address (§9)
 [limits]                         # ABI §9.7, per instance
 max_payload = 65536              # bytes
 max_batch = 1024                 # signals
+                                 # There is no max_emission_bytes key: this node does not
+                                 # bound what one callback emits, and §6.2 says why
 
 [budgets]                        # ABI §10, per guest entry
 fuel = 100000000
@@ -382,6 +386,8 @@ The two policies are the two answers §5's mailbox offers a sender, and neither 
 
 - **Backpressure** is the waiting send. Nothing is lost; a saturated graph slows down.
 - **Drop-oldest** is the refusing send plus a **one-batch slot on the connection**. When the destination is full the newest batch takes the slot, and the batch it finds there is the one dropped; the slot is retried ahead of the next round of emissions. The slot is per *connection* even though the policy is per service, and that is what makes the next rule true: the batch a connection discards is always one of *its own*. A connection MUST NOT discard work another connection put in the shared mailbox — a sender is answerable for its own backlog and for nothing else, whoever chose the policy.
+
+**This node bounds the mailbox and not the callback, and `max_emission_bytes` is therefore absent from its descriptors** (ABI §9.7 rule 9, §5.2). Emission is enqueue rather than delivery (ABI §6.2), so a callback's batches are held until it returns; a leaf bounds those bytes at 4 096 because its heap is fixed and the alternative is a reset (LEAF §4.3), and this daemon states the other answer: it bounds nothing there. Two reasons, and the second is why this is a decision rather than an oversight. The queue is on an OS allocator behind ABI §10's fuel budget, so a callback cannot emit for ever and what it does emit costs memory rather than correctness. And a number here would be a *backpressure* policy, which is **OPEN** (SCOPE §3.4) — the mailbox above is this node's answer to a slow consumer, and inventing a second one inside the callback would be answering §3.4 in passing. When §3.4 closes this becomes a `[limits] max_emission_bytes` key in `node.toml` and a field on `GET /node`; until then the daemon's value is stated, published as absence, and unconfigurable. A block MUST NOT read that as a promise: ABI §9.7 rule 9 says it may assume nothing about the bound, and the same block on a leaf is refused at 4 096.
 
 **A connection whose destination is its own source never waits**, however it is configured. An instance is the only drain of its own mailbox, so waiting there cannot succeed — it is a deadlock rather than backpressure, and the batch is discarded and counted instead. Longer cycles are not locally detectable: a saturated cycle of two or more instances stalls those instances, which is the cost of in-node backpressure and is stated here rather than papered over. Every discard — unrouted error emission, drop-oldest replacement, full self-connection, gone receiver — is logged and counted.
 

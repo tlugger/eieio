@@ -18,7 +18,7 @@ fn descriptor(id: &str, inputs: &[&str], outputs: &[&str]) -> Descriptor {
         inputs: inputs.iter().map(|name| String::from(*name)).collect(),
         outputs: outputs.iter().map(|name| String::from(*name)).collect(),
         props: Vec::new(),
-        limits: Limits::new(64 * 1024, 1024),
+        limits: Limits::new(64 * 1024, 1024, None),
     }
 }
 

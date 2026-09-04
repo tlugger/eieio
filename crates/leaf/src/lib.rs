@@ -199,11 +199,13 @@ pub fn leaf_budgets() -> ExprBudgets {
     ExprBudgets::new(EvalLimits::FLOORS, eio_signal::MAX_DEPTH)
 }
 
-/// A leaf's own ABI §5.2 limits (LEAF §4.2): `max_payload` 4 096, `max_batch` 8.
+/// A leaf's own ABI §5.2 limits (LEAF §4.2, §4.3): `max_payload` 4 096, `max_batch` 8,
+/// `max_emission_bytes` 4 096.
 ///
-/// ABI §9.7 makes both host configuration with **no floor**, and SCOPE §3 keeps the question
-/// of whether a floor should exist OPEN. This function is not an answer to that question: it
-/// is one host supplying its two values, which is what ABI §9.7 says a host does.
+/// ABI §9.7 makes all three host configuration with **no floor**, and SCOPE §3 keeps the
+/// question of whether a floor should exist OPEN. This function is not an answer to that
+/// question: it is one host supplying its three values, which is what ABI §9.7 says a host
+/// does.
 ///
 /// `max_payload` is [`eio_expr::MIN_VALUE_BYTES`] because that is EXPR §9's `MAX_VALUE_BYTES`
 /// **floor** — read from the crate that defines it rather than restated, so amending the floor
@@ -214,12 +216,25 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// derives the watchdog deadline from it: it is the one number that appears in both budgets,
 /// and raising it costs wall-clock time as well as RAM.
 ///
-/// These are far below the host bring-up's previous `Limits::new(64 * 1024, 256)`, which was
-/// a daemon's numbers on a leaf. Running the conformance suites at a leaf's real limits is
+/// `max_emission_bytes` is `max_payload` again — one payload's worth out for one payload's
+/// worth in, which is LEAF §4.3's rule and the only one of the three a daemon does not also
+/// impose. It is what closes the hole ABI §6.2 opens on a device with a fixed heap: `emit`
+/// enqueues, so everything a callback emits is held *decoded* until the callback returns, and
+/// an unbounded queue inside one callback is unbounded heap growth with a `handle_alloc_error`
+/// at the end of it (LEAF §4.3, §4.6). The check itself is `eio_host_core`'s, not this
+/// crate's: LEAF §2 forbids a leaf a second implementation of `eio:core`, so what a leaf
+/// supplies is the number (ABI §9.7 rule 9).
+///
+/// These are far below the host bring-up's previous `Limits::new(64 * 1024, 256, None)`, which
+/// was a daemon's numbers on a leaf. Running the conformance suites at a leaf's real limits is
 /// the same argument LEAF §9 makes for running `expr-tests/` at `EvalLimits::FLOORS`: a limit
 /// that only holds on a generous host has not been tested.
 pub const fn leaf_limits() -> Limits {
-    Limits::new(eio_expr::MIN_VALUE_BYTES, 8)
+    Limits::new(
+        eio_expr::MIN_VALUE_BYTES,
+        8,
+        Some(eio_expr::MIN_VALUE_BYTES),
+    )
 }
 
 /// Loads, configures and starts one instance from a compiled block module.

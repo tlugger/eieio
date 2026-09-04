@@ -87,7 +87,7 @@
 //!     outputs: vec!["true".into(), "false".into()],
 //!     props: vec!["predicate".into()],
 //!     // Host configuration, with no floor to fall back on (ABI §9.7, SCOPE §3.4).
-//!     limits: Limits::new(64 * 1024, 256),
+//!     limits: Limits::new(64 * 1024, 256, None),
 //! };
 //!
 //! // The property expressions, parsed and analysed before the guest sees anything

@@ -3,7 +3,7 @@
   "spec": "§7.2, §8",
   "note": "The second half of ABI §5.1's re-instantiation pair, and the point of a stateful block: the seed here is exactly what 15_state_from_nothing left behind, so this is the same block coming back with new memory and the same store. It continues rather than restarting. Also the unscripted read path — the value is short enough for the block's first buffer, so there is one state_get and ABI §8's retry never runs, which is the contrast 10_state_grow_and_retry needs to mean anything.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/counter.wasm",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "state": { "count": "02" },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },

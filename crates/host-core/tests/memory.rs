@@ -11,6 +11,7 @@
 //! |5 — `eio_alloc` returning 0 is failure|`lifecycle.rs`'s `an_allocator_that_refuses_*`|
 //! |6 — 8-byte alignment|`lifecycle.rs`'s `an_allocator_that_lies_*`, and `alloc_align_is_eight`|
 //! |7 — `max_payload`|`a_payload_beyond_max_payload_is_limit`, for an emission; the caller's for a delivery (ABI §9.7, SCOPE §3.4)|
+//! |9 — the callback emission budget|`an_emission_past_the_callback_budget_is_limit`, and `core_fns`'s own tests for the running total behind it|
 //!
 //! Rule 3 is the one with no test worth writing, and that is the finding rather than a gap:
 //! a handler receives `&mut dyn Memory` borrowed from its [`HostCall`], so retaining it past
@@ -177,15 +178,19 @@ fn an_out_buffer_outside_guest_memory_is_invalid_arg() {
 
 // ── outbound: which emissions the host refuses (ABI §6.2, §9.7) ─────────────
 
-/// An instance with two output ports and a small payload limit.
-const LIMITS: Limits = Limits::new(64, 8);
+/// An instance with two output ports and a small payload limit, whose host does not bound
+/// the emission queue (ABI §9.7 rule 9).
+const LIMITS: Limits = Limits::new(64, 8, None);
+
+/// The same instance on a host that bounds one callback's emissions at 100 bytes.
+const BOUNDED: Limits = Limits::new(64, 8, Some(100));
 
 /// The reference budgets — what `decode` bounds nesting by (ABI §6.3.1 rule 9).
 const BUDGETS: ExprBudgets = ExprBudgets::DEFAULT;
 
 #[test]
 fn an_emission_on_a_declared_port_is_accepted() {
-    let accepted = Outbound::accept(1, 8, 2, LIMITS).expect("port 1 of 2, eight bytes");
+    let accepted = Outbound::accept(1, 8, 2, LIMITS, 0).expect("port 1 of 2, eight bytes");
     assert_eq!(accepted.port(), 1);
     // CBOR `[{"a": 1}]`.
     let batch = accepted
@@ -198,19 +203,19 @@ fn an_emission_on_a_declared_port_is_accepted() {
 fn the_error_port_is_accepted_without_being_declared() {
     // ABI §6.4: `PORT_ERR` is reserved on every block and absent from the manifest's
     // outputs, so it is above every declared index rather than one of them.
-    assert!(Outbound::accept(eio_host_core::PORT_ERR, 4, 2, LIMITS).is_ok());
-    assert!(Outbound::accept(eio_host_core::PORT_ERR, 4, 0, LIMITS).is_ok());
+    assert!(Outbound::accept(eio_host_core::PORT_ERR, 4, 2, LIMITS, 0).is_ok());
+    assert!(Outbound::accept(eio_host_core::PORT_ERR, 4, 0, LIMITS, 0).is_ok());
 }
 
 #[test]
 fn a_port_the_block_does_not_declare_is_invalid_arg() {
     // ABI §8: a bad index.
     assert_eq!(
-        Outbound::accept(2, 4, 2, LIMITS),
+        Outbound::accept(2, 4, 2, LIMITS, 0),
         Err(ErrorCode::InvalidArg)
     );
     assert_eq!(
-        Outbound::accept(0, 4, 0, LIMITS),
+        Outbound::accept(0, 4, 0, LIMITS, 0),
         Err(ErrorCode::InvalidArg)
     );
 }
@@ -218,8 +223,34 @@ fn a_port_the_block_does_not_declare_is_invalid_arg() {
 #[test]
 fn a_payload_beyond_max_payload_is_limit() {
     // ABI §9.7, and the boundary: exactly `max_payload` fits.
-    assert!(Outbound::accept(0, 64, 2, LIMITS).is_ok());
-    assert_eq!(Outbound::accept(0, 65, 2, LIMITS), Err(ErrorCode::Limit));
+    assert!(Outbound::accept(0, 64, 2, LIMITS, 0).is_ok());
+    assert_eq!(Outbound::accept(0, 65, 2, LIMITS, 0), Err(ErrorCode::Limit));
+}
+
+#[test]
+fn an_emission_past_the_callback_budget_is_limit() {
+    // ABI §9.7 rule 9. `held` is what this callback has already had accepted, so the same
+    // 64-byte emission is fine at 36 bytes held and refused at 37 — and the refusal is
+    // `ERR_LIMIT`, which is a status code and therefore life (ABI §8).
+    assert!(Outbound::accept(0, 64, 2, BOUNDED, 36).is_ok());
+    assert_eq!(
+        Outbound::accept(0, 64, 2, BOUNDED, 37),
+        Err(ErrorCode::Limit)
+    );
+    // A host that publishes no budget refuses neither.
+    assert!(Outbound::accept(0, 64, 2, LIMITS, u32::MAX).is_ok());
+}
+
+#[test]
+fn the_budget_does_not_move_the_payload_limit() {
+    // Both are `ERR_LIMIT`, but they answer different questions and the per-emission one is
+    // asked first: a batch too big to ever fit is refused as such on an empty queue, so a
+    // block shrinking it is not chasing a limit that moves with what it emitted earlier.
+    assert_eq!(
+        Outbound::accept(0, 65, 2, BOUNDED, 0),
+        Err(ErrorCode::Limit)
+    );
+    assert!(Outbound::accept(0, 64, 2, BOUNDED, 0).is_ok());
 }
 
 #[test]
@@ -227,7 +258,7 @@ fn the_port_is_checked_before_the_length() {
     // Both wrong: the answer is about the port, because a host that reported the length
     // first would send a block off to shrink a batch it was never allowed to send.
     assert_eq!(
-        Outbound::accept(9, 1024, 2, LIMITS),
+        Outbound::accept(9, 1024, 2, LIMITS, 0),
         Err(ErrorCode::InvalidArg)
     );
 }
@@ -235,7 +266,7 @@ fn the_port_is_checked_before_the_length() {
 #[test]
 fn bytes_that_are_not_a_canonical_batch_are_invalid_arg() {
     // ABI §6.2, §6.3.1. Never a trap: the guest passed a bad parameter and lives (§8).
-    let accepted = || Outbound::accept(0, 8, 2, LIMITS).expect("accepted");
+    let accepted = || Outbound::accept(0, 8, 2, LIMITS, 0).expect("accepted");
     assert_eq!(accepted().decode(&[], BUDGETS), Err(ErrorCode::InvalidArg));
     assert_eq!(
         accepted().decode(&[0xa1, 0x61, 0x61, 0x01], BUDGETS),

@@ -931,9 +931,9 @@ fn wamr_passes_the_conformance_suite() {
     // capability namespace is implemented here, so the only scenario this host cannot reach is
     // `07_budget_exhausted.json` — WAMR's engine has no linked fuel-equivalent (see the module
     // docs), so `Host::enforces_budgets` answers `false` and that one scenario is skipped by
-    // name rather than hanging. 31 of the suite's 32 scenarios reach this host.
+    // name rather than hanging. 32 of the suite's 33 scenarios reach this host.
     let ran = summary.reports.len() - summary.skipped().count();
-    assert_eq!(ran, 31, "only {ran} scenario(s) reached wamr");
+    assert_eq!(ran, 32, "only {ran} scenario(s) reached wamr");
 }
 
 #[test]

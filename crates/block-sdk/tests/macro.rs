@@ -150,6 +150,7 @@ fn ctx() -> Ctx {
     Ctx::new(Limits {
         max_payload: 64 * 1024,
         max_batch: 1024,
+        max_emission_bytes: None,
     })
 }
 

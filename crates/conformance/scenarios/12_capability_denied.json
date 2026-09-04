@@ -3,7 +3,7 @@
   "spec": "§8, §13.1",
   "note": "Denial is at the function level and not the link level: the module still imports eio:state and still instantiates, or this would be a test of load-time validation instead of the block's response to a refusal.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/counter.wasm",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "deny": [ "state" ],
   "state": { "count": "182a" },
   "steps": [

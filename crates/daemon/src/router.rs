@@ -560,7 +560,7 @@ mod tests {
             inputs: vec![String::from("in")],
             outputs: vec![String::from("out")],
             props: Vec::new(),
-            limits: Limits::new(64 * 1024, 1024),
+            limits: Limits::new(64 * 1024, 1024, None),
         }
     }
 

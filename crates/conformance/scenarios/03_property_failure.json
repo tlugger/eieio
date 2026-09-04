@@ -3,7 +3,7 @@
   "spec": "§7.1, EXPR §6",
   "note": "EXPR §6: missing data is an error, not null. The signal has no `n`, so the expression fails for that signal only — the instance is untouched and the block reports ERR_EXPR as its status. The `error` call after it is the block saying why through ABI §7.0 — a status code names the kind of failure and the detail names this one.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/transform.wasm",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
     { "action": "start", "expect": { "status": 0 } },

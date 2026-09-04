@@ -21,7 +21,7 @@ fn descriptor() -> Descriptor {
             String::from("east"),
         ],
         props: vec![String::from("threshold"), String::from("mode")],
-        limits: Limits::new(65_536, 256),
+        limits: Limits::new(65_536, 256, None),
     }
 }
 
@@ -105,12 +105,39 @@ fn limits_are_a_nested_map_with_both_fields() {
 }
 
 #[test]
+fn an_unbounded_emission_queue_publishes_no_key_at_all() {
+    // ABI §5.2: `max_emission_bytes` is absent, not zero and not a sentinel, on a host that
+    // does not bound what one callback may emit — which is what the descriptor above (and
+    // every daemon) publishes. A `0` would read as "emit nothing".
+    let map = decoded(&descriptor());
+    let Value::Map(limits) = &map["limits"] else {
+        panic!("limits is a map");
+    };
+    assert!(!limits.contains_key("max_emission_bytes"));
+}
+
+#[test]
+fn a_bounded_emission_queue_publishes_its_budget() {
+    // ABI §9.7 rule 9's number, discoverable for the same reason the other two are: a block
+    // that cannot read it can only find the bound by being refused (LEAF §4.3's 4 096).
+    let mut descriptor = descriptor();
+    descriptor.limits = Limits::new(4096, 8, Some(4096));
+    let map = decoded(&descriptor);
+    let Value::Map(limits) = &map["limits"] else {
+        panic!("limits is a map");
+    };
+    let keys: Vec<&str> = limits.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["max_batch", "max_emission_bytes", "max_payload"]);
+    assert_eq!(limits["max_emission_bytes"], Value::Int(4096));
+}
+
+#[test]
 fn the_extremes_of_a_u32_limit_survive_the_round_trip() {
     // The limits are `u32` on this side and CBOR unsigned integers on the wire, so the top
     // of the range must not come back negative — which it would if they were carried as
     // `i32` anywhere along the way.
     let mut descriptor = descriptor();
-    descriptor.limits = Limits::new(u32::MAX, 0);
+    descriptor.limits = Limits::new(u32::MAX, 0, None);
     let map = decoded(&descriptor);
     let Value::Map(limits) = &map["limits"] else {
         panic!("limits is a map");
@@ -131,7 +158,7 @@ fn empty_name_lists_encode_as_empty_arrays() {
         inputs: Vec::new(),
         outputs: Vec::new(),
         props: Vec::new(),
-        limits: Limits::new(1, 1),
+        limits: Limits::new(1, 1, None),
     };
     let map = decoded(&descriptor);
     for field in ["inputs", "outputs", "props"] {

@@ -3,7 +3,7 @@
   "spec": "§4.2, §7.4, §8",
   "note": "The id-and-callback capability shape, next to counter.wat's size-convention one. The second edge scripts a level ABI §7.4 does not define — a host answering 7 to gpio_read is non-conformant, and the only way to find out whether a block believes it is to hand it one.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/gpio_echo.wasm",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
     {

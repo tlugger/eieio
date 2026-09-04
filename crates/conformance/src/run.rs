@@ -89,7 +89,7 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
             "a scenario that instantiates must publish limits (ABI §9.7)".to_string(),
         );
     };
-    let limits = Limits::new(spec.max_payload, spec.max_batch);
+    let limits = Limits::new(spec.max_payload, spec.max_batch, spec.max_emission_bytes);
     let descriptor = Descriptor::from_manifest(&manifest, scenario.instance_id.clone(), limits);
 
     let sources = match resolve(&manifest, &scenario.properties) {

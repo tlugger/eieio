@@ -3,7 +3,7 @@
   "spec": "§5.2, §6.2, §6.4, §7.1, §13.2",
   "note": "Multi-port routing, and the reserved error port used the way §6.4 describes it: failure with a data path. Three signals — one above the threshold, one below, one whose reading cannot be evaluated at all. The third does not fail the callback: this block handles the failure itself and emits that signal on `err`, which is a port it never declared. The property failure is still recorded by the host, which is how an operator tells a deliberate routing decision from a broken expression. Five prop calls, three evaluations: `reading` is asked for every signal and `threshold` only for the two that got that far, while the evaluation count is `reading`'s three — `threshold` is signal-independent, so EXPR §10's constant folding costs it none however often it is asked for. A host that folded nothing would report five.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/filter.wasm",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
     { "action": "start", "expect": { "status": 0 } },

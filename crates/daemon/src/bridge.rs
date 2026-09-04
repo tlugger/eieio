@@ -1320,7 +1320,7 @@ mod tests {
 
         let broker = Broker::new();
         let bus = String::from("greenhouse");
-        let limits = Limits::new(64 * 1024, 1024);
+        let limits = Limits::new(64 * 1024, 1024, None);
         let mut props = BTreeMap::new();
         props.insert(String::from("topic"), String::from("\"temperature\""));
 
@@ -1431,7 +1431,7 @@ mod tests {
                 props,
                 instance: None,
                 service: String::from("s"),
-                limits: Limits::new(64 * 1024, 1024),
+                limits: Limits::new(64 * 1024, 1024, None),
             })
             .await
             .expect("the publisher starts");

@@ -3,7 +3,7 @@
   "spec": "§1.2, §6.2, §13.2",
   "note": "ABI §6.2's `emit` enqueues; it does not deliver. The block emits three times inside start and three more inside a delivery, checking its own callback depth after each, and latches anything it finds. The latch is returned by eio_stop, so a host that re-entered fails at the stop step even if every other expectation held — the evidence outlives the moment it happened in.",
   "module": "blocks/prober.wat",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
     {

@@ -3,7 +3,7 @@
   "spec": "§10, §13.1, §13.2",
   "note": "ABI §10's hostile case. Nothing about this module is malformed, so the only thing that can end the callback is the budget — and which budget matters: fuel is deterministic work, so the same block given the same batch dies at the same instruction on every run.",
   "module": "blocks/spinner.wat",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "budget": { "fuel": 100000, "deadline_ms": 5000 },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },

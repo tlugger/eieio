@@ -4,7 +4,7 @@
   "note": "The whole of ABI §5.1 once through, against the golden transform of §13.2 — a real eio-sdk block, so this is also the assertion that what the SDK emits is loadable and drivable. One prop call per signal, because the SDK retains its buffer and the value fits it; the property cache is pinned separately in 02, which needs a guest that asks three times. The page bound is §13.1's leak signal and is set for a Rust guest — it starts near 18 pages of static data and heap, where a `.wat` fixture starts at one — so it catches a guest that grows without bound, not one that wastes a page.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/transform.wasm",
   "instance_id": "conformance",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     {
       "action": "configure",
