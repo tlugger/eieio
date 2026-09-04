@@ -68,8 +68,6 @@ import type {
 import * as backend from './backend';
 import * as mock from './mock';
 import * as proxy from './proxy';
-import { SessionRequiredError } from './backend';
-
 export { serviceEdit } from './mock';
 
 /** See this file's own module doc for what each branch means and why the default is safe. */
@@ -379,61 +377,142 @@ export function streamLogs(nodeId: string, filter: LogFilter, handlers: LogStrea
 export type * from './types';
 export type { InstalledBlock, RevalidationOutcome } from './manifests';
 
-// --- Manifest-cache revalidation (DESIGNER §3.3's amendment, eieio-m9s.22) -----------------
+// --- Blocks: the node's cache, a registry's offerings, and the two writes to ours ------------
 //
-// The two calls below are real `fetch`, not mock — unlike everything re-exported above, there
-// is nothing in mock.ts standing in for a node's own `GET /blocks` (DAEMON §9), and this
-// file's own doc already says a real-backend swap happens function by function, not all at
-// once. `lib/api/manifests.ts` holds the logic that decides *whether* to call these and *what
-// to do* with the answer — kept ignorant of `fetch` on purpose, so it tests as a plain
-// function; this is where that logic gets a network to call.
+// Four functions and one rule they exist to make unforgettable.
+//
+// `getNodeCachedBlocks` and `putCachedManifest` used to be raw `fetch` calls in this file,
+// which is the one thing this file is not for: it chooses *which implementation*, it does not
+// spell out how one talks. eieio-m9s.40 moved the bodies to where their neighbours already are
+// — the `GET /blocks` half to `proxy.ts` (a proxied daemon endpoint) and the `PUT
+// /api/blocks/{reference}` half to `backend.ts` (one of DESIGNER §3.1's own routes, reaching no
+// node) — and both now branch on `useRealBackend()` like every other line above, because
+// `mock.ts` grew stand-ins for a node's own block cache at the same time. Their signatures and
+// their names are unchanged, so `App.svelte`'s revalidation path did not move.
+//
+// `browseRegistry`, `previewAvailableBlock` and `pullBlock` are new, and the last two are
+// **composed rather than forwarded**. That is deliberate, and DESIGNER §3.3 is why.
 
 import type { InstalledBlock } from './manifests';
+import { supersedesOnPull } from './manifests';
+import type { AvailableTag, CachedBlock, NodeManifest } from './types';
 
 /**
  * A node's own view of what it has installed (DAEMON §9's `GET /blocks`), reached the one way
- * DESIGNER §3.3 allows: through the catch-all proxy at `/api/nodes/{id}/daemon/{*path}`, never
- * a second, per-endpoint route. Used only to revalidate an already-cached manifest before an
- * act — never to populate the palette, which reads the Designer's own cache and nothing else.
+ * DESIGNER §3.3 allows: through the catch-all proxy, never a second, per-endpoint route. Used
+ * only to revalidate an already-cached manifest before an act — never to populate the palette,
+ * which reads the Designer's own cache and nothing else.
+ *
+ * Narrowed to `manifests.ts`'s `InstalledBlock` (`{reference, manifest}`) rather than passing
+ * `CachedBlock` through whole: `revalidateBeforeAct` needs exactly those two fields, and
+ * `name`/`version` are the node's own decomposition of `reference`, not extra information.
  */
 export async function getNodeCachedBlocks(nodeId: string): Promise<InstalledBlock[]> {
-  const path = `/api/nodes/${nodeId}/daemon/blocks`;
-  const response = await fetch(path, { credentials: 'same-origin' });
-  // Proxied through this crate's own session guard same as everything else under `/api`
-  // (DESIGNER §3.1) — a session that expired mid-use is exactly as reachable here as it is
-  // through `listSystems`/`listNodes`/`listBlockManifests`, so it gets the same treatment:
-  // `SessionRequiredError` reopens the login gate by existing (`./session.ts`), which is what
-  // let this function and `putCachedManifest` below stop being split in two — the inner half
-  // only ever existed so an outer wrapper could sit in front of it.
-  if (response.status === 401) {
-    throw new SessionRequiredError(path);
-  }
-  if (!response.ok) {
-    throw new Error(`GET /blocks on node ${nodeId} failed: ${response.status}`);
-  }
-  const body = (await response.json()) as Array<{ reference: string; manifest: unknown }>;
-  return body.map(({ reference, manifest }) => ({ reference, manifest }));
+  const blocks = useRealBackend() ? await proxy.listCachedBlocks(nodeId) : await mock.listCachedBlocks(nodeId);
+  return blocks.map(({ reference, manifest }) => ({ reference, manifest }));
+}
+
+/** `PUT /api/blocks/{reference}` (DESIGNER §3.1, §3.3): caches one manifest the browser has
+ *  already read from a node. Real or fixture per `useRealBackend()`. */
+export function putCachedManifest(reference: string, manifest: NodeManifest): Promise<void> {
+  return useRealBackend() ? backend.putCachedManifest(reference, manifest) : mock.putCachedManifest(reference, manifest);
+}
+
+/** `GET /blocks/available?repository=` (proxied, DAEMON §9.8): what one configured repository
+ *  offers on this node, uninstalled. References only — a manifest costs a second call per
+ *  reference, which is {@link previewAvailableBlock}. */
+export function browseRegistry(nodeId: string, repository: string): Promise<AvailableTag[]> {
+  return useRealBackend() ? proxy.listAvailableBlocks(nodeId, repository) : mock.listAvailableBlocks(nodeId, repository);
 }
 
 /**
- * Re-caches one manifest at the Designer's own `PUT /api/blocks/{reference}` (§3.1, §3.3) — the
- * same call a browse makes, issued again here after `revalidateBeforeAct` finds the node's
- * answer has changed. `{reference}` is a wildcard route segment on the backend (a reference
- * contains `/`), so it is written into the path verbatim rather than URI-component-encoded,
- * which would escape the very slashes the route expects to see.
+ * Reads one available reference's manifest from a node and caches it — DESIGNER §3.3's opening
+ * sentence, made a single function: "`manifest_cache` is filled by the browser: it fetches a
+ * manifest from a node through the catch-all proxy (`…/daemon/blocks/available/{reference}`) and
+ * `PUT`s what it got here."
+ *
+ * Composed for the same reason {@link pullBlock} below is: a fetch that did not cache what it
+ * fetched would leave the palette exactly as it was, so the two halves have no separate
+ * meaning. The block is **not installed** by this — DAEMON §9.8 is explicit that a browse
+ * writes nothing to the node's cache — which is why the entry it stores is *unverified* from
+ * the moment it is stored (§3.3) and why installing stays the separate, deliberate act below.
  */
-export async function putCachedManifest(reference: string, manifest: unknown): Promise<void> {
-  const path = `/api/blocks/${reference}`;
-  const response = await fetch(path, {
-    method: 'PUT',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ manifest }),
-  });
-  if (response.status === 401) {
-    throw new SessionRequiredError(path);
+export async function previewAvailableBlock(nodeId: string, reference: string): Promise<NodeManifest> {
+  const available = useRealBackend()
+    ? await proxy.inspectAvailableBlock(nodeId, reference)
+    : await mock.inspectAvailableBlock(nodeId, reference);
+  await putCachedManifest(reference, available.manifest);
+  return available.manifest;
+}
+
+/**
+ * Installs a block on a node — `POST /blocks/pull` (DAEMON §9, §4.1) — **and discharges
+ * DESIGNER §3.3's invalidation in the same call**.
+ *
+ * §3.3 states the rule as an obligation on an install flow: "an install flow MUST invalidate
+ * the pulled reference's cache entry as part of the same action, re-fetching that reference
+ * from the node the pull was issued against and re-`PUT`ing it, before the palette or any of
+ * the three sites reads it again." That obligation is discharged **by construction** here
+ * rather than by a rule a future caller has to remember: `proxy.ts`'s `pullBlock` is the only
+ * thing in this SPA that issues the pull, it is not re-exported, and this is its only caller.
+ * There is no way to install a block and skip the invalidation, because there is no other
+ * function that installs one. (The same lesson `session.ts` learned one file over: a rule that
+ * lives at a call site is a rule about *remembering to wrap*.)
+ *
+ * **The node's answer comes from the pull's own response, not from a follow-up `GET /blocks`,**
+ * and that is forced rather than chosen. `CachedBlock.reference` is the node's own name for the
+ * entry — `name:version`, no registry component, because DAEMON §4 keys the block cache by name
+ * and version — so a node asked for `ghcr.io/tlugger/filter:1.2.0` reports it as
+ * `filter:1.2.0` in `GET /blocks` and there is no listing entry keyed by the reference that was
+ * pulled. A follow-up `GET /blocks` therefore *cannot* answer for the pulled reference at all.
+ * The pull's response is the same manifest that listing would carry — `crates/daemon/src/api/
+ * blocks.rs` builds both by running `eio_manifest::validate_unaided` over the bytes now in the
+ * cache — read out of the one response that is keyed by what was actually asked for.
+ *
+ * A failure of the second half is reported, never swallowed. The node has the block by then and
+ * nothing undoes that; what the operator must not be told is that the palette is current when
+ * it is not. This is the one difference from `App.svelte`'s revalidation path, whose own re-
+ * `PUT` is best-effort by design — §3.3 makes revalidation an improvement and this a MUST.
+ */
+export async function pullBlock(nodeId: string, reference: string): Promise<CachedBlock> {
+  const pulled = useRealBackend() ? await proxy.pullBlock(nodeId, reference) : await mock.pullBlock(nodeId, reference);
+  try {
+    await supersedeCachedManifests(reference, pulled.manifest);
+  } catch (error) {
+    throw new Error(
+      `${reference} is installed on node ${nodeId}, but its cached manifest could not be ` +
+        `refreshed — the palette may still show what the registry offered rather than what the ` +
+        `node verified (DESIGNER §3.3): ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
   }
-  if (!response.ok) {
-    throw new Error(`PUT /api/blocks/${reference} failed: ${response.status}`);
+  return pulled;
+}
+
+/**
+ * The invalidation half of {@link pullBlock}: every `manifest_cache` entry this pull supersedes
+ * is re-`PUT` with what the node just answered.
+ *
+ * Enumerating the cache and asking `supersedesOnPull` about each entry, rather than writing the
+ * one key inline, is what keeps DESIGNER §3.3's matching rule in exactly one place. Today that
+ * rule is exact match on the whole reference — so this set is at most the pulled reference
+ * itself, and the loop looks like ceremony — but the reason it is a named, tested function in
+ * `manifests.ts` and not a `===` here is that "which entries does a pull supersede" is a
+ * question §3.3 answers and could answer differently (a digest-pinned pull superseding the tag
+ * that pointed at it is the obvious candidate). When it does, this loop is already the place it
+ * takes effect, and nothing else has to change.
+ *
+ * The pulled reference is written whether or not the cache already held it. `PUT
+ * /api/blocks/{reference}` is an upsert (`crates/designer/src/api/blocks.rs`), a first install
+ * has no entry to invalidate, and the same write is what creates one — so "invalidate" and
+ * "cache what the node verified" are one operation rather than two branches.
+ */
+async function supersedeCachedManifests(pulledReference: string, manifest: NodeManifest): Promise<void> {
+  const cached = await listBlockManifests();
+  const superseded = cached
+    .map((entry) => entry.block_ref)
+    .filter((cachedReference) => supersedesOnPull(cachedReference, pulledReference));
+  for (const reference of new Set([...superseded, pulledReference])) {
+    await putCachedManifest(reference, manifest);
   }
 }

@@ -54,8 +54,11 @@
 
 import type {
   ApiError,
+  AvailableBlock,
+  AvailableTag,
   BlockInstance,
   BlockManifest,
+  CachedBlock,
   Capability,
   Connection,
   LogFilter,
@@ -63,6 +66,7 @@ import type {
   NewNodeInput,
   NewRegistryInput,
   NodeInfo,
+  NodeManifest,
   NodeSummary,
   PutServiceResult,
   RegistrySummary,
@@ -191,6 +195,185 @@ const MANIFESTS: BlockManifest[] = [
 
 export async function listBlockManifests(): Promise<BlockManifest[]> {
   return delay(MANIFESTS);
+}
+
+/**
+ * `PUT /api/blocks/{reference}` (DESIGNER §3.1, §3.3): caches one manifest the browser read
+ * from a node. An upsert, matching `crates/designer/src/api/blocks.rs`'s own `ON CONFLICT DO
+ * UPDATE` — re-browsing or re-installing a reference refreshes it rather than failing.
+ *
+ * Mutates `MANIFESTS` in place, so the palette a developer is looking at actually gains the
+ * block (eieio-m9s.40). Stored flattened — `{block_ref, ...manifest}` — because that is the
+ * shape `listBlockManifests` above has always answered, and `backend.ts` does exactly this
+ * flattening to a real `GET /api/blocks` row. This is the one place in this file that writes
+ * to the manifest cache; the node-side fixtures below never touch it.
+ */
+export async function putCachedManifest(reference: string, manifest: NodeManifest): Promise<void> {
+  const entry: BlockManifest = { block_ref: reference, ...manifest };
+  const at = MANIFESTS.findIndex((m) => m.block_ref === reference);
+  if (at === -1) {
+    MANIFESTS.push(entry);
+  } else {
+    MANIFESTS[at] = entry;
+  }
+  await delay(undefined);
+}
+
+// --- Blocks on a node: what is installed, what a registry offers, and a pull (DAEMON §9, §9.8)
+//
+// Three fixtures' worth of a distinction the daemon draws sharply and this file had no
+// stand-in for until eieio-m9s.40. `MANIFESTS` above is the **Designer's** cache (`GET
+// /api/blocks`); `INSTALLED` below is a **node's** (`GET /blocks`), and they are deliberately
+// different things keyed differently — a node names its cache entries `name:version` and never
+// carries a registry component (DAEMON §4, and `types.ts`'s `CachedBlock`), while the Designer
+// keys its own cache by the whole reference an operator actually browsed. `AVAILABLE` is the
+// third: what a configured registry *offers* and this node has not installed (DAEMON §9.8).
+//
+// That the three disagree is the point. A real node answers `GET /blocks` with `filter:1.2.0`
+// for a block the Designer cached as `ghcr.io/tlugger/filter:1.2.0`, and a mock that quietly
+// made them agree would hide exactly the case DESIGNER §3.3's revalidation has to survive.
+
+/** A node's block cache, keyed the way a node keys it: `name:version`, no registry component.
+ *  Seeded from `MANIFESTS`' own fixtures so a developer starts with a node that has blocks on
+ *  it, and mutated by `pullBlock` below — which is what makes an install visible on the next
+ *  `listCachedBlocks`, the same as on a real node. */
+const INSTALLED = new Map<string, NodeManifest>(
+  MANIFESTS.map(({ block_ref: _blockRef, ...manifest }) => [
+    `${manifest.name}:${manifest.version}`,
+    manifest,
+  ]),
+);
+
+/** `threshold`, the block this mock's registry offers and its node has never installed — so a
+ *  developer can drive the whole browse-then-install flow and watch the palette gain something
+ *  that was genuinely not there. Two tags, differing in their *outputs*, because ABI §11.1 lets
+ *  two versions of one block declare different ports and DESIGNER §3.3's exact-match keying
+ *  exists for precisely that. */
+const THRESHOLD_2_1_0: NodeManifest = {
+  name: 'threshold',
+  version: '2.1.0',
+  abi: { major: 1, minor: 0 },
+  description: 'Splits a numeric field against a limit.',
+  capabilities: [],
+  inputs: [{ name: 'in' }],
+  outputs: [{ name: 'above' }, { name: 'below' }],
+  properties: [
+    { name: 'field', type: 'string', description: 'The field to compare.', required: true },
+    { name: 'limit', type: 'float', description: 'The value to compare against.', required: true },
+  ],
+  targets: ['wasm32-unknown-unknown'],
+  aot: ['esp32s3'],
+};
+
+const THRESHOLD_2_0_0: NodeManifest = {
+  ...THRESHOLD_2_1_0,
+  version: '2.0.0',
+  description: 'Splits a numeric field against a limit. (One output; 2.1.0 added `below`.)',
+  outputs: [{ name: 'above' }],
+};
+
+/** A newer tag of a block the node already has at `1.2.0` — the case where an install replaces
+ *  nothing and adds a second version beside the first. */
+const FILTER_1_3_0: NodeManifest = {
+  name: 'filter',
+  version: '1.3.0',
+  abi: { major: 1, minor: 0 },
+  description: 'Route signals by predicate.',
+  capabilities: [],
+  inputs: [{ name: 'in' }],
+  outputs: [{ name: 'true' }, { name: 'false' }],
+  properties: [
+    { name: 'predicate', type: 'bool', description: 'Evaluated per signal', default: 'true', required: true },
+    { name: 'on_error', type: 'string', description: 'Which output a failed predicate takes.', default: '"false"', required: false },
+  ],
+  targets: ['wasm32-unknown-unknown'],
+  aot: [],
+};
+
+/** What each configured repository offers, keyed by repository — `[registry/][namespace/]name`,
+ *  no tag of its own, exactly what `GET /blocks/available?repository=` takes. A repository that
+ *  is not a key here is refused the way a real node refuses a host it has no
+ *  `auth/registries.toml` entry for (DAEMON §9.8's allow-list). */
+const AVAILABLE: Record<string, Array<{ reference: string; manifest: NodeManifest }>> = {
+  'ghcr.io/tlugger/threshold': [
+    { reference: 'ghcr.io/tlugger/threshold:2.1.0', manifest: THRESHOLD_2_1_0 },
+    { reference: 'ghcr.io/tlugger/threshold:2.0.0', manifest: THRESHOLD_2_0_0 },
+  ],
+  'ghcr.io/tlugger/filter': [{ reference: 'ghcr.io/tlugger/filter:1.3.0', manifest: FILTER_1_3_0 }],
+};
+
+/** The `AVAILABLE` entry for one whole reference, across every repository — the lookup `GET
+ *  /blocks/available/{reference}` and `POST /blocks/pull` both need. */
+function offered(reference: string): NodeManifest | undefined {
+  for (const tags of Object.values(AVAILABLE)) {
+    const hit = tags.find((tag) => tag.reference === reference);
+    if (hit) return hit.manifest;
+  }
+  return undefined;
+}
+
+/** `GET /blocks` (proxied, DAEMON §9): what this node has installed. Keyed and reported the way
+ *  a node does it — `name:version` — see this section's own doc for why that is not the same
+ *  string the Designer's cache uses. */
+export async function listCachedBlocks(nodeId: string): Promise<CachedBlock[]> {
+  normalizeNodeRouteKey(nodeId);
+  return delay(
+    [...INSTALLED.entries()].map(([reference, manifest]) => ({
+      name: manifest.name,
+      version: manifest.version,
+      reference,
+      manifest,
+    })),
+  );
+}
+
+/** `GET /blocks/available?repository=` (proxied, DAEMON §9.8): the tags one configured
+ *  repository offers, uninstalled. References only, no manifests — the real endpoint answers
+ *  the same, for the same reason (one request per repository, not one per tag). */
+export async function listAvailableBlocks(nodeId: string, repository: string): Promise<AvailableTag[]> {
+  normalizeNodeRouteKey(nodeId);
+  const repo = repository.trim();
+  if (!repo) {
+    throw new Error(
+      '`GET /blocks/available` takes `?repository=[registry/][namespace/]name`; a registry has ' +
+        'no catalog this node promises to enumerate (DAEMON §9.8)',
+    );
+  }
+  const tags = AVAILABLE[repo];
+  if (!tags) {
+    throw new Error(`"${repo}" names no registry this node is configured for (DAEMON §9.8)`);
+  }
+  return delay(tags.map(({ reference }) => ({ reference })));
+}
+
+/** `GET /blocks/available/{reference}` (proxied, DAEMON §9.8): one reference's manifest,
+ *  fetched and **not** installed. `INSTALLED` is untouched by this, exactly as a real node's
+ *  block cache is — which is what makes an entry the Designer caches from here *unverified*
+ *  from the moment it is stored (DESIGNER §3.3). */
+export async function inspectAvailableBlock(nodeId: string, reference: string): Promise<AvailableBlock> {
+  normalizeNodeRouteKey(nodeId);
+  const manifest = offered(reference);
+  if (!manifest) {
+    throw new Error(`"${reference}" did not resolve against any configured registry (DAEMON §9.8)`);
+  }
+  return delay({ reference, manifest });
+}
+
+/** `POST /blocks/pull` (proxied, DAEMON §9, §4.1): installs a reference into this node's cache.
+ *
+ *  Pulling something already installed is not an error and does not re-fetch — the node's own
+ *  cache is consulted first, always (DAEMON §4.1), so this looks in `INSTALLED` before
+ *  `AVAILABLE`. Answers the node's own name for what is now installed, `name:version`, never
+ *  the reference that was asked for. */
+export async function pullBlock(nodeId: string, reference: string): Promise<CachedBlock> {
+  normalizeNodeRouteKey(nodeId);
+  const manifest = offered(reference) ?? INSTALLED.get(reference);
+  if (!manifest) {
+    throw new Error(`"${reference}" did not resolve against any configured registry (DAEMON §4.1)`);
+  }
+  const nodeReference = `${manifest.name}:${manifest.version}`;
+  INSTALLED.set(nodeReference, manifest);
+  return delay({ name: manifest.name, version: manifest.version, reference: nodeReference, manifest });
 }
 
 // --- Systems / nodes (DESIGNER §3.1's own REST surface) ------------------

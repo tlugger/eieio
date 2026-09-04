@@ -4,11 +4,12 @@
 // (`listSystems`/`listNodes`/`listBlockManifests`, in `./backend.ts`); this is the other half —
 // services, taps, logs — which needs a real node on the other end and was mock-only until now.
 //
-// **This module has no importers yet.** Two other agents are editing `client.ts` in parallel;
-// wiring these exports in at `client.ts`'s existing mock-re-export list (the same one
-// `backend.ts`'s three functions were pulled out of at eieio-m9s.30) is the driving agent's job,
-// not this file's. Nothing here reaches into `client.ts`, `backend.ts`, or `mock.ts` — only
-// `types.ts`, `sse.ts` and `stream-events.ts`, per this bead's remit.
+// **`client.ts` is this module's one importer** (wired at eieio-m9s.38, extended with the block
+// endpoints at eieio-m9s.40), and the dependency stays one-way: nothing here reaches into
+// `client.ts`, `backend.ts` or `mock.ts` — only `types.ts`, `session.ts`, `sse.ts` and
+// `stream-events.ts`. Every function below is one daemon endpoint and nothing else; composing
+// two of them into a single act, or pairing one with a write to the Designer's own database, is
+// `client.ts`'s job by the same rule.
 //
 // **No mock fallback.** The deferred decision (this bead's own brief) is answered: a request to
 // a node that is not reachable fails, visibly, and that is correct — DESIGNER-SPEC's Designer is
@@ -64,6 +65,9 @@
 
 import type {
   ApiError,
+  AvailableBlock,
+  AvailableTag,
+  CachedBlock,
   LogFilter,
   LogStreamHandlers,
   NodeInfo,
@@ -416,6 +420,104 @@ export async function putService(
 export async function getNodeInfo(nodeId: string): Promise<NodeInfo> {
   const raw = await proxyJson<NodeInfo & { name: string | null }>(nodeId, 'node');
   return { ...raw, name: raw.name ?? undefined };
+}
+
+// --- Blocks: the cache, the registry, and the pull (DAEMON §9, §9.8) ------------------------
+//
+// Three endpoints and one distinction that runs through all of them: `GET /blocks` is what this
+// node has **installed**, `GET /blocks/available` is what it *could* install, and `POST
+// /blocks/pull` is the only thing that moves a reference from the second list to the first.
+// DAEMON §9.8 is explicit that a browse installs nothing and leaves `GET /blocks` unchanged —
+// which is why DESIGNER §3.3 calls an entry the Designer cached from a browse *unverified* from
+// the moment it is stored.
+//
+// All three are reached the one way DESIGNER §3.3 allows: the catch-all, never a per-endpoint
+// route. Nothing here writes to the Designer's own `manifest_cache` — that is `backend.ts`'s
+// `PUT /api/blocks/{reference}`, and `client.ts` is where the two are composed into one act.
+
+// `CachedBlock`, `AvailableTag` and `AvailableBlock` are `types.ts`'s, not this file's, unlike
+// `RemoteServiceDetail` below. The difference is that these three are shapes `mock.ts` has to
+// state too — every other proxied call already reaches both implementations through a
+// `types.ts` interface, and a wire shape declared privately here would have made the mock's
+// copy of it a second, unrelated declaration of the same thing. `RemoteServiceDetail` stays
+// local precisely because it has no mock counterpart (see its own doc).
+//
+// **`CachedBlock.reference` is the node's own name for the entry**, `name:version`: the daemon
+// renders it `format!("{name}:{version}")` in both handlers, because DAEMON §4 keys the block
+// cache by name and version and "a reference naming any registry resolves here". So a pull of
+// `ghcr.io/tlugger/filter:1.2.0` answers `reference: "filter:1.2.0"`, and `GET /blocks` never
+// reports a registry component for anything at all. DESIGNER §3.3 turns on that fact — it is
+// why the pull's own response, and not a follow-up `GET /blocks`, is what discharges the
+// invalidation. See `client.ts`'s `pullBlock`.
+
+/**
+ * `GET /blocks` (proxied): what this node has installed, with each block's manifest.
+ *
+ * Moved here from `client.ts` (eieio-m9s.40), where it was a raw `fetch` building its own
+ * `/api/nodes/{id}/daemon/blocks` path — a proxy call living in the file whose stated job is
+ * "which implementation, not how it talks". Nothing about the request changed: same path, same
+ * `credentials: 'same-origin'`, and a `401` still reopens the login gate — now because
+ * `ProxyUnauthorizedError` raises it where it is built, rather than because this one function
+ * remembered to throw `SessionRequiredError` itself (`session.ts`, eieio-m9s.43).
+ */
+export function listCachedBlocks(nodeId: string): Promise<CachedBlock[]> {
+  return proxyJson<CachedBlock[]>(nodeId, 'blocks');
+}
+
+/**
+ * `GET /blocks/available?repository=…` (proxied, DAEMON §9.8): the tags one configured
+ * repository offers, uninstalled.
+ *
+ * `repository` is required and is `[registry/][namespace/]name` with no tag or digest of its
+ * own — a registry cannot be enumerated from nothing (`GET /v2/_catalog` is an optional OCI
+ * extension GHCR refuses outright), so DAEMON §9.8 takes a repository and lists *its* tags. A
+ * repository naming a host this node has no `auth/registries.toml` entry for is refused with
+ * `422 unresolvable`, and that is stricter than a pull on purpose: a browse lets an
+ * authenticated caller direct the node's outbound fetches, and the node's own configuration is
+ * the allow-list that bounds where they can go.
+ */
+export function listAvailableBlocks(nodeId: string, repository: string): Promise<AvailableTag[]> {
+  return proxyJson<AvailableTag[]>(
+    nodeId,
+    `blocks/available?repository=${encodeURIComponent(repository)}`,
+  );
+}
+
+/**
+ * `GET /blocks/available/{reference}` (proxied, DAEMON §9.8): one reference's manifest, fetched
+ * exactly as installing it would fetch it — verified digest, verified signature — and then
+ * discarded rather than cached on the node. `GET /blocks` is unchanged by it.
+ *
+ * The reference goes into the path **verbatim**, not `encodeURIComponent`-ed: the daemon route
+ * is `/blocks/available/{*reference}`, a wildcard segment, and a reference contains the very
+ * slashes an encode would escape. Same decision `eio blocks inspect` already made
+ * (`crates/cli/src/client.rs`'s `inspect_block`) and the same one `backend.ts`'s
+ * `putCachedManifest` makes for its own wildcard route — three places, one rule.
+ */
+export function inspectAvailableBlock(nodeId: string, reference: string): Promise<AvailableBlock> {
+  return proxyJson<AvailableBlock>(nodeId, `blocks/available/${reference}`);
+}
+
+/**
+ * `POST /blocks/pull` (proxied, DAEMON §9, §4.1): installs a reference into this node's cache,
+ * digest-verified and signature-checked against the node's policy.
+ *
+ * Pulling something already cached is not an error and does not re-fetch — the node consults
+ * its cache first, always, which is what lets a warm node work offline. Either way the answer
+ * is the node's own re-verified manifest for what is now installed, which is the thing DESIGNER
+ * §3.3 calls "the better one".
+ *
+ * **This function does not touch the Designer's `manifest_cache`, and must not.** It is the
+ * node half of a two-halved act; composing it with the cache invalidation is `client.ts`'s job,
+ * so that there is exactly one function anywhere that means "install a block" and it cannot be
+ * called without the invalidation happening.
+ */
+export function pullBlock(nodeId: string, reference: string): Promise<CachedBlock> {
+  return proxyJson<CachedBlock>(nodeId, 'blocks/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reference }),
+  });
 }
 
 // --- Taps (DAEMON §6.3, §9) ----------------------------------------------------------------

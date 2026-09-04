@@ -168,13 +168,18 @@ export async function revalidateBeforeAct(params: {
  * a reference is never reduced to a bare name or split apart, because two different references
  * are two different blocks even when they share a name, a tag, or both.
  *
- * **Deliberately uncalled today** (eieio-m9s.25). Nothing in this app installs a block — no
- * flow calls `POST /blocks/pull` — so there is no pull for this to answer about yet. The
- * obligation is DESIGNER §3.3's, not this function's: "an install flow MUST invalidate the
- * pulled reference's cache entry as part of the same action, re-fetching that reference from
- * the node the pull was issued against and re-`PUT`ing it, before the palette or any of the
- * three sites reads it again." This is that rule as a function, tested, waiting for the flow
- * that discharges it — and §3.3 is where whoever builds one is told to.
+ * **Its caller is `client.ts`'s `pullBlock`** (eieio-m9s.40), which asks this about every entry
+ * in the Designer's cache and re-`PUT`s the ones it answers `true` for — discharging DESIGNER
+ * §3.3's obligation ("an install flow MUST invalidate the pulled reference's cache entry as
+ * part of the same action") in the same call that issues the pull, so that installing a block
+ * and invalidating its entry are one act rather than two a caller could get half of. This was
+ * written and deliberately uncalled at eieio-m9s.25, when nothing in the app installed a block.
+ *
+ * Today's answer makes that loop look like ceremony — exact match means at most one entry
+ * matches, and the caller knows which reference it pulled. It is a named function anyway
+ * because "which entries does a pull supersede" is a question §3.3 answers and could answer
+ * differently: a digest-pinned pull superseding the mutable tag that pointed at it is the
+ * obvious candidate. When it does, this function and its one loop are where it takes effect.
  */
 export function supersedesOnPull(cachedReference: string, pulledReference: string): boolean {
   return cachedReference === pulledReference;

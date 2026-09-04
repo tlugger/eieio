@@ -342,6 +342,41 @@ export async function listBlockManifests(): Promise<BlockManifest[]> {
 }
 
 /**
+ * `PUT /api/blocks/{reference}` (DESIGNER §3.1, §3.3): caches one manifest the browser has
+ * already read from a node. An upsert — re-browsing or re-installing a reference refreshes it
+ * rather than failing (`crates/designer/src/api/blocks.rs`'s `put`).
+ *
+ * Moved here from `client.ts` (eieio-m9s.40), where it was a raw `fetch` in the file whose
+ * stated job is choosing *which implementation*, not spelling out how one talks. This is one of
+ * DESIGNER §3.1's own Designer-owned routes — it reaches no node — so it belongs beside
+ * `listBlockManifests`, which reads the very table it writes.
+ *
+ * `{reference}` is a **wildcard** route segment (a reference contains `/`), so it goes into the
+ * path verbatim rather than `encodeURIComponent`-ed, which would escape the slashes the route
+ * exists to match. `proxy.ts`'s `inspectAvailableBlock` makes the same call about the daemon's
+ * own `{*reference}` route, for the same reason.
+ *
+ * Answers `200` with the stored row; nothing here decodes it. A caller that wants the palette
+ * to reflect the write re-reads `listBlockManifests`, which is the one place the flattening
+ * from a cache row to a `BlockManifest` lives.
+ */
+export async function putCachedManifest(reference: string, manifest: unknown): Promise<void> {
+  const path = `/api/blocks/${reference}`;
+  const response = await fetch(path, {
+    method: 'PUT',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manifest }),
+  });
+  if (response.status === 401) {
+    throw new SessionRequiredError(path);
+  }
+  if (!response.ok) {
+    throw await backendErrorFrom(path, response);
+  }
+}
+
+/**
  * The wire shape of `POST /api/service-parse`'s 200 body
  * (`crates/designer/src/api/service_parse.rs`'s `Out`): a real, field-for-field mirror,
  * `connections` included — see {@link ParsedService}'s own doc for why `connections` is NOT
