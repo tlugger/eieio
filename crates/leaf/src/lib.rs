@@ -80,10 +80,13 @@
 //! - [`state`] backs `eio:state` with a flat file — LEAF §5's stand-in for flash, named as
 //!   one, with a placeholder wear-budget policy that exists only to make `ERR_THROTTLED`
 //!   reachable (see that module's docs for why the policy itself is not a proposal).
-//! - The baked graph in [`spawn`] and `main.rs` is a hand-written `const`-shaped table, which
-//!   LEAF §6 explicitly allows for this milestone. LEAF §6.4 now specifies the shape a
-//!   *generated* one takes and §6.3 settles that a block's artifact is linked into the image
-//!   rather than read from flash; neither the types nor the generator exists here yet.
+//! - [`graph`] is LEAF §6.4's baked graph: the hand-written types a *generated* file declares
+//!   one `static` of, plus [`include_module!`] for §6.3's linked-in artifact and
+//!   [`spawn_graph`], the hand-written driver a per-target `main` hands that `static` to. The
+//!   generator that writes the file is `crates/leaf-gen`, a build-host crate — it is `std`,
+//!   it parses the service file, and nothing of it reaches the image.
+//! - The hand-written table in [`run_demo`] predates all of that and stays: it is the
+//!   regression target `crates/leaf-gen`'s parity suite drives the generated graph against.
 //! - [`timer`] backs `eio:timer` with a single-threaded, poll-driven scheduler (eieio-x7g.2's
 //!   second milestone) — see that module's own docs for why its [`timer::pump`] is a
 //!   legitimate scheduler and not a second lifecycle driver, and for why it is not LEAF §4's
@@ -97,6 +100,7 @@ extern crate alloc;
 pub mod core_fns;
 #[cfg(feature = "std")]
 pub mod fixtures;
+pub mod graph;
 #[cfg(feature = "std")]
 pub mod state;
 pub mod timer;
@@ -114,11 +118,15 @@ use eio_host_core::{
     ClockSource, Configured, Configuring, Descriptor, Engine, Entropy, ExprBudgets, Limits,
     Running, Starting, StateStore, resolve, state as state_import,
 };
-use eio_manifest::{Capability, Manifest};
+use eio_manifest::Capability;
 
 // The router-core vocabulary a caller needs to bake connections and resolve them, re-exported
 // so `main.rs` and the tests have one crate to import the whole demo from.
 pub use eio_host_core::{Connection, Endpoint, Overflow, Port, Routes};
+
+// LEAF §6.4's baked graph, re-exported for the same reason: a generated file names these
+// types, and a per-target `main` that `include!`s it should need one crate in scope.
+pub use graph::{BakedConnection, BakedGraph, BakedInstance, BakedNode, BakedTransport};
 
 /// A running instance, plus what a caller needs to drive and route around it.
 ///
@@ -136,8 +144,6 @@ pub struct Instance<E, C, R> {
     pub core: eio_host_core::Core<C, R>,
     /// Its instance descriptor (ABI §5.2) — port and property names, in index order.
     pub descriptor: Descriptor,
-    /// Its manifest, for a caller that wants to know what it declares.
-    pub manifest: Manifest,
     /// Its timer scheduler, if it declares `eio:timer` — `None` otherwise. A cloneable handle
     /// (see [`timer::Scheduler`]): a caller keeps this clone to drive [`timer::pump`] between
     /// guest callbacks, while another clone is the one actually registered on the guest.
@@ -252,7 +258,61 @@ where
     // runs it at process start as the host-build stand-in for "at firmware build time".
     let manifest = eio_manifest::validate(wasm, None).map_err(|error| error.to_string())?;
 
-    for capability in &manifest.capabilities {
+    let descriptor = Descriptor::from_manifest(&manifest, Some(instance_id.to_string()), limits);
+
+    // ABI §11.1's required/default rule. A baked graph has this already — LEAF §6.4.1 says a
+    // generator serialises exactly what this call returned — which is why `spawn_resolved`
+    // below takes the result rather than the inputs.
+    let sources = resolve(&manifest, supplied).map_err(|error| error.to_string())?;
+
+    spawn_resolved(
+        wasm,
+        descriptor,
+        &sources,
+        &manifest.capabilities,
+        bindings,
+        instantiate,
+    )
+}
+
+/// [`spawn`] from an already-resolved descriptor and property list — what a baked graph
+/// carries (LEAF §6.4).
+///
+/// The half of ABI §5.1 steps 0-3 that has an engine in it: compile the properties, register
+/// `eio:core` and (if declared) `eio:state` and `eio:timer`, then `eio_configure` and
+/// `eio_start`. What it deliberately does **not** do is derive anything: the descriptor and
+/// the property sources are given, because on a leaf they were computed on the build host by
+/// `Descriptor::from_manifest` and `eio_host_core::resolve` and baked (§6.4.1), and on the
+/// host bring-up [`spawn`] has just called the same two functions.
+///
+/// The manifest is therefore absent, and with it the ABI §4.3 load-time cross-check: LEAF
+/// §3.1 puts that at *firmware build time*, "where a refusal costs a build rather than a
+/// field failure", and §6.3 explains why re-deriving a manifest on the device is not even
+/// possible for an AOT artifact. `capabilities` is what survives of it into the image, which
+/// is all this function needs — it decides which imports get registered.
+///
+/// `props` is borrowed for the call and nothing keeps it: `PropContext::compile_with_limits`
+/// turns the source text into something callable and the slice is free afterwards, which is
+/// what lets a baked graph hold `PropertySource<'static>` in `.rodata`.
+pub fn spawn_resolved<E, C, R, S>(
+    wasm: &[u8],
+    descriptor: Descriptor,
+    props: &[eio_host_core::PropertySource<'_>],
+    capabilities: &[Capability],
+    bindings: Bindings<C, R, S>,
+    instantiate: impl FnOnce(&[u8]) -> Result<E, String>,
+) -> Result<Instance<E, C, R>, String>
+where
+    E: Engine,
+    C: ClockSource + Copy + 'static,
+    R: Entropy + 'static,
+    S: StateStore + 'static,
+{
+    let instance_id = descriptor.instance_id.clone();
+    let instance_id = instance_id.as_str();
+    let limits = descriptor.limits;
+
+    for capability in capabilities {
         if !matches!(capability, Capability::State | Capability::Timer) {
             return Err(format!(
                 "instance {instance_id:?} declares capability {capability:?}, which this \
@@ -262,12 +322,9 @@ where
         }
     }
 
-    let descriptor = Descriptor::from_manifest(&manifest, Some(instance_id.to_string()), limits);
-
-    // ABI §11.1's required/default rule, then ABI §7.1's configure-time compile — under LEAF
-    // §4's floors, not the reference defaults (see `leaf_budgets`).
-    let sources = resolve(&manifest, supplied).map_err(|error| error.to_string())?;
-    let properties = eio_host_core::PropContext::compile_with_limits(&sources, EvalLimits::FLOORS)
+    // ABI §7.1's configure-time compile — under LEAF §4's floors, not the reference defaults
+    // (see `leaf_budgets`).
+    let properties = eio_host_core::PropContext::compile_with_limits(props, EvalLimits::FLOORS)
         .map_err(|error| error.to_string())?;
 
     // One clock, not two: a copy of it goes to `eio:core` below and, if this instance declares
@@ -292,7 +349,7 @@ where
     core.register(&mut guest, &properties)
         .map_err(|error| format!("registering eio:core for {instance_id:?}: {error}"))?;
 
-    if manifest.declares(Capability::State) {
+    if capabilities.contains(&Capability::State) {
         let store = state.ok_or_else(|| {
             format!("instance {instance_id:?} declares eio:state but was given no store")
         })?;
@@ -300,7 +357,7 @@ where
             .map_err(|error| format!("registering eio:state for {instance_id:?}: {error}"))?;
     }
 
-    let timers = if manifest.declares(Capability::Timer) {
+    let timers = if capabilities.contains(&Capability::Timer) {
         let scheduler = timer::Scheduler::new(clock);
         eio_host_core::timer::register(&mut guest, scheduler.clone())
             .map_err(|error| format!("registering eio:timer for {instance_id:?}: {error}"))?;
@@ -332,9 +389,103 @@ where
         running,
         core,
         descriptor,
-        manifest,
         timers,
     })
+}
+
+/// A whole service, running: every instance of a baked graph, plus its resolved routes.
+///
+/// The instances are in the graph's own order, so an index into this vector *is* an
+/// [`Endpoint::instance`] (LEAF §6.4.2).
+pub struct RunningGraph<E, C, R> {
+    /// One per [`BakedInstance`], in the baked order.
+    pub instances: alloc::vec::Vec<Instance<E, C, R>>,
+    /// The connection table, resolved from the baked names by the router core.
+    pub routes: Routes,
+}
+
+/// Starts every instance of a baked graph and resolves its connection table (LEAF §6.4).
+///
+/// **This is what a leaf's hand-written `main` does with the generated `static`**, and it is
+/// hand-written for the reason §6.4 gives: a generated file contains no `fn` and no control
+/// flow, because generated logic is where a second lifecycle driver is born. Everything here
+/// is a loop over data and two calls into shared crates — [`spawn_resolved`] per instance and
+/// [`Routes::resolve`] once — with nothing derived that the build host already derived.
+///
+/// `bindings` is called once per instance because a [`StateStore`] is per instance (LEAF §5's
+/// `(service, instance)` namespace); the clock and entropy source it returns are the
+/// platform's and are the same each time.
+///
+/// A failure is fatal to the boot rather than to one instance: §6.4.1 makes a refusal here
+/// evidence that the firmware build was wrong, and a leaf that ran a partial graph would be
+/// running something nobody deployed.
+pub fn spawn_graph<E, C, R, S>(
+    graph: &'static BakedGraph,
+    mut bindings: impl FnMut(&'static BakedInstance) -> Result<Bindings<C, R, S>, String>,
+    instantiate: impl Fn(&[u8]) -> Result<E, String>,
+) -> Result<RunningGraph<E, C, R>, String>
+where
+    E: Engine,
+    C: ClockSource + Copy + 'static,
+    R: Entropy + 'static,
+    S: StateStore + 'static,
+{
+    let descriptors = graph.descriptors();
+    let routes = graph.routes()?;
+
+    let mut instances = alloc::vec::Vec::with_capacity(graph.instances.len());
+    for (baked, descriptor) in graph.instances.iter().zip(descriptors) {
+        instances.push(spawn_resolved(
+            baked.module,
+            descriptor,
+            baked.props,
+            baked.capabilities,
+            bindings(baked)?,
+            &instantiate,
+        )?);
+    }
+
+    Ok(RunningGraph { instances, routes })
+}
+
+/// [`spawn_graph`] with this crate's *platform* bindings filled in, the same split
+/// [`spawn_host`] draws: the host clock, the bring-up entropy source, and a
+/// [`state::FileStateStore`] per instance under `state_dir`.
+///
+/// `state_dir` is required exactly when some instance declares `eio:state`; an instance that
+/// does not is given no store, which is what a firmware build for a graph with no stateful
+/// block would do.
+#[cfg(feature = "std")]
+pub fn spawn_graph_host<E: Engine>(
+    graph: &'static BakedGraph,
+    state_dir: Option<&std::path::Path>,
+    instantiate: impl Fn(&[u8]) -> Result<E, String>,
+) -> Result<RunningGraph<E, core_fns::SystemClock, core_fns::BringUpEntropy>, String> {
+    spawn_graph(
+        graph,
+        |baked| {
+            let state = match (baked.capabilities.contains(&Capability::State), state_dir) {
+                (true, Some(dir)) => Some(
+                    state::for_instance(dir, baked.id)
+                        .map_err(|error| format!("opening {:?}'s state file: {error}", baked.id))?,
+                ),
+                (true, None) => {
+                    return Err(format!(
+                        "instance {:?} declares eio:state but this run was given no state \
+                         directory",
+                        baked.id
+                    ));
+                }
+                (false, _) => None,
+            };
+            Ok(Bindings {
+                clock: core_fns::SystemClock::new(),
+                entropy: core_fns::BringUpEntropy::new(baked.id),
+                state,
+            })
+        },
+        instantiate,
+    )
 }
 
 // ── the host bring-up, from here down ────────────────────────────────────────
