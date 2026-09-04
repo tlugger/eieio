@@ -50,7 +50,7 @@ required-features = ["wasm3"]
 default = ["wasm3", "wamr"]
 std = []
 wasm3 = ["std", "dep:wasm3x"]
-wamr = ["std", "dep:wamrx-sys"]
+wamr = ["std", "dep:eio-wamr-host"]
 
 [dependencies]
 # The engine-agnostic host half this milestone exists to prove composes: the lifecycle
@@ -91,20 +91,16 @@ wasm3x = { version = "0.1.0", optional = true }
 # recorded toolchain failures (eieio-7d8.21) and is a bead of its own; the interpreter needs
 # none of it, because WAMR's core is C and this machine's C compiler works.
 #
-# **No `features` key, deliberately.** `wamrx-sys` 0.3.0 defaults to exactly `bulk-memory` and
-# `reference-types`, which is LEAF §3.1's requirement stated as a build configuration: enable
-# those two, and do not go adding SIMD, tail call, multi-memory, memory64, threads, exceptions
-# or GC for a convenience. WAMR selects features at CMake time, so the conforming set is kept
-# here by writing nothing rather than by anything a call site could forget.
+# **Not `wamrx-sys` directly, and that is the point** (eieio-7d8.34): `crates/wamr-host` is
+# the binding, and `crates/conformance/tests/wamr.rs` dev-depends on the same crate rather
+# than keeping the second copy of it this file's `src/wamr.rs` used to be. That crate depends
+# on neither of them, so no cycle exists and the reference harness is not measuring the leaf's
+# own code. What stays here is the leaf's own budget line — `wamr::EXEC_STACK_SIZE`, LEAF
+# §4.2's 8 KiB reserve — which is exactly what a shared constant would have got wrong.
 #
-# `wamrx` — the safe wrapper this crate backs — is deliberately absent, and `src/wamr.rs`'s
-# module docs are the long version of why: its `Linker::define_func` closure never sees the
-# calling instance, its `Module`/`Instance` handles are `pub(crate)` so no partial mix of the
-# two layers exists, and its `Engine` tears the runtime down (wiping the native registry with
-# it) when the last clone drops. So the binding is written against `wamrx-sys`'s raw FFI, the
-# same layer `wamrx`'s own `Linker` is built on — the fifth sanctioned `unsafe` site in this
-# repository (CLAUDE.md), with a `// SAFETY:` comment on every block.
-wamrx-sys = { version = "0.3.0", optional = true }
+# Optional, and gated behind `std`, for the same reason `wasm3x` is: it builds WAMR's C core
+# and drives it with `CString`/`Mutex`/`Once`, so it cannot cross the `no_std` boundary.
+eio-wamr-host = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Whether the ABI §13 conformance harness can drive this binding at all is one of this

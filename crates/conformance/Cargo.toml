@@ -49,6 +49,16 @@ wat.workspace = true
 # *reference* host, and wasm3 is the independent engine the reference is checked against.
 wasm3x = "0.1.0"
 
+# The WAMR binding of `eio_host_core::Engine`, shared with `crates/leaf` (eieio-7d8.34).
+# `tests/wamr.rs` and `crates/leaf/src/wamr.rs` were the same ~640 lines twice — including the
+# whole of `impl Engine for Guest`, which carries ABI §8's trap classification and not merely
+# FFI plumbing. `crates/wamr-host` is written for neither and depends on neither, which is what
+# keeps this a *dev*-dependency with no cycle (`eio-leaf` dev-depends on this crate) and keeps
+# `tests/wamr.rs` from measuring the leaf's own code: everything in that file that measures
+# WAMR's *engine* — ABI §4.3's instruction table, the carved-out remainder, all nine refused
+# proposals — still drives raw `wamrx-sys` itself. What is shared is the instrument.
+eio-wamr-host.workspace = true
+
 # The fourth host (ABI §13, eieio-x7g.3): WAMR's fast interpreter, the AOT engine SCOPE §3.2
 # and SDK §5 name for ESP32-class leaf targets — AOT itself is eieio-7d8.21, parked on a
 # `wamrc` this machine cannot build, but the interpreter needs none of that. A *dev*-dependency

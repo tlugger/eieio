@@ -22,6 +22,7 @@ members = [
     "crates/manifest",
     "crates/service",
     "crates/signal",
+    "crates/wamr-host",
 ]
 
 [workspace.package]
@@ -378,6 +379,12 @@ eio-sdk = { path = "crates/block-sdk", version = "0.1.0" }
 eio-service = { path = "crates/service", version = "0.1.0" }
 eio-signal = { path = "crates/signal", version = "0.1.0" }
 eio-test-host = { path = "crates/test-host", version = "0.1.0" }
+# The WAMR interpreter binding of `eio_host_core::Engine`, shared by `eio-leaf`'s `wamr`
+# feature and — as a *dev*-dependency — `crates/conformance/tests/wamr.rs` (eieio-7d8.34).
+# It depends on neither of them, which is what lets both have it without a cycle and without
+# the reference harness measuring the leaf's own code; that crate's `Cargo.toml` is the long
+# version.
+eio-wamr-host = { path = "crates/wamr-host", version = "0.1.0" }
 
 # `eio mcp` (SCOPE §4): MCP over stdio, as a mode of the CLI rather than an endpoint of the
 # node (DAEMON §9: "a node serves REST and nothing else"). The official Rust SDK. `schemars`

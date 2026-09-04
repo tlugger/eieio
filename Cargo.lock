@@ -1050,6 +1050,7 @@ dependencies = [
  "eio-host-core",
  "eio-manifest",
  "eio-signal",
+ "eio-wamr-host",
  "serde",
  "serde_json",
  "wamrx-sys",
@@ -1163,9 +1164,9 @@ dependencies = [
  "eio-host-core",
  "eio-manifest",
  "eio-signal",
+ "eio-wamr-host",
  "serde",
  "serde_json",
- "wamrx-sys",
  "wasm3x",
  "wat",
 ]
@@ -1254,6 +1255,15 @@ dependencies = [
  "eio-manifest",
  "eio-sdk",
  "eio-signal",
+]
+
+[[package]]
+name = "eio-wamr-host"
+version = "0.1.0"
+dependencies = [
+ "eio-host-core",
+ "eio-manifest",
+ "wamrx-sys",
 ]
 
 [[package]]
