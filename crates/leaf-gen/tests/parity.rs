@@ -202,19 +202,55 @@ fn baked_instances_are_what_descriptor_and_resolve_produce() {
 }
 
 /// One artifact, one `static`, however many instances share it (LEAF §6.4.2).
+///
+/// Two instances of one block, because the single-instance case cannot fail this: §6.4.2's
+/// example is "three instances of `filter` are three `BakedInstance`s pointing at one module,
+/// not three copies of it in flash", and a leaf that spent 128 KiB of a 313 KiB part on the
+/// same block twice would have made the mistake this rule exists to prevent.
 #[test]
 fn instances_of_one_block_share_one_artifact() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/services/self-loop.toml");
-    let baked = bake(&path, GOLDEN_BLOCK_PAGES).expect("self-loop bakes");
+    let baked = eio_leaf_gen::bake(&Inputs {
+        service_path: Path::new("two-of-one.toml"),
+        service_text: "name = \"two-of-one\"\n\nconnections = [ \"a.out -> b.in\" ]\n\n\
+                       [blocks.a]\nblock = \"transform:1.0.0\"\n\n\
+                       [blocks.b]\nblock = \"transform:1.0.0\"\n",
+        node_id: "n-parity",
+        node_name: None,
+        artifacts: &artifacts(),
+        transport: None,
+        memory_pages: GOLDEN_BLOCK_PAGES,
+    })
+    .expect("two instances of one block bake");
+
+    assert_eq!(baked.graph.instances.len(), 2);
     assert_eq!(
         baked.artifacts.len(),
         1,
-        "self-loop names one block, so one module `static` is emitted"
+        "one block reference, so one module `static` however many instances name it"
+    );
+    assert_eq!(
+        baked.instance_artifact,
+        [0, 0],
+        "both instances point at the one artifact"
+    );
+    assert!(
+        std::ptr::eq(
+            baked.graph.instances[0].module,
+            baked.graph.instances[1].module
+        ),
+        "and at the same bytes, not two copies of them"
     );
     assert!(
         baked.artifacts[0].path.is_absolute(),
         "a generated file is `include!`d from the build directory, so its paths MUST be \
          absolute (LEAF §6.4.2)"
+    );
+
+    let source = eio_leaf_gen::emit(&baked);
+    assert_eq!(
+        source.matches("include_module!").count(),
+        1,
+        "and the emitted file includes it once:\n{source}"
     );
 }
 
