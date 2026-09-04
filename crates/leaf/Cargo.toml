@@ -18,6 +18,22 @@ path = "src/lib.rs"
 [[bin]]
 name = "eio-leaf"
 path = "src/main.rs"
+# The demo binary is the host bring-up, not a firmware image: it prints to stdout, shells out
+# to `cargo` to build the golden blocks, and links wasm3. `required-features` is what keeps
+# `cargo build --no-default-features --target thumbv7em-none-eabihf` from trying to link a
+# `no_std` binary with no `#[panic_handler]` and no entry point — cargo skips a target whose
+# required features are off, so the bare-metal gate builds the library and nothing else.
+required-features = ["std"]
+
+# ── the no_std boundary (LEAF §2) ────────────────────────────────────────────
+#
+# `default = ["std"]` so every existing call site — `main.rs`, `tests/`, `just ci` — keeps
+# working unchanged, and `--no-default-features` is what a firmware build uses. What `std`
+# gates, and why each piece cannot cross, is enumerated in `src/lib.rs`'s crate docs; this is
+# only the Cargo half of that statement.
+[features]
+default = ["std"]
+std = ["dep:wasm3x"]
 
 [dependencies]
 # The engine-agnostic host half this milestone exists to prove composes: the lifecycle
@@ -47,7 +63,13 @@ eio-expr.workspace = true
 # `crates/conformance/Cargo.toml`'s note on why `wamrx` cannot serve as a host binding at
 # all (its `Linker` closures have no access to the calling instance, which every ABI §7
 # function touching guest memory needs).
-wasm3x = "0.1.0"
+#
+# Optional, and gated behind `std`: `wasm3x` builds the wasm3 C sources and its own wrapper
+# against `std`, so it cannot cross the `no_std` boundary. LEAF §2 lists an engine binding as
+# one of the things a leaf *adds* on top of the ★ crates, so a firmware build supplies its
+# own — which is why `spawn` is generic over `E: eio_host_core::Engine` and this binding is
+# one implementation of that trait rather than the one `spawn` names.
+wasm3x = { version = "0.1.0", optional = true }
 
 [dev-dependencies]
 # Whether the ABI §13 conformance harness can drive this binding at all is one of this

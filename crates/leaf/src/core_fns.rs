@@ -9,12 +9,21 @@
 //! things a `no_std` crate with no platform beneath it cannot answer — [`SystemClock`] and
 //! [`BringUpEntropy`] are this milestone's stand-ins for what a real leaf build would read
 //! from a hardware clock and a hardware entropy source.
+//!
+//! **Both are behind the `std` feature**, and that is not an accident of implementation: a
+//! clock and an entropy source are the two things DAEMON §1.1 names as *the platform's*, so
+//! they are exactly what a `no_std` runtime half cannot contain. [`crate::spawn`] is generic
+//! over [`ClockSource`] and [`Entropy`] for that reason, and a firmware build supplies its own
+//! pair against the hardware it targets (LEAF §3).
+#[cfg(feature = "std")]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "std")]
 use eio_host_core::{ClockSource, Entropy, EntropyError};
 
 /// `eio_host_core::Core<SystemClock, BringUpEntropy>` is a mouthful at every call site, and
-/// every caller in this crate wants exactly this instantiation.
+/// every caller in this crate's host bring-up wants exactly this instantiation.
+#[cfg(feature = "std")]
 pub type Core = eio_host_core::Core<SystemClock, BringUpEntropy>;
 
 // Re-exported so `crate::core_fns::{Core, Emission, ...}` keeps working at every call site
@@ -31,12 +40,14 @@ pub use eio_host_core::{Detail, Emission, LogLine};
 /// to read the *same* clock `eio:core`'s `time_mono_ms` does rather than starting a second one
 /// with its own origin. A copy of this type is not a second clock — it is the same origin
 /// instant, read again — which is the distinction `timer`'s module docs lean on.
+#[cfg(feature = "std")]
 #[derive(Clone, Copy)]
 pub struct SystemClock {
     /// The origin `time_mono_ms` counts from — this instance's construction.
     origin: Instant,
 }
 
+#[cfg(feature = "std")]
 impl SystemClock {
     /// A clock whose monotonic origin is now.
     pub fn new() -> SystemClock {
@@ -46,12 +57,14 @@ impl SystemClock {
     }
 }
 
+#[cfg(feature = "std")]
 impl Default for SystemClock {
     fn default() -> SystemClock {
         SystemClock::new()
     }
 }
 
+#[cfg(feature = "std")]
 impl ClockSource for SystemClock {
     /// Milliseconds since the Unix epoch, per ABI §7.0 — a guest never reads a clock of its
     /// own, which is the determinism and replay lever SCOPE §3.5 relies on.
@@ -73,10 +86,12 @@ impl ClockSource for SystemClock {
 /// reads a clock or an RNG of its own, and says nothing about the quality of the bytes.
 /// Pulling in a dependency for it would be adding weight this bring-up does not need — a real
 /// leaf build picks its own source against the hardware it targets (LEAF §3).
+#[cfg(feature = "std")]
 pub struct BringUpEntropy {
     state: u64,
 }
 
+#[cfg(feature = "std")]
 impl BringUpEntropy {
     /// A generator seeded from the wall clock, mixed with a hash of `instance_id` so that two
     /// instances spawned in the same tick still diverge — the same role a `rand` call's own
@@ -97,6 +112,7 @@ impl BringUpEntropy {
     }
 }
 
+#[cfg(feature = "std")]
 impl Entropy for BringUpEntropy {
     fn fill(&mut self, buf: &mut [u8]) -> Result<(), EntropyError> {
         for byte in buf.iter_mut() {
