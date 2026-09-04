@@ -108,7 +108,8 @@ impl Engine for Guest {
         func.call(&mut self.store, &params, &mut out[..results])
             .map_err(|error| {
                 // wasm3 has no fuel counter and enforces no budget (LEAF §4): a leaf's
-                // budget is a watchdog it adds itself, not something this engine reports.
+                // budget is a watchdog it adds itself (§4.4), not something this engine
+                // reports, and wasm3 exposes none of what §4.5 requires for one.
                 // Every failure reaching here is therefore an ordinary trap or an engine
                 // fault, never `TrapKind::Fuel`.
                 Trap::with_detail(TrapKind::Trap, error.to_string())

@@ -43,6 +43,11 @@ impl Host for Wasm3Leaf {
     /// wasm3 has no fuel counter, and this milestone adds no watchdog of its own (LEAF §4
     /// makes that the leaf's to add, not the interpreter's to provide) — the same answer
     /// `crates/conformance/tests/wasm3.rs` gives for the reference wasm3 binding.
+    ///
+    /// LEAF §4.5 now lists what a binding has to expose before this can answer `true`, and
+    /// wasm3 meets none of it: no termination entry point callable from outside the running
+    /// call, so nothing about ISR-safety, trap-shaped unwinding or a bounded check interval
+    /// even arises. §4.5's last rule is that such a binding says so here rather than hanging.
     fn enforces_budgets(&self) -> bool {
         false
     }
