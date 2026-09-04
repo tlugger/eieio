@@ -563,7 +563,11 @@ ci: check-disk
 
     # `test-doc` only when nextest is present: without it, `test` already ran doctests
     # via `cargo test --workspace`, and scheduling both would run them twice.
-    stages=(fmt-check lint test check-nostd check-guest)
+    # `check-designer-hermetic` is unconditional and the `test-designer` below is not:
+    # it is a grep over `designer/src`, needs no JS toolchain, and the invariant it holds
+    # (eieio-m9s.42's, guarded by eieio-m9s.44) is a repository rule rather than something
+    # the SPA's own suite could check about itself.
+    stages=(fmt-check lint test check-nostd check-guest check-designer-hermetic)
     if command -v cargo-nextest >/dev/null 2>&1; then
         stages+=(test-doc)
     fi
@@ -650,12 +654,67 @@ designer-wasm:
 designer-build: designer-wasm designer-deps
     cd designer && npm run build
 
+# A `just` recipe and not an eslint rule, and that is the repo's shape rather than a
+# shortcut: `designer/` has no eslint and no eslint config — its static checking is
+# `npm run check` (svelte-check plus `tsc`), and neither of those can express "this
+# import is forbidden here". Adding eslint, a config, a plugin and a CI wiring to hold
+# one line would be a toolchain bought for a grep. The precedent is `check-lint-optin`
+# above: a repository invariant that no linter models, enforced as a shell check in the
+# one command surface CI runs (eieio-m9s.44).
+#
+# It is its OWN stage rather than a line inside `test-designer` for two reasons. It
+# needs no npm, so it runs on a machine where `ci` skips the SPA suite entirely; and it
+# needs no `designer-wasm`, no `npm ci` and no `shapes`, so it answers in milliseconds
+# instead of after three prerequisites that a test about to be rejected has no business
+# paying for.
+#
+# Deliberately `child_process` and nothing more. Writing into the repo from a test
+# (`node:fs`) and spawning through a wrapper are both imaginable and neither is what
+# happened: the measured failure was a `cargo` build spawned from `beforeAll`. A guard
+# that fires on things nobody has done yet is a guard people learn to route around.
+
+# Fail if a designer test spawns a process — the eieio-m9s.42 regression, guarded.
+check-designer-hermetic:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The quoted form rather than the bare word, so that a comment naming the module —
+    # this one, quoted in a test file, for instance — is not itself an offence. Both
+    # spellings, because `node:child_process` and `child_process` are the same import.
+    offenders="$(find designer/src -name '*.test.ts' -exec \
+        grep -l -E "['\"](node:)?child_process['\"]" {} + || true)"
+    if [ -n "$offenders" ]; then
+        echo "error: designer test(s) import child_process:" >&2
+        printf '%s\n' "$offenders" | sed 's/^/  /' >&2
+        echo "" >&2
+        echo "  A designer test MUST NOT spawn a process, and the reason is a measured CI" >&2
+        echo "  failure rather than a style rule. schema-parity.test.ts used to regenerate" >&2
+        echo "  designer/src/lib/api/__generated__/ by running cargo from beforeAll. On a" >&2
+        echo "  cold checkout that cargo took 143s against a 120s vitest hook, so CI died" >&2
+        echo "  with 'Hook timed out in 120000ms' and then PASSED on the next run against a" >&2
+        echo "  now-warm cargo. Self-healing on a rerun is the worst shape a CI failure can" >&2
+        echo "  have. There was no lock contention: a cold cargo alone outlasts the hook." >&2
+        echo "" >&2
+        echo "  A generated input to the SPA's suite is a PREREQUISITE, not something a test" >&2
+        echo "  conjures for itself. 'just shapes' is the only writer of __generated__/ and" >&2
+        echo "  'just designer-wasm' the only writer of crates/expr-wasm/pkg/; both are" >&2
+        echo "  prerequisites of 'just test-designer'. A test READS them and fails naming the" >&2
+        echo "  recipe when one is missing or stale — designer/src/lib/api/generated-shapes.ts" >&2
+        echo "  is how (eieio-m9s.42)." >&2
+        echo "" >&2
+        echo "  If your test needs a new generated input: add a 'just' recipe that writes it" >&2
+        echo "  and make it a prerequisite of test-designer. Do not spawn it from the test." >&2
+        exit 1
+    fi
+    echo "  no designer test spawns a process"
+
 # The SPA's own suite: the derived-value rules, the manifest-reference match, the
 # operation builders, the linter against the real interpreter, and the schema-parity
 # checks — which is why `shapes` is a dependency here alongside `designer-wasm`: both
 # generate a gitignored artifact the suite reads and no longer generates for itself
-# (eieio-m9s.42).
-test-designer: designer-wasm designer-deps shapes
+# (eieio-m9s.42). `check-designer-hermetic` is what keeps that relationship from being
+# quietly undone by the next test that decides to generate its own inputs; `ci` also
+# runs it as a stage of its own, so it holds on a machine with no npm.
+test-designer: check-designer-hermetic designer-wasm designer-deps shapes
     #!/usr/bin/env bash
     set -euo pipefail
     cd designer
