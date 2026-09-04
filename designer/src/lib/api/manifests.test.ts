@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { resolveManifest } from '../derive/capabilities';
 import type { BlockManifest } from './types';
 import {
+  describeMissingManifest,
   describeVerification,
   isDigestPinned,
+  manifestForAct,
   manifestsEqual,
   revalidateBeforeAct,
   supersedesOnPull,
@@ -186,5 +188,87 @@ describe('supersedesOnPull', () => {
   it('a pull of a different reference leaves an unrelated entry alone', () => {
     expect(supersedesOnPull('filter:1.2.0', 'filter:2.0.0')).toBe(false);
     expect(supersedesOnPull('filter:1.2.0', 'rolling-average:0.3.0')).toBe(false);
+  });
+});
+
+describe('manifestForAct — DESIGNER §3.3: absence is not staleness (eieio-m9s.45)', () => {
+  // The bug this pins: `ensureFreshManifest` used to return early when a reference had no
+  // cache entry at all, and the config modal then opened on a block with no ports and no
+  // properties. Staleness and absence are different questions, and the staleness rule answered
+  // the second one only by accident.
+  //
+  // The case is reachable without doing anything unusual: a service file belongs to the node,
+  // so a reload picks up a hand-edited file — or one an agent wrote (SCOPE §4) — naming a block
+  // this Designer has never browsed. Nothing in the palette flow prevents it, because nothing
+  // in the palette flow was involved.
+  it('a reference with no cache entry is absent, and the reason names it', () => {
+    const cached = [manifest('filter:1.2.0')];
+    const lookup = manifestForAct('rolling-average:0.3.0', resolveManifest('rolling-average:0.3.0', cached));
+    expect(lookup.status).toBe('absent');
+    if (lookup.status !== 'absent') throw new Error('unreachable');
+    expect(lookup.reason).toContain('rolling-average:0.3.0');
+  });
+
+  it('the refusal says how to undo itself — §3.3 requires the way in, not just the refusal', () => {
+    // A dead end would be worse than the empty modal it replaces: §3.3 gives the operator
+    // exactly one way to fill this cache (browse the repository on this node, then preview),
+    // and the message has to name it or the refusal is unactionable.
+    const reason = describeMissingManifest('ghcr.io/tlugger/filter:1.2.0');
+    expect(reason).toContain('ghcr.io/tlugger/filter:1.2.0');
+    expect(reason).toMatch(/block library/i);
+    expect(reason).toMatch(/preview/i);
+  });
+
+  it('a cached reference is present, and the entry is handed back untouched', () => {
+    const entry = manifest('filter:1.2.0');
+    const lookup = manifestForAct('filter:1.2.0', resolveManifest('filter:1.2.0', [entry]));
+    expect(lookup.status).toBe('present');
+    if (lookup.status !== 'present') throw new Error('unreachable');
+    expect(lookup.manifest).toBe(entry);
+  });
+
+  it('absence is decided by the same exact match the cache is keyed by, not by name', () => {
+    // DESIGNER §3.3: "a block is identified by its whole reference, never by its name". A
+    // near-miss on the registry or the tag is an *absent* manifest, not a usable one — the
+    // alternative is the config modal rendering another block's ports under this block's id.
+    const cached = [manifest('ghcr.io/tlugger/filter:1.2.0')];
+    for (const near of ['filter:1.2.0', 'ghcr.io/tlugger/filter:2.0.0', 'docker.io/rival/filter:1.2.0']) {
+      expect(manifestForAct(near, resolveManifest(near, cached)).status).toBe('absent');
+    }
+  });
+
+  it('deciding absence touches no network — §3.3: no act site fetches the entry it is missing', () => {
+    // The whole decision, and the reason it is a refusal rather than a fetch. `GET
+    // /blocks/available/{reference}` answers what a *registry* offers rather than what the node
+    // installed (DAEMON §9.8), and `GET /blocks` is keyed `name:version` and so has no entry at
+    // all for a registry-ful reference (DAEMON §4) — the same asymmetry that makes such an
+    // entry permanently `'unreachable'` in `revalidateBeforeAct`, tested below. Both would fail
+    // for exactly the references most likely to be absent. This spies on the one thing either
+    // call would have to go through.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('an act site must never fetch the entry it is missing');
+    });
+    try {
+      expect(manifestForAct('ghcr.io/tlugger/filter:1.2.0', undefined).status).toBe('absent');
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('the naming asymmetry that rules out fetching: a registry-ful entry is never revalidatable', async () => {
+    // Recorded in §3.3 and confirmed by eieio-m9s.40: DAEMON §4 keys a node's block cache by
+    // name and version, so a pull of `ghcr.io/tlugger/filter:1.2.0` is answered `filter:1.2.0`
+    // and `GET /blocks` has nothing keyed by what was pulled. This is why "just fetch the
+    // missing entry from the node" is not available — the node cannot be asked about the
+    // reference a service file actually names.
+    const outcome = await revalidateBeforeAct({
+      reference: 'ghcr.io/tlugger/filter:1.2.0',
+      cachedManifest: manifest('ghcr.io/tlugger/filter:1.2.0'),
+      fetchInstalled: async (): Promise<InstalledBlock[]> => [
+        { reference: 'filter:1.2.0', manifest: manifest('filter:1.2.0') },
+      ],
+    });
+    expect(outcome.status).toBe('unreachable');
   });
 });
