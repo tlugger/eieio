@@ -80,6 +80,52 @@ dry_runnable := "eio-abi eio-signal"
 # The guest target (ABI §1). Blocks are core WASM modules and nothing else.
 guest_target := "wasm32-unknown-unknown"
 
+# ── disk headroom (eieio-7d8.40) ─────────────────────────────────────────────
+#
+# A full volume does not fail this gate honestly. Three failure shapes were observed in a
+# single session of parallel agent work, and none of them said "disk":
+#
+#   - `rustc-LLVM ERROR: IO failure on output stream: No space left on device`, whose LAST
+#     line — the one a summary shows — is `error: could not compile eio-manifest`. That reads
+#     as a code failure and cost a debugging session, three times.
+#   - A `crates/daemon` API test failing with `Io(Os { code: 22, kind: InvalidInput })` at
+#     5.4G free, passing unchanged at 14G. That one does not even mention IO capacity.
+#   - Everything downstream of either, which then looks like a cascade of real defects.
+#
+# So `ci` both looks before it starts and says so afterwards. The numbers below are measured,
+# and each defends against something specific:
+#
+#   ci_write     10G    What ONE cold `just ci` writes, not what a `target/` can grow to.
+#                       Measured across five independently built trees of this repository —
+#                       `target/` plus `examples/blocks/target/` came to 8.7G, 8.2G, 8.2G,
+#                       5.6G and 0.3G — so 10 is the top of that range rounded up. A
+#                       long-lived worktree accretes far past it (~34G is on record) as
+#                       profiles and feature combinations pile up, which is exactly why
+#                       `check-disk` measures what is already on disk and subtracts it rather
+#                       than assuming a fixed cost: a preflight that charged an incremental
+#                       run for a cold one's writes would fire constantly, and a check that
+#                       fires constantly is worse than no check at all.
+#
+#   floor         6G    The one REFUSAL, and the only number here that is not an estimate:
+#                       at 5.4G free this workspace's own suite produced a WRONG ANSWER — a
+#                       green test went red with an errno that names nothing about disk. A
+#                       gate that lies is worse than a gate that did not run, so below this
+#                       `ci` declines rather than reporting a result nobody should act on.
+#
+#   margin        8G    A WARNING on the projected end state, because each additional git
+#                       worktree building concurrently was measured to add 8-9G — so a run
+#                       projected to finish with less than that in hand is one agent away
+#                       from the floor, through no fault of its own. A warning and not a
+#                       refusal: the projection is an estimate, and an estimate must never
+#                       fail a build. It names the risk and gets out of the way.
+#
+# All three are overridable, which is also how they are tested: `EIO_DISK_FLOOR_GB=999 just
+# check-disk` demonstrates the refusal on any machine. An override states a number you are
+# accepting; there is deliberately no flag that skips the check without naming one.
+disk_ci_write_gb := env("EIO_DISK_CI_WRITE_GB", "10")
+disk_floor_gb := env("EIO_DISK_FLOOR_GB", "6")
+disk_margin_gb := env("EIO_DISK_MARGIN_GB", "8")
+
 # ── compiler cache ───────────────────────────────────────────────────────────
 #
 # Optional: when `sccache` is on PATH, every recipe below that shells out to `cargo` routes
@@ -292,6 +338,52 @@ check-nostd:
 check-guest:
     RUSTFLAGS="-C panic=abort" cargo build --quiet --package eio-sdk --target {{ guest_target }}
 
+# See the `disk headroom` block at the top of this file for where 10, 6 and 8 come from and
+# what each one defends against. This recipe is a *precondition* check, not a gate stage: it
+# says nothing about the code, only about whether this machine can give an answer about it.
+# `ci` runs it first so it reports on the disk as it stands immediately before the first
+# cargo invocation, which is when the estimate is at its most accurate.
+#
+# `du` over the two build trees rather than a flat threshold, because the question is not
+# "how much is free" but "how much still has to be written". It costs well under a second on
+# APFS (measured: 0.46s over an 8.2G tree), which is nothing against the build it precedes.
+
+# Report free disk; refuse below the floor, warn when the run will finish tight.
+check-disk:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    free_gb=$(df -Pk . | awk 'NR==2 { print int($4 / 1048576) }')
+    have_kb=0
+    for tree in target examples/blocks/target; do
+        [ -d "$tree" ] || continue
+        # `tail -1` because a partially unreadable tree still prints a usable total after its
+        # complaints; the guard after it is what makes an unusable answer count as zero
+        # rather than aborting a check whose whole job is to be advisory.
+        size=$(du -sk "$tree" 2>/dev/null | tail -1 | awk '{ print $1 }') || true
+        case "${size:-}" in ''|*[!0-9]*) size=0 ;; esac
+        have_kb=$((have_kb + size))
+    done
+    have_gb=$((have_kb / 1048576))
+    to_write_gb=$(( {{ disk_ci_write_gb }} - have_gb ))
+    [ "$to_write_gb" -ge 0 ] || to_write_gb=0
+    projected_gb=$((free_gb - to_write_gb))
+    echo "check-disk: ${free_gb}G free · ${have_gb}G of build output already here · ~${to_write_gb}G still to write → ~${projected_gb}G left at the end"
+    if [ "$free_gb" -lt {{ disk_floor_gb }} ]; then
+        echo "error: ${free_gb}G free is below the {{ disk_floor_gb }}G floor — refusing to start." >&2
+        echo "       This is not caution about speed. At 5.4G free this workspace's own suite" >&2
+        echo "       failed a passing test with Io(Os { code: 22, kind: InvalidInput }), which" >&2
+        echo "       names nothing about disk. A run from here would report something, and the" >&2
+        echo "       something would not be trustworthy." >&2
+        echo "       Free space, or state the number you are accepting: EIO_DISK_FLOOR_GB=<n> just ci" >&2
+        exit 1
+    fi
+    if [ "$projected_gb" -lt {{ disk_margin_gb }} ]; then
+        echo "warning: this run is projected to finish with ~${projected_gb}G free, under the {{ disk_margin_gb }}G margin." >&2
+        echo "         Each concurrent worktree building adds 8-9G, so one more agent starting" >&2
+        echo "         now takes this below the floor and failures stop meaning what they say." >&2
+        echo "         Proceeding: the {{ disk_ci_write_gb }}G estimate is an estimate, and an estimate must not fail a build." >&2
+    fi
+
 # ── the gate ─────────────────────────────────────────────────────────────────
 
 # Three checks, because none covers the others. `cargo publish --dry-run` is the real thing but
@@ -400,18 +492,71 @@ publish-dry-run:
 # second broken gate cannot hide behind "never got to run"; first-failure-aborts is restored
 # at the end by exiting non-zero, with every failed stage named on the final line, if any
 # stage did.
+#
+# `build`, `build-golden` and `shapes` used to be `just` dependencies of this recipe and are
+# now its first three stages instead (eieio-7d8.40). Nothing about their order changed — they
+# still run sequentially, before anything else, and the first failure still aborts. What
+# changed is that a dependency's output goes nowhere this recipe can read, and a run that dies
+# in `build` therefore reached no summary at all: the last line on the terminal was cargo's
+# `error: could not compile eio-manifest`, four lines under an LLVM `No space left on device`
+# that nobody scrolls back to. `tee` keeps them live AND greppable, so `disk_verdict` below
+# sees every stage of the run rather than only the parallel ones.
 
 # The one command CI runs: builds, then fmt/lint/test/nostd/guest concurrently, then the golden blocks.
-ci: build build-golden shapes
+ci: check-disk
     #!/usr/bin/env bash
     set -euo pipefail
     logdir="$(mktemp -d)"
     trap 'rm -rf "$logdir"' EXIT
-    # `shapes` (a dependency above) has already written both generated files, so the
+
+    # Say "disk" when it was the disk. Two independent signals, because a full volume shows up
+    # in two quite different shapes (eieio-7d8.40):
+    #
+    #   - The explicit one. rustc, ld and cargo all say `No space left on device` somewhere in
+    #     the middle of their output and then exit with a message that names a CRATE. Grepping
+    #     every stage log for the phrase turns "could not compile eio-manifest" back into what
+    #     actually happened.
+    #   - The silent one, and the reason this does not stop at a grep. A `crates/daemon` API
+    #     test failed with `Io(Os { code: 22, kind: InvalidInput })` at 5.4G free and passed
+    #     unchanged at 14G; the phrase appears nowhere in that. All this can do is read the
+    #     volume as the run ends and say that the failures are suspect — which is exactly the
+    #     sentence that was missing when this cost a debugging session.
+    disk_verdict() {
+        if grep -qs -e 'No space left on device' -e 'IO failure on output stream' "$logdir"/*.log; then
+            echo "ci: THE DISK FILLED. A stage hit 'No space left on device' — whatever crate or" >&2
+            echo "ci: test is named above did not fail on its own merits. Free space and rerun." >&2
+            grep -hs -e 'No space left on device' -e 'IO failure on output stream' "$logdir"/*.log \
+                | sort -u | head -3 | sed 's/^/ci:   /' >&2
+            return 0
+        fi
+        local free_gb
+        free_gb=$(df -Pk . | awk 'NR==2 { print int($4 / 1048576) }')
+        if [ "$free_gb" -lt {{ disk_margin_gb }} ]; then
+            echo "ci: ${free_gb}G free on this volume as the run ended, under the {{ disk_margin_gb }}G margin." >&2
+            echo "ci: A tight disk makes this suite fail in ways that name no disk at all — an" >&2
+            echo "ci: EINVAL from a test that passes at 14G, for one. Treat the failures above as" >&2
+            echo "ci: unproven until a rerun with room reproduces them." >&2
+        fi
+        return 0
+    }
+
+    # Sequential prelude. `shapes` must run before EIO_SHAPES_PREGENERATED is exported below —
+    # that variable is how it makes itself a no-op for the `test-designer` stage.
+    for stage in build build-golden shapes; do
+        echo "═══ ${stage} ═══"
+        if ! just "$stage" 2>&1 | tee "$logdir/$stage.log"; then
+            echo "═══ ${stage}: FAILED ═══" >&2
+            disk_verdict
+            echo "ci: failed stage(s): ${stage}" >&2
+            exit 1
+        fi
+    done
+
+    # `shapes` (a stage above) has already written both generated files, so the
     # `test-designer` stage below must not run it a second time — it would put a second cargo
     # on the target-directory lock the `test` stage is holding. See the `shapes` recipe.
     export EIO_SHAPES_PREGENERATED=1
-    # `build-golden` (a dependency above) has already built the golden blocks, so no test
+    # `build-golden` (a stage above) has already built the golden blocks, so no test
     # process may invoke cargo on that target directory — see `golden::build`'s comment for
     # why even a no-op invocation is a writer, and how that turned CI red twice.
     export EIO_GOLDEN_PREBUILT=1
@@ -454,11 +599,18 @@ ci: build build-golden shapes
     done
 
     if [ "${#failed[@]}" -gt 0 ]; then
+        disk_verdict
         echo "ci: failed stage(s): ${failed[*]}" >&2
         exit 1
     fi
 
-    just test-golden
+    echo "═══ test-golden ═══"
+    if ! just test-golden 2>&1 | tee "$logdir/test-golden.log"; then
+        echo "═══ test-golden: FAILED ═══" >&2
+        disk_verdict
+        echo "ci: failed stage(s): test-golden" >&2
+        exit 1
+    fi
     echo "ci: all gates passed"
 
 # ── designer ─────────────────────────────────────────────────────────────────
