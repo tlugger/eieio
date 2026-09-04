@@ -580,6 +580,9 @@ pub struct Guest {
 /// renders the leaf's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstantiateError {
+    /// A growth bound of zero pages was asked for, which WAMR reads as "no bound at all" rather
+    /// than as a bound (see [`instantiate`]'s `max_pages`).
+    ZeroPages,
     /// A stack size of zero was asked for, which WAMR reads as its own default rather than as
     /// an absence. See [`instantiate`].
     ZeroStack,
@@ -596,6 +599,10 @@ pub enum InstantiateError {
 impl fmt::Display for InstantiateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            InstantiateError::ZeroPages => f.write_str(
+                "a growth bound of 0 pages is WAMR's \"no bound at all\", not a bound — pass \
+                 `None` if that is what you mean (ABI §4.1)",
+            ),
             InstantiateError::ZeroStack => f.write_str(
                 "an execution stack of 0 bytes is WAMR's own default, not an absence — pass \
                  the size you mean",
@@ -642,9 +649,46 @@ impl std::error::Error for InstantiateError {}
 /// Zero is not "no stack": WAMR substitutes `DEFAULT_WASM_STACK_SIZE` for it, which is the
 /// opposite of what a caller passing zero would mean, so this refuses it rather than silently
 /// allocating 12–16 KiB.
-pub fn instantiate(wasm: &[u8], stack_size: u32) -> Result<Guest, InstantiateError> {
+///
+/// # `max_pages`
+///
+/// ABI §4.1's growth bound, in 64 KiB pages, or `None` to bound nothing — the answer a host
+/// with an OS underneath it gives, and the reference harness's.
+///
+/// It is the *second* half of §4.1, and it exists because the first half cannot cover the case
+/// that actually occurs. A loader refuses a module whose declared minimum or declared **maximum**
+/// exceeds a host's ceiling, but `wasm-ld` emits no maximum unless asked and SDK §5.2
+/// deliberately does not ask, so every block built here declares one page and nothing on the
+/// right — which WAMR reads as `DEFAULT_MAX_PAGES`, 65 536, and lets `memory.grow` walk to. On a
+/// leaf's one shared heap (LEAF §4.2) that is one instance eating the reserve every other
+/// instance was budgeted out of.
+///
+/// **What WAMR does with the number is `wasm_runtime_get_max_mem`, and its semantics are exactly
+/// §4.1's**, which is why this is passed rather than enforced here: it returns the module's own
+/// maximum when this is `0`, refuses to override *below* the module's declared minimum (so a
+/// host can never grant less than the module declared, §4.1's second bullet, enforced by the
+/// engine rather than trusted to the caller), and otherwise takes the smaller of the two. So the
+/// bound is `min(module maximum, this)`, never below the module's minimum.
+///
+/// **What a guest sees is core WASM's own answer and no ABI surface of ours.** `memory.grow`
+/// returns −1; a Rust guest's allocator reads that as an allocation failure; and it reaches
+/// ABI §9 only as `eio_alloc` returning 0, which §9.5 already makes `ERR_LIMIT`. Nothing traps
+/// and §8's death kinds are untouched — there is no fourth one for "grew too far", and inventing
+/// one here would report a host's budget as a fault of the guest.
+///
+/// `Some(0)` is refused rather than passed through, for [`InstantiateError::ZeroStack`]'s reason
+/// one field over: WAMR reads a zero `max_memory_pages` as "no override", which is the opposite
+/// of what a caller writing `Some(0)` would mean.
+pub fn instantiate(
+    wasm: &[u8],
+    stack_size: u32,
+    max_pages: Option<u32>,
+) -> Result<Guest, InstantiateError> {
     if stack_size == 0 {
         return Err(InstantiateError::ZeroStack);
+    }
+    if max_pages == Some(0) {
+        return Err(InstantiateError::ZeroPages);
     }
     ensure_runtime();
     ensure_thread_env();
@@ -668,17 +712,28 @@ pub fn instantiate(wasm: &[u8], stack_size: u32) -> Result<Guest, InstantiateErr
         }
 
         let mut err_buf2 = [0 as c_char; ERR_BUF_SIZE];
-        // `stack_size` again, and this argument is *not* the guest's aux (shadow) stack
+        // `stack_size` again, and `default_stack_size` is *not* the guest's aux (shadow) stack
         // despite the name `wamrx::InstanceConfig` gives it — WAMR reads the shadow stack from
         // the module's own `__stack_pointer` global, which SDK §5.2's link default sizes. What
-        // this is is `WASMModuleInstance::default_wasm_stack_size`; see this function's docs
-        // for why it is the same number.
-        // SAFETY: `module` is the handle just returned by a successful `wasm_runtime_load`.
+        // it is is `WASMModuleInstance::default_wasm_stack_size`; see this function's docs for
+        // why it is the same number as the `exec_env`'s.
+        //
+        // `wasm_runtime_instantiate_ex` rather than `wasm_runtime_instantiate` for one field:
+        // `max_memory_pages`, ABI §4.1's growth bound (LEAF §4.2). The plain call is that call
+        // with this struct zeroed, and `0` is WAMR's "no override" — which is what a caller
+        // passing `None` means, so the two paths are one call rather than a branch.
+        let args = sys::InstantiationArgs {
+            default_stack_size: stack_size,
+            host_managed_heap_size: HEAP_SIZE,
+            max_memory_pages: max_pages.unwrap_or(0),
+        };
+        // SAFETY: `module` is the handle just returned by a successful `wasm_runtime_load`;
+        // `args` is a live, fully-initialised `InstantiationArgs` that outlives the call, which
+        // only reads it.
         let module_inst = unsafe {
-            sys::wasm_runtime_instantiate(
+            sys::wasm_runtime_instantiate_ex(
                 module,
-                stack_size,
-                HEAP_SIZE,
+                &raw const args,
                 err_buf2.as_mut_ptr(),
                 err_buf2.len() as u32,
             )
