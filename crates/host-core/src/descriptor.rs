@@ -63,11 +63,11 @@ impl Descriptor {
 
 /// The limits a host imposes, as the descriptor reports them (ABI §5.2, §9.7).
 ///
-/// **There is no default and no floor.** Both values are host configuration, and ABI §9.7
-/// says a block "may assume nothing about their size" — the floors are an open question
+/// **There is no default and no floor.** All three values are host configuration, and ABI
+/// §9.7 says a block "may assume nothing about their size" — the floors are an open question
 /// (SCOPE §3.4), deliberately unanswered until there is a real workload to size them
 /// against. So this type has no `Default`, no `FLOORS` and no `clamped()`: a host states
-/// both numbers, and a block reads them from its descriptor rather than assuming.
+/// every number, and a block reads them from its descriptor rather than assuming.
 ///
 /// That is the opposite of `eio_expr`'s `EvalLimits`, which clamps to EXPR §9's floors —
 /// and the difference is the point. Where the spec promises a floor, the type enforces it;
@@ -81,18 +81,33 @@ pub struct Limits {
     pub max_payload: u32,
     /// Largest number of signals in one batch.
     pub max_batch: u32,
+    /// Largest total payload the host accepts from `emit` within one callback, in bytes —
+    /// or `None` for a host that does not bound it (ABI §9.7 rule 9).
+    ///
+    /// ABI §6.2 makes `emit` enqueue rather than deliver, so every batch a callback emits is
+    /// held, decoded, until the callback returns and the driver drains it. This is the bound
+    /// on what is held. Past it `emit` answers `ERR_LIMIT` and the instance lives (ABI §8),
+    /// exactly as it does past `max_payload`.
+    ///
+    /// **`None` is a statement, not a default.** A host that does not bound the queue says so
+    /// here and publishes no `max_emission_bytes` in its descriptor; there is no value that
+    /// means "whatever the host feels like", because that is the divergence between two hosts
+    /// this field exists to make visible (ABI §13).
+    pub max_emission_bytes: Option<u32>,
 }
 
 impl Limits {
     /// The limits a host is imposing.
     ///
-    /// Both arguments are required. There is no shorter constructor on purpose: a
+    /// All three arguments are required. There is no shorter constructor on purpose: a
     /// `Limits::new()` that picked numbers would be inventing the floor ABI §9.7 declines
-    /// to state.
-    pub const fn new(max_payload: u32, max_batch: u32) -> Limits {
+    /// to state, and one that defaulted `max_emission_bytes` to `None` would let a host
+    /// leave its queue unbounded by forgetting rather than by deciding.
+    pub const fn new(max_payload: u32, max_batch: u32, max_emission_bytes: Option<u32>) -> Limits {
         Limits {
             max_payload,
             max_batch,
+            max_emission_bytes,
         }
     }
 }
@@ -140,6 +155,12 @@ impl Descriptor {
             String::from("max_batch"),
             Value::Int(self.limits.max_batch.into()),
         );
+        // Absent, not zero and not a sentinel, when this host does not bound the emission
+        // queue (ABI §5.2): a `0` would read as "emit nothing" and a `u32::MAX` would be a
+        // number a block has to know means something else.
+        if let Some(bytes) = self.limits.max_emission_bytes {
+            limits.insert(String::from("max_emission_bytes"), Value::Int(bytes.into()));
+        }
         limits.insert(
             String::from("max_payload"),
             Value::Int(self.limits.max_payload.into()),

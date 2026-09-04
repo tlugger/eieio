@@ -195,8 +195,13 @@ impl From<crate::engine::EngineError> for DeliveryFailure {
 /// ABI §6.2 fixes three refusals as *not* host-defined — a guest that heard a different code
 /// from two hosts could not be written against either — so they are decided here rather than
 /// in whichever host is doing the emitting. What remains a host's own business is everything
-/// after: where the batch goes, whether the queue has room, and what backpressure means
-/// (SCOPE §3.4, still OPEN).
+/// after: where the batch goes and what backpressure means (SCOPE §3.4, still OPEN).
+///
+/// Whether the queue has room is the one that used to be on that list and is not any more.
+/// It is still each host's *number* — a leaf bounds a callback's emissions at 4 096 bytes
+/// (LEAF §4.3) and a daemon bounds them not at all — but it is one implementation of the
+/// check, here, because the alternative was a leaf writing a second `emit` that host-core
+/// already owns (ABI §9.7 rule 9, LEAF §2's MUST-NOT list).
 ///
 /// The two steps are two types because §6.2 fixes their *order* as well: the port and the
 /// length are checked before the host reads a byte of the payload. A host that read first
@@ -212,12 +217,20 @@ impl Outbound {
     /// Checks an emission's port and length (ABI §6.2, §9.7).
     ///
     /// `outputs` is how many output ports the instance declares; `PORT_ERR` is accepted
-    /// besides, because every block has it without declaring it (ABI §6.4).
+    /// besides, because every block has it without declaring it (ABI §6.4). `held` is how
+    /// many payload bytes this callback has already had accepted and not yet had drained —
+    /// what ABI §9.7 rule 9 bounds, and the only argument here that is not about *this*
+    /// emission.
+    ///
+    /// The two length checks are deliberately in this order and both after the port: an
+    /// emission too big to ever fit is answered as such whether or not the queue happens to
+    /// have room, so a block shrinking its batch is not chasing a limit that moves.
     pub const fn accept(
         port: u32,
         len: u32,
         outputs: u32,
         limits: Limits,
+        held: u32,
     ) -> Result<Outbound, ErrorCode> {
         if port != crate::PORT_ERR && port >= outputs {
             // ABI §8: a bad index.
@@ -226,6 +239,15 @@ impl Outbound {
         if len > limits.max_payload {
             // ABI §9.7: "host rejects `emit` beyond it with ERR_LIMIT".
             return Err(ErrorCode::Limit);
+        }
+        if let Some(budget) = limits.max_emission_bytes {
+            // Saturating, because the sum is a `u32` and the answer past four gigabytes is
+            // the same refusal either way.
+            if held.saturating_add(len) > budget {
+                // ABI §9.7 rule 9, which is §6.2's "queue full … is a status code to the
+                // emitter" given a number the descriptor publishes.
+                return Err(ErrorCode::Limit);
+            }
         }
         Ok(Outbound { port })
     }

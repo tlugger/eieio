@@ -79,8 +79,8 @@ fn the_bound_a_budgets_carries_is_the_one_decode_applies() {
     // The half a constructor test cannot reach: that the number travels to the boundary.
     // A batch nested past the reference bound is refused under the default budgets and
     // accepted under budgets whose expression depth demanded room for it.
-    let limits = Limits::new(4096, 8);
-    let accept = || Outbound::accept(0, 8, 1, limits).expect("port 0 of 1");
+    let limits = Limits::new(4096, 8, None);
+    let accept = || Outbound::accept(0, 8, 1, limits, 0).expect("port 0 of 1");
 
     let deep = nested(MAX_DEPTH + 10);
     assert_eq!(
@@ -106,9 +106,9 @@ fn the_bound_a_budgets_carries_is_the_one_decode_applies() {
 #[test]
 fn a_batch_within_the_bound_still_decodes() {
     // The accepting side, so the tests above cannot pass by refusing everything.
-    let limits = Limits::new(4096, 8);
+    let limits = Limits::new(4096, 8, None);
     let shallow = nested(4);
-    let batch = Outbound::accept(0, 8, 1, limits)
+    let batch = Outbound::accept(0, 8, 1, limits, 0)
         .expect("port 0 of 1")
         .decode(&shallow, ExprBudgets::DEFAULT)
         .expect("four levels is well within any conforming bound");

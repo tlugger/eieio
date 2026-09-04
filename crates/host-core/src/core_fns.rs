@@ -190,6 +190,11 @@ struct Shared<C, R> {
     clock: C,
     entropy: R,
     emissions: Vec<Emission>,
+    /// Payload bytes accepted into `emissions` since the last drain (ABI §9.7 rule 9). Not
+    /// derived from `emissions` on demand, because what the rule bounds is the *wire* bytes
+    /// the guest handed over and what the queue holds is the decoded batch — LEAF §4.3
+    /// measured those differing by between 1.19× and 22.1×.
+    held: u32,
     logs: Vec<LogLine>,
     details: Vec<Detail>,
 }
@@ -236,6 +241,7 @@ impl<C: ClockSource, R: Entropy> Core<C, R> {
                 clock,
                 entropy,
                 emissions: Vec::new(),
+                held: 0,
                 logs: Vec::new(),
                 details: Vec::new(),
             })),
@@ -300,8 +306,16 @@ impl<C: ClockSource, R: Entropy> Core<C, R> {
     ///
     /// Drained rather than read: an emission a driver checked twice would be a duplicated
     /// signal.
+    ///
+    /// **This is also where ABI §9.7 rule 9's emission budget resets.** The bytes the host
+    /// was holding on the guest's behalf are no longer held once they are handed over, so a
+    /// driver that drains after every callback — which ABI §6.2 requires of every host,
+    /// since routing happens after the callback returns — gives the guest a whole budget per
+    /// callback without being asked to announce one.
     pub fn take_emissions(&self) -> Vec<Emission> {
-        core::mem::take(&mut self.shared.borrow_mut().emissions)
+        let mut shared = self.shared.borrow_mut();
+        shared.held = 0;
+        core::mem::take(&mut shared.emissions)
     }
 
     /// The lines logged since the last drain.
@@ -339,14 +353,28 @@ impl<C: ClockSource, R: Entropy> Core<C, R> {
     /// Which emissions are refused, and with which code, is [`Outbound`]'s: §6.2 fixes
     /// those three answers as *not* host-defined, so a second statement of them here would
     /// be exactly the divergence this module exists to prevent.
+    ///
+    /// This function keeps the one number `Outbound` cannot compute for itself: `held`, the
+    /// payload bytes already accepted and not yet drained, which ABI §9.7 rule 9 bounds. It
+    /// counts **accepted** bytes — an emission refused for its port or its encoding is not
+    /// held, so it is not charged — and it is cleared by
+    /// [`take_emissions`](Self::take_emissions), which is what makes the bound *per
+    /// callback* without a host having to remember to say when a callback begins: ABI §6.2
+    /// routes after every callback returns, so the drain is the callback boundary. A host
+    /// that drained less often would bound its guests more tightly, never less.
     fn emit(&self, call: HostCall<'_>) -> Ret {
         let [Arg::I32(port), Arg::I32(ptr), Arg::I32(len)] = *call.args else {
             return Ret::I32(ErrorCode::InvalidArg.as_i32());
         };
         let mut shared = self.shared.borrow_mut();
         let emit = || {
-            let accepted =
-                Outbound::accept(port as u32, len as u32, shared.outputs, shared.limits)?;
+            let accepted = Outbound::accept(
+                port as u32,
+                len as u32,
+                shared.outputs,
+                shared.limits,
+                shared.held,
+            )?;
             // Only now is the payload read: `Outbound` has no other way in, so the length
             // check cannot be skipped (ABI §6.2).
             let bytes = call
@@ -360,6 +388,7 @@ impl<C: ClockSource, R: Entropy> Core<C, R> {
         };
         match emit() {
             Ok(emission) => {
+                shared.held = shared.held.saturating_add(len as u32);
                 shared.emissions.push(emission);
                 Ret::I32(0)
             }
@@ -499,12 +528,17 @@ mod tests {
         }
     }
 
-    /// An instance with two output ports, room for one 64-byte payload, and no properties.
-    const LIMITS: Limits = Limits::new(64, 8);
+    /// An instance with two output ports, room for one 64-byte payload, an unbounded
+    /// emission queue, and no properties.
+    const LIMITS: Limits = Limits::new(64, 8, None);
 
     fn core() -> Core<Clock, FakeEntropy> {
+        core_with(LIMITS)
+    }
+
+    fn core_with(limits: Limits) -> Core<Clock, FakeEntropy> {
         Core::new(
-            LIMITS,
+            limits,
             ExprBudgets::DEFAULT,
             2,
             Clock::default(),
@@ -563,6 +597,72 @@ mod tests {
         assert_eq!(emissions[0].port, 1);
         assert_eq!(emissions[0].batch.len(), 1);
         assert!(core.take_emissions().is_empty());
+    }
+
+    /// CBOR `[{"a": 1}]` — five bytes, the batch the emission-budget tests emit repeatedly.
+    const FIVE: &[u8] = &[0x81, 0xa1, 0x61, 0x61, 0x01];
+
+    /// Emits [`FIVE`] on port 1 and answers what the guest would see.
+    fn emit_five(core: &Core<Clock, FakeEntropy>) -> Ret {
+        let mut mem = Bytes(FIVE.to_vec());
+        core.emit(HostCall {
+            args: &args(&[1, 0, FIVE.len() as i32]),
+            memory: &mut mem,
+        })
+    }
+
+    #[test]
+    fn emit_refuses_past_the_callback_emission_budget() {
+        // ABI §9.7 rule 9: twelve bytes of budget takes two five-byte batches and refuses
+        // the third, which would make fifteen. `ERR_LIMIT` is a status code, so the
+        // instance lives (ABI §8) and the two accepted batches are still queued.
+        let core = core_with(Limits::new(64, 8, Some(12)));
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(emit_five(&core), Ret::I32(ErrorCode::Limit.as_i32()));
+        assert_eq!(core.take_emissions().len(), 2);
+    }
+
+    #[test]
+    fn the_emission_budget_is_per_callback_and_the_drain_is_the_boundary() {
+        // ABI §6.2 routes after the callback returns, so draining is what a callback
+        // boundary looks like from here: the next callback gets the whole budget again.
+        let core = core_with(Limits::new(64, 8, Some(12)));
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(core.take_emissions().len(), 2);
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(core.take_emissions().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_emission_is_not_charged_against_the_budget() {
+        // The budget bounds what the host *holds*, so bytes it never enqueued cost nothing:
+        // a batch refused for its port leaves room for the batch that follows it.
+        let core = core_with(Limits::new(64, 8, Some(10)));
+        let mut mem = Bytes(FIVE.to_vec());
+        assert_eq!(
+            core.emit(HostCall {
+                args: &args(&[9, 0, FIVE.len() as i32]),
+                memory: &mut mem,
+            }),
+            Ret::I32(ErrorCode::InvalidArg.as_i32())
+        );
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(emit_five(&core), Ret::I32(0));
+        assert_eq!(core.take_emissions().len(), 2);
+    }
+
+    #[test]
+    fn no_emission_budget_means_no_refusal() {
+        // A host that publishes `None` bounds nothing: `LIMITS`'s 64-byte `max_payload`
+        // still applies per emission, and twenty of them in one callback are all accepted.
+        let core = core();
+        for _ in 0..20 {
+            assert_eq!(emit_five(&core), Ret::I32(0));
+        }
+        assert_eq!(core.take_emissions().len(), 20);
     }
 
     #[test]

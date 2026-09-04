@@ -197,10 +197,14 @@ The CBOR document passed to `eio_configure`. Properties are NOT included (they a
   "props":   [tstr],            ; property names; index in array = prop_id
   "limits": {
     "max_payload": uint,        ; largest (ptr,len) the host will accept or deliver
-    "max_batch": uint           ; largest signal count in a DELIVERED batch
+    "max_batch": uint,          ; largest signal count in a DELIVERED batch
+    ? "max_emission_bytes": uint ; OPTIONAL. largest total payload `emit` accepts within
+                                 ; one callback (§9.7 rule 9)
   }
 }
 ```
+
+`max_emission_bytes` is **absent, not zero and not a sentinel**, on a host that does not bound what one callback may emit: `0` would read as "emit nothing", and a maximal integer would be a number every block has to be told means something else. Absence is therefore a statement — this host will not refuse an emission for the queue's sake — and it is the only optional key in the document.
 
 Port and property indices are fixed for the life of the instance. Blocks resolve names to indices once, in configure; all runtime calls use indices (MCUs do not hash strings per signal).
 
@@ -220,7 +224,7 @@ Guest, inside any callback: encode CBOR batch into guest memory → `emit(output
 
 - Emitting N batches to M downstream instances cannot recurse into this instance or any other mid-call.
 - Backpressure, fan-out duplication, cross-node publication, and signal tapping (SCOPE §3.12) are host concerns invisible to the guest.
-- `emit` failure (queue full / payload too large) is a status code to the _emitter_, policy is host-defined (OPEN: backpressure, SCOPE §3.4).
+- `emit` failure (queue full / payload too large) is a status code to the _emitter_, policy is host-defined (OPEN: backpressure, SCOPE §3.4). **"Queue full" has a number and the descriptor publishes it**: `max_emission_bytes` (§9.7 rule 9). Host-defined means the host chooses the size, not that a block cannot find out what it is — a limit a conforming payload can hit, invisible to the block that hits it, is the divergence §13 exists to prevent.
 
 Three refusals are **not** host-defined, because a guest that hears a different code from two hosts cannot be written against either:
 
@@ -402,6 +406,13 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 6. Alignment: `eio_alloc` MUST return 8-byte-aligned pointers. A pointer that is misaligned, zero-but-nonzero-length, or outside linear memory is a *different* matter from a refusal: the guest has told the host something untrue about its own memory, nothing the host does next is trustworthy, and the instance MUST be discarded.
 7. `max_payload` (instance descriptor): host rejects `emit` beyond it with `ERR_LIMIT` and never delivers batches beyond it. Discoverable, so MCU limits are visible to blocks and to deploy-time validation. Both it and `max_batch` are host configuration with **no floor**: a block reads them from its descriptor and may assume nothing about their size (SCOPE §3.4 OPEN).
 8. `max_batch` bounds the batches a host **delivers** to a guest, and only those. It does **not** bound emission: a block MAY emit a batch carrying more signals than `max_batch`, and the host routes it. §6.2's three refusals stay the whole list — a fourth would make the one answer §6.2 fixes vary by host, and a guest-side check would report a code no host produced. The asymmetry is deliberate: `max_payload` is about bytes the host must hold, which it must refuse in both directions, while a signal *count* costs the host nothing on the way out. Pinned by `30_emit_exceeds_max_batch`.
+9. `max_emission_bytes` (instance descriptor, OPTIONAL) bounds the payload bytes a host accepts from `emit` **within one callback**. It is §6.2's "queue full" given a number: `emit` enqueues rather than delivers, so everything a callback emits is held by the host until the callback returns and routing happens, and this is the bound on what is held. Past it a host MUST answer `ERR_LIMIT`, and the instance **lives** — a status code, never a death (§8). Only *accepted* payloads count against it (a refused emission is not held, so it is not charged), and the count starts again at every callback. Four things follow, and the last is the one a block author has to hold:
+    - **It is not a fourth entry in §6.2's fixed table.** That table is the refusals whose *occurrence* cannot vary by host; this one is the host-defined policy §6.2 already licenses, and what the ABI fixes about it is the code (`ERR_LIMIT`) and the fact that the number is published. Rule 8 is untouched: `max_batch` still does not bound emission.
+    - **It is a bound on wire bytes, not on host memory, and MUST NOT be read as one.** A batch's decoded footprint expands over its CBOR length by a factor no length predicts — measured between 1.19× and 22.1× (LEAF §4.3) — so a host holding batches on a fixed heap needs a reservation before it decodes as well as this bound, and this rule does not supply it.
+    - **Host configuration with no floor**, like the other two: a block may assume nothing about its size (SCOPE §3.4 OPEN). A host that bounds emission publishes the number in its descriptor; a host that does not publishes no key (§5.2).
+    - **A block MUST NOT assume the bound is absent.** A callback that emits 10 KiB succeeds where nothing bounds it and is refused on a leaf publishing 4 096 (LEAF §4.3). The block sees `ERR_LIMIT`, which is exactly the answer §10 already tells it what to do about: long work is chunked via timers.
+
+    Pinned by `33_emission_budget`, on every host the suite runs.
 
 ---
 
@@ -537,6 +548,7 @@ One consequence follows from EXPR rather than from anything here: the expression
 - `eio_abi_version() -> i32` returns `(major << 16) | minor`. This document specifies **1.0**.
 - Host policy: reject `major` mismatch; accept `minor` ≤ host's minor (pure-additive guarantee).
 - Additive changes (new host namespaces/functions, new optional exports, new error codes): minor bump. Old blocks never import the new functions, so nothing breaks.
+- An **optional instance-descriptor key whose absence is meaningful** (§5.2's `max_emission_bytes`) is not even that: a host that omits it is saying the thing a host without the key would have meant, and a block that never looks for it reads the same document it always did. So it is additive without a bump, and this document is still **1.0**. A key whose absence had *no* meaning would be a different matter — a block could not tell "not bounded" from "not told" — and would need one.
 - Changes to memory rules, lifecycle, calling conventions, sentinels, or the status convention: major bump.
 - The manifest's `abi` field MUST match the module's exported version; hosts MAY reject on mismatch (the module is authoritative).
 

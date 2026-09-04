@@ -442,7 +442,7 @@ pub fn descriptor() -> eio_host_core::Descriptor {
         inputs: vec![String::from("in")],
         outputs: vec![String::from("true"), String::from("false")],
         props: vec![String::from("threshold"), String::from("reading")],
-        limits: eio_host_core::Limits::new(64 * 1024, 256),
+        limits: eio_host_core::Limits::new(64 * 1024, 256, None),
     }
 }
 
