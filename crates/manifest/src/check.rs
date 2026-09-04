@@ -47,7 +47,7 @@
 //! claim against host policy, which is check 8.
 
 use crate::abi::{CORE_FUNCTIONS, CORE_NAMESPACE, MEMORY_EXPORT, REQUIRED_EXPORTS};
-use crate::error::ModuleError;
+use crate::error::{MemoryBound, ModuleError};
 use crate::module::{ExportKind, Module};
 use crate::parse;
 use crate::portable::Downstream;
@@ -114,28 +114,42 @@ pub struct Admission {
     /// A parameter because acceptance is host policy: a leaf runtime may implement a lower
     /// minor than the daemon on the same System.
     pub abi: Abi,
-    /// The per-instance ceiling on a module's declared **minimum** linear memory, in 64 KiB
-    /// pages (§4.1).
+    /// The per-instance ceiling on a module's declared linear memory, in 64 KiB pages
+    /// (§4.1) — **both ends of the declaration, judged against one number.**
+    ///
+    /// One number because it answers one question: how many pages this host will give an
+    /// instance. A module's declared *minimum* must not exceed it, or the instance cannot be
+    /// created at all; a module's declared *maximum* must not exceed it either, or the host
+    /// would be admitting a module that has said it will grow past what the host has. §4.1
+    /// forbids the alternative in both directions with one sentence — a host MUST NOT grant
+    /// less than the module declared — so two ceilings would be two ways to spell one policy
+    /// and a third way to get it wrong.
     ///
     /// `None` on a host that bounds nothing here, which is the daemon's answer (DAEMON §4)
     /// and the one every caller with no fixed heap wants. `Some(pages)` refuses a module
-    /// declaring more, as [`ModuleError::MemoryCeiling`] — a load-time refusal, never a trap
-    /// and never a silent grant of less. LEAF §4.2 supplies one page for its v1 target.
-    pub max_pages: Option<u64>,
+    /// declaring more at either end, as [`ModuleError::MemoryCeiling`] — a load-time refusal,
+    /// never a trap and never a silent grant of less. LEAF §4.2 supplies one page for its v1
+    /// target.
+    ///
+    /// **It does not bound a module that declares no maximum**, which is every block
+    /// `cargo eio build` produces (SDK §5.2, [`Module::max_pages`](crate::Module::max_pages)).
+    /// Nothing readable from the bytes bounds that one, so §4.1 leaves it to the engine and
+    /// a host that needs it bounded caps it there — LEAF §4.2 for the leaf's answer.
+    pub page_ceiling: Option<u64>,
 }
 
 impl Admission {
     /// This host's ABI (§12) and no ceiling on declared linear memory (§4.1).
     pub const CURRENT: Admission = Admission {
         abi: Abi::CURRENT,
-        max_pages: None,
+        page_ceiling: None,
     };
 
     /// The same policy with a per-instance page ceiling (§4.1).
     #[must_use]
-    pub const fn with_max_pages(self, pages: u64) -> Admission {
+    pub const fn with_page_ceiling(self, pages: u64) -> Admission {
         Admission {
-            max_pages: Some(pages),
+            page_ceiling: Some(pages),
             ..self
         }
     }
@@ -160,15 +174,33 @@ fn validate_with(
 ) -> Result<Manifest, ModuleError> {
     let module = Module::read_portable(wasm, downstream)?;
 
-    // Check 1, ABI §4.1: the memory an instantiation would have to supply, against the
+    // Check 1, ABI §4.1: the memory this module has declared, at both ends, against the
     // ceiling this host admits under. Beside check 0 because it is the other one that needs
-    // no manifest, and here rather than in a caller because the number was read in the walk
-    // above — a host that had to fetch it itself is a host that can do §4.3's cross-check and
-    // forget this one, which is exactly the divergence §4.1 exists to close.
-    if let (Some(ceiling), Some(declared)) = (admission.max_pages, module.min_pages)
-        && declared > ceiling
-    {
-        return Err(ModuleError::MemoryCeiling { declared, ceiling });
+    // no manifest, and here rather than in a caller because the numbers were read in the walk
+    // above — a host that had to fetch them itself is a host that can do §4.3's cross-check
+    // and forget this one, which is exactly the divergence §4.1 exists to close.
+    //
+    // The minimum is what an instantiation must be able to supply and the maximum is what it
+    // must be able to honour, and §4.1 refuses both for the same reason: granting less than
+    // the module declared fails at whatever allocation first crosses a line the guest was
+    // never told about. The minimum is checked first because a module over the ceiling at
+    // both ends is one whose *minimum* a deployer has to fix first — a message naming the
+    // maximum there would send them to the wrong knob.
+    if let Some(ceiling) = admission.page_ceiling {
+        for (bound, declared) in [
+            (MemoryBound::Minimum, module.min_pages),
+            (MemoryBound::Maximum, module.max_pages),
+        ] {
+            if let Some(declared) = declared
+                && declared > ceiling
+            {
+                return Err(ModuleError::MemoryCeiling {
+                    bound,
+                    declared,
+                    ceiling,
+                });
+            }
+        }
     }
 
     let manifest = effective_manifest(&module, registry)?;

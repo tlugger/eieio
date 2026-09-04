@@ -424,6 +424,15 @@ have, since a host that cares about growth must cap it itself; a maximum a modul
 about its own appetite is not a constraint a host may take on trust. So: the minimum is the
 SDK's to keep small, the maximum is the host's to enforce.
 
+**That last clause is now load-bearing rather than rhetorical**, and it is worth knowing what
+each host does with it. LEAF §4.2's leaf enforces it at the engine: a block that declares no
+maximum is capped at the leaf's per-instance reserve, and `eio_alloc` starts returning 0 past
+it — exactly the `ERR_LIMIT` outcome the paragraph above describes, and no trap. A daemon
+enforces nothing (DAEMON §4). Both are conforming (ABI §4.1). What has not changed is the
+reason the SDK still sets no `--max-memory`: a block that declared one would be *refused* by a
+leaf whose reserve is smaller rather than capped, since §4.1 forbids granting an instance less
+than it declared — so the flag would convert a block that runs into a block that does not.
+
 **No feature flags of any kind are passed.** ABI §4.3's accepted set is exactly what rustc
 emits by default; the flag earlier drafts required here was measured to do nothing. Note
 *emits*, not *enables*: rustc turns on six whole proposals and §4.3 accepts two of them only

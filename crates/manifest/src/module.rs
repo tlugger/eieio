@@ -121,8 +121,8 @@ pub struct Module<'a> {
     /// for the module runs it. It is the one number about a module a memory-constrained
     /// host has to know *before* it decides whether it can run it.
     ///
-    /// The *minimum*, because that is what an instantiation has to be able to satisfy; a
-    /// declared maximum only bounds growth, which ABI §4.1 leaves to the engine.
+    /// The *minimum*, because that is what an instantiation has to be able to satisfy. What
+    /// bounds the other end is [`max_pages`](Module::max_pages).
     ///
     /// **The judgement belongs to [`crate::validate_against`]**, which takes the ceiling as
     /// part of [`crate::Admission`] and refuses the module in the same walk that reads this
@@ -134,6 +134,27 @@ pub struct Module<'a> {
     /// A module declaring a second memory is refused by [`crate::portable`] long before
     /// anything reads this, so only the first is recorded.
     pub min_pages: Option<u64>,
+    /// The declared **maximum** size, in 64 KiB pages, of that same memory — the bound
+    /// `memory.grow` runs into, enforced by the engine and not by any code here (§4.1).
+    ///
+    /// **`None` is the ordinary case and not an edge one.** `wasm-ld` emits no maximum
+    /// unless asked, so all five of ABI §13.2's golden blocks declare `(memory 1)` with
+    /// nothing on the right, and SDK §5.2 leaves it that way deliberately: a maximum is a
+    /// limit on `memory.grow`, and setting one in the SDK would encode a budget only the
+    /// leaf tier has into every block the daemon tier runs. What `None` means to an engine
+    /// is the WASM default of 65 536 pages — 4 GiB — which is to say nothing at all.
+    ///
+    /// So the two fields answer different questions and a host needs both. `min_pages` is
+    /// what an instantiation must be able to *supply*; this is what it must be able to
+    /// *honour*, because a host whose ceiling is one page cannot admit a module that has
+    /// said it will grow to four. §4.1 makes both refusals the same refusal — a host MUST
+    /// NOT grant less than the module declared at either end — and
+    /// [`crate::validate_against`] judges them together against one
+    /// [`Admission::page_ceiling`](crate::Admission::page_ceiling).
+    ///
+    /// A host that bounds the growth of a module declaring `None` here does it at the
+    /// engine, which is where §4.1 puts it and where LEAF §4.2's leaf does it.
+    pub max_pages: Option<u64>,
 }
 
 impl<'a> Module<'a> {
@@ -172,6 +193,7 @@ impl<'a> Module<'a> {
         let mut exports: Vec<Export<'a>> = Vec::new();
         let mut manifest_section = None;
         let mut min_pages = None;
+        let mut max_pages = None;
 
         // Signatures by type index, and the type index of every function. Imported
         // functions occupy the function index space *before* defined ones, so an
@@ -239,7 +261,10 @@ impl<'a> Module<'a> {
                         // accepted set, so a second declaration is a module no host
                         // loads. Recorded before that judgement rather than after,
                         // so the plain reader answers too.
-                        min_pages.get_or_insert(memory.initial);
+                        if min_pages.is_none() {
+                            min_pages = Some(memory.initial);
+                            max_pages = memory.maximum;
+                        }
                         if policy.is_some() {
                             portable::memory_declaration(&memory)?;
                         }
@@ -298,6 +323,7 @@ impl<'a> Module<'a> {
             exports,
             manifest_section,
             min_pages,
+            max_pages,
         })
     }
 

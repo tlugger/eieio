@@ -272,6 +272,29 @@ impl From<serde_json::Error> for Error {
     }
 }
 
+/// Which end of a module's memory declaration a [`ModuleError::MemoryCeiling`] is about
+/// (ABI §4.1).
+///
+/// The two are refused for the same reason and produce different advice, which is why the
+/// refusal carries this rather than being two variants that would drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryBound {
+    /// The memory an instantiation must be able to *supply* before any guest code runs.
+    Minimum,
+    /// The memory an instantiation must be able to *honour*, because `memory.grow` may take
+    /// the instance there and the engine will let it.
+    Maximum,
+}
+
+impl fmt::Display for MemoryBound {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemoryBound::Minimum => f.write_str("minimum"),
+            MemoryBound::Maximum => f.write_str("maximum"),
+        }
+    }
+}
+
 /// Why a module cannot be loaded (ABI-SPEC §4, §12).
 ///
 /// Separate from [`Error`] because it answers a different question for a different
@@ -467,14 +490,20 @@ pub enum ModuleError {
     /// no manifest has no ports, no properties, and no declared capabilities.
     NoManifest,
 
-    /// The module's declared minimum linear memory exceeds the per-instance page ceiling
-    /// this host admits under (§4.1).
+    /// The module's declared linear memory exceeds, at one end or the other, the per-instance
+    /// page ceiling this host admits under (§4.1).
     ///
     /// A load-time refusal and never a trap: the instance is never created, so there is
-    /// nothing to kill. A host that bounds nothing here (`Admission::max_pages` of `None`,
+    /// nothing to kill. A host that bounds nothing here (`Admission::page_ceiling` of `None`,
     /// which is the daemon's answer) never produces this.
+    ///
+    /// [`MemoryBound`] says which end, and it decides which knob a deployer reaches for: a
+    /// minimum over the ceiling is the shadow stack (SDK §5.2), a maximum over it is a
+    /// `--max-memory` the block chose for itself.
     MemoryCeiling {
-        /// The minimum the module declares, in 64 KiB pages.
+        /// Which end of the module's memory declaration crossed the ceiling.
+        bound: MemoryBound,
+        /// The size the module declares at that end, in 64 KiB pages.
         declared: u64,
         /// The ceiling this host admits under, in the same unit.
         ceiling: u64,
@@ -579,10 +608,18 @@ impl fmt::Display for ModuleError {
                 f,
                 "no manifest: the module has no eio:manifest section and none was supplied",
             ),
-            ModuleError::MemoryCeiling { declared, ceiling } => write!(
+            ModuleError::MemoryCeiling {
+                bound,
+                declared,
+                ceiling,
+            } => write!(
                 f,
-                "the module declares a minimum linear memory of {declared} page(s), {} KiB, and this host admits {ceiling} page(s), {} KiB (§4.1)",
+                "the module declares a {bound} linear memory of {declared} page(s), {} KiB, {}, and this host admits {ceiling} page(s), {} KiB (§4.1)",
                 declared.saturating_mul(64),
+                match bound {
+                    MemoryBound::Minimum => "which an instantiation would have to supply",
+                    MemoryBound::Maximum => "which it may grow to",
+                },
                 ceiling.saturating_mul(64),
             ),
             ModuleError::UnacceptableAbi { module, host } => write!(

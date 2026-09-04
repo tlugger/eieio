@@ -5,7 +5,7 @@
 //! differs from `valid.wat` by exactly one flaw is legible as such.
 
 use eio_manifest::{
-    Abi, Admission, Capability, ExportKind, MANIFEST_SECTION, Module, parse, validate,
+    Abi, Admission, Capability, ExportKind, MANIFEST_SECTION, MemoryBound, Module, parse, validate,
     validate_against,
 };
 
@@ -100,7 +100,7 @@ fn minor_version_acceptance() {
 
     let older = Admission {
         abi: Abi { major: 1, minor: 5 },
-        max_pages: None,
+        page_ceiling: None,
     };
     assert_eq!(
         validate_against(&module, None, older).map(|m| m.abi).ok(),
@@ -188,20 +188,24 @@ fn declared_memory_is_admitted_against_the_hosts_ceiling() {
     let one = wasm("minimal.wat");
 
     assert_eq!(
-        Module::read(&two).unwrap().min_pages,
-        Some(2),
-        "the fixture is the one that declares two pages",
+        (
+            Module::read(&two).unwrap().min_pages,
+            Module::read(&two).unwrap().max_pages
+        ),
+        (Some(2), None),
+        "the fixture is the one that declares two pages and no maximum",
     );
 
     // A host that bounds nothing here refuses nothing here — the daemon's answer, and the
     // default a caller gets without asking (DAEMON §4).
     validate(&two, None).expect("a host with no ceiling admits a two-page module");
 
-    let leaf = Admission::CURRENT.with_max_pages(1);
+    let leaf = Admission::CURRENT.with_page_ceiling(1);
     assert!(
         matches!(
             validate_against(&two, None, leaf),
             Err(eio_manifest::ModuleError::MemoryCeiling {
+                bound: MemoryBound::Minimum,
                 declared: 2,
                 ceiling: 1,
             }),
@@ -214,6 +218,68 @@ fn declared_memory_is_admitted_against_the_hosts_ceiling() {
     // a deployer cannot act on.
     let detail = validate_against(&two, None, leaf).unwrap_err().to_string();
     assert!(detail.contains("2 page(s)"), "{detail}");
+    assert!(detail.contains("1 page(s)"), "{detail}");
+    assert!(
+        detail.contains("minimum"),
+        "which end it was about: {detail}"
+    );
+}
+
+/// ABI §4.1's other end: a module whose declared **maximum** is over the ceiling is refused in
+/// the same place and the same sense, because a host cannot honour it.
+///
+/// The distinction the fixture pair makes is the whole point. `two_pages.wat` asks for memory
+/// the host would have to *supply* before the instance exists; `four_page_max.wat` fits a
+/// one-page host at instantiation and would leave it at the first `memory.grow`. Capping it
+/// instead — which is what an engine given a smaller number does, silently — is §4.1's
+/// forbidden "granting less than the module declared", so the answer is the same refusal.
+///
+/// A module declaring **no** maximum is not refused here and cannot be: it has stated nothing,
+/// and bounding it is the engine's (§4.1). Every block `cargo eio build` produces is one of
+/// those, which is why the two halves are not alternatives.
+#[test]
+fn a_declared_maximum_over_the_ceiling_is_refused_too() {
+    let four = wasm("four_page_max.wat");
+    let one = wasm("minimal.wat");
+
+    let module = Module::read(&four).unwrap();
+    assert_eq!(
+        (module.min_pages, module.max_pages),
+        (Some(1), Some(4)),
+        "the fixture declares one page and a maximum of four",
+    );
+    assert_eq!(
+        Module::read(&one).unwrap().max_pages,
+        None,
+        "and the ordinary case declares no maximum at all, which is what every block the SDK          builds looks like (SDK §5.2)",
+    );
+
+    // A host that bounds nothing bounds neither end.
+    validate(&four, None).expect("a host with no ceiling admits it");
+
+    let leaf = Admission::CURRENT.with_page_ceiling(1);
+    assert!(
+        matches!(
+            validate_against(&four, None, leaf),
+            Err(eio_manifest::ModuleError::MemoryCeiling {
+                bound: MemoryBound::Maximum,
+                declared: 4,
+                ceiling: 1,
+            }),
+        ),
+        "a one-page host refuses a module that may grow to four (ABI §4.1)",
+    );
+
+    // One ceiling, both ends: a module whose maximum fits is admitted, and the number that
+    // admitted it is the same number that refused the one above.
+    let roomy = Admission::CURRENT.with_page_ceiling(4);
+    validate_against(&four, None, roomy).expect("a four-page host admits a four-page maximum");
+
+    // The refusal says which end, because the two have different fixes: a minimum over the
+    // ceiling is `wasm-ld`'s shadow stack, a maximum over it is the block's own `--max-memory`.
+    let detail = validate_against(&four, None, leaf).unwrap_err().to_string();
+    assert!(detail.contains("maximum"), "{detail}");
+    assert!(detail.contains("4 page(s)"), "{detail}");
     assert!(detail.contains("1 page(s)"), "{detail}");
 }
 
