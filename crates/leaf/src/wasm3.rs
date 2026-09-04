@@ -1,15 +1,20 @@
 //! The wasm3 binding of `eio_host_core::Engine` (LEAF-SPEC §3).
 //!
-//! LEAF §3 names wasm3 and WAMR's interpreter as the two engines a bring-up may use — AOT is
-//! explicitly out of scope here, blocked on a `wamrc` toolchain this machine cannot build
-//! (`eieio-7d8.21`). wasm3 was chosen over WAMR's interpreter for one concrete reason: its
-//! Rust binding (`wasm3x`) hands a host function closure the calling `Caller`, while WAMR's
-//! safe wrapper (`wamrx`) does not — `crates/conformance/Cargo.toml`'s note on `wamrx-sys`
-//! explains why that makes `wamrx` unusable as an ABI §7 host at all (every function that
-//! touches guest memory needs the calling instance, and `wamrx`'s `Linker` closures never see
-//! it). `wasm3x`'s API is the one already proven against this ABI in
+//! LEAF §3 names wasm3 and WAMR's interpreter as the two engines a leaf may use — AOT is
+//! explicitly out of scope for both, blocked on a `wamrc` toolchain this machine cannot build
+//! (`eieio-7d8.21`). wasm3 was written first for one concrete reason: its Rust binding
+//! (`wasm3x`) hands a host function closure the calling `Caller`, while WAMR's safe wrapper
+//! (`wamrx`) does not, so this file needs no `unsafe` at all where [`crate::wamr`] needs raw
+//! FFI throughout (that module's docs say exactly which published-crate gap forces it).
+//! `wasm3x`'s API is the one already proven against this ABI in
 //! `crates/conformance/tests/wasm3.rs`, and this binding is that file's shape with the
 //! conformance-suite-specific parts removed.
+//!
+//! [`crate::wamr`] is the other binding, and the two are peers rather than a choice already
+//! made: LEAF §9's three suites run against each, and a difference between them is a finding
+//! rather than a footnote. The one that exists today is ABI §4.3's carved-out remainder —
+//! wasm3 refuses `table.copy` and its neighbours, WAMR runs them — and it is neutralised
+//! where every host shares it, in `eio_manifest::validate` (see [`crate::spawn`]).
 //!
 //! This module contains no ABI semantics of its own. It is exactly [`Engine`]'s four methods —
 //! call an export, read memory, write memory, register a host function — over wasm3's API, and
@@ -21,7 +26,7 @@ use eio_host_core::{
     Arg, Engine, EngineError, HostCall, HostFn, Memory as GuestMemory, Ret, Trap, TrapKind,
     memory_range,
 };
-use eio_manifest::{Capability, MEMORY_EXPORT};
+use eio_manifest::{CORE_IMPORTS, CORE_NAMESPACE, Capability, ImportSpec, MEMORY_EXPORT};
 use wasm3x::{
     Caller, CompilationMode, Config, FuncType, Instance, Linker, Module, Store, Val, ValType,
 };
@@ -237,35 +242,33 @@ fn abi_name(namespace: &str, name: &str) -> Option<(&'static str, &'static str)>
         .map(|known| (capability.namespace(), *known))
 }
 
-/// Every ABI §7 function's signature, as `(params, results)` — stated here because
-/// `wasm3x::func_new` wants a [`FuncType`] up front, before any handler exists to ask.
-fn signature(name: &str) -> (Vec<ValType>, Vec<ValType>) {
-    use ValType::{I32, I64};
-    let i32s = |n: usize| vec![I32; n];
-    match name {
-        "log" | "error" => (i32s(3), vec![]),
-        "emit" => (i32s(3), vec![I32]),
-        "prop" => (i32s(4), vec![I32]),
-        "time_unix_ms" | "time_mono_ms" => (vec![], vec![I64]),
-        "rand" => (i32s(2), vec![I32]),
-        "state_get" | "state_put" => (i32s(4), vec![I32]),
-        "state_del" => (i32s(2), vec![I32]),
-        "timer_set" => (vec![I64, I32], vec![I32]),
-        "timer_cancel" | "gpio_read" | "gpio_unwatch" => (i32s(1), vec![I32]),
-        "gpio_mode" | "gpio_write" | "gpio_watch" | "http_request" => (i32s(2), vec![I32]),
-        "i2c_write" | "i2c_read" => (i32s(4), vec![I32]),
-        "i2c_write_read" => (i32s(6), vec![I32]),
-        other => panic!("{other} is not an ABI §7 function"),
+/// One of `eio-manifest`'s published parameter/result types, as wasm3 spells it.
+///
+/// ABI §7 uses exactly two of core WASM's four; a signature in any other type is unreachable,
+/// and defining one under the wrong type would mean a link failure the caller cannot read.
+fn val_type(val_type: eio_manifest::ValType) -> ValType {
+    match val_type {
+        eio_manifest::ValType::I32 => ValType::I32,
+        eio_manifest::ValType::I64 => ValType::I64,
+        other => panic!("ABI §7 has no {} parameter or result", other.as_str()),
     }
 }
 
 /// Defines every ABI §7 function on `linker`, dispatching through the store's `funcs` map.
+///
+/// **The signatures are `eio-manifest`'s, not this file's**: `ImportSpec` exists so that a
+/// host binding building its linker reads §7's table rather than restating it (eieio-7d8.18,
+/// and that type's own docs say so), and `wasm3x::func_new` wants a [`FuncType`] up front,
+/// before any handler exists to ask. It is not a second copy of ABI §4.3's link-time check,
+/// which stays on the engine — this decides what to define, and wasm3 still refuses a module
+/// whose import does not match.
 fn link(linker: &mut Linker<State>) -> wasm3x::Result<()> {
-    use eio_host_core::exports::{core_fn, namespace as ns};
-
-    let mut define = |namespace: &'static str, name: &'static str| -> wasm3x::Result<()> {
-        let (params, results) = signature(name);
-        let ty = FuncType::new(params, results);
+    let mut define = |namespace: &'static str, spec: ImportSpec| -> wasm3x::Result<()> {
+        let name = spec.name;
+        let ty = FuncType::new(
+            spec.signature.params.iter().copied().map(val_type),
+            spec.signature.results.iter().copied().map(val_type),
+        );
         linker.func_new(
             namespace,
             name,
@@ -291,12 +294,12 @@ fn link(linker: &mut Linker<State>) -> wasm3x::Result<()> {
         Ok(())
     };
 
-    for name in core_fn::ALL {
-        define(ns::CORE, name)?;
+    for spec in CORE_IMPORTS {
+        define(CORE_NAMESPACE, spec)?;
     }
     for capability in Capability::ALL {
-        for name in capability.functions().iter().copied() {
-            define(capability.namespace(), name)?;
+        for spec in capability.imports().iter().copied() {
+            define(capability.namespace(), spec)?;
         }
     }
     Ok(())

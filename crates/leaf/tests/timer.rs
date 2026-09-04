@@ -13,11 +13,19 @@
 //! `pump` takes `now_ms` as a plain argument rather than reading a clock of its own (see its
 //! own docs), so this test advances time by choosing a later `now_ms` — no `sleep`, and no
 //! flakiness from how fast the machine running it happens to be.
+//!
+//! Both bodies run once per engine (eieio-x7g.2.5). `eio:timer` is the one ABI §7 namespace
+//! whose import takes an `i64` (`timer_set(delay_ms, id)`), and the two bindings carry that
+//! parameter through completely different machinery — a `wasm3x::FuncType` on one, a WAMR
+//! native signature *string* on the other — so "the scheduler works" is a claim worth making
+//! against each rather than against whichever engine happened to be linked.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use eio_host_core::{Connection, Delivering, Endpoint, Limits, Outcome, Port, Routes, Status};
+use eio_host_core::{
+    Connection, Delivering, Endpoint, Engine, Limits, Outcome, Port, Routes, Status,
+};
 use eio_leaf::{fixtures, spawn_host, timer};
 use eio_signal::Value;
 
@@ -27,17 +35,35 @@ use eio_signal::Value;
 const EMITTER_PERIOD_MS: i64 = 1_000;
 
 #[test]
-fn a_timer_fires_and_the_emission_routes_to_a_second_instance() {
+fn a_timer_fires_and_the_emission_routes_to_a_second_instance_on_wasm3() {
+    a_timer_fires_and_the_emission_routes_to_a_second_instance(eio_leaf::wasm3::instantiate);
+}
+
+#[test]
+fn a_timer_fires_and_the_emission_routes_to_a_second_instance_on_wamr() {
+    a_timer_fires_and_the_emission_routes_to_a_second_instance(eio_leaf::wamr::instantiate);
+}
+
+fn a_timer_fires_and_the_emission_routes_to_a_second_instance<E: Engine>(
+    instantiate: impl Fn(&[u8]) -> Result<E, String>,
+) {
     let emitter_wasm = fixtures::wasm("emitter");
     let transform_wasm = fixtures::wasm("transform");
 
     let limits = Limits::new(64 * 1024, 256);
     let empty = BTreeMap::new();
 
-    let emitter =
-        spawn_host(&emitter_wasm, "emitter", &empty, limits, None).expect("emitter spawns");
-    let transform =
-        spawn_host(&transform_wasm, "transform", &empty, limits, None).expect("transform spawns");
+    let emitter = spawn_host(&emitter_wasm, "emitter", &empty, limits, None, &instantiate)
+        .expect("emitter spawns");
+    let transform = spawn_host(
+        &transform_wasm,
+        "transform",
+        &empty,
+        limits,
+        None,
+        &instantiate,
+    )
+    .expect("transform spawns");
 
     let scheduler = emitter
         .timers
@@ -156,13 +182,28 @@ fn a_timer_fires_and_the_emission_routes_to_a_second_instance() {
 }
 
 #[test]
-fn a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found() {
+fn a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found_on_wasm3() {
+    a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found(
+        eio_leaf::wasm3::instantiate,
+    );
+}
+
+#[test]
+fn a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found_on_wamr() {
+    a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found(
+        eio_leaf::wamr::instantiate,
+    );
+}
+
+fn a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found<E: Engine>(
+    instantiate: impl Fn(&[u8]) -> Result<E, String>,
+) {
     let emitter_wasm = fixtures::wasm("emitter");
     let limits = Limits::new(64 * 1024, 256);
     let empty = BTreeMap::new();
 
-    let emitter =
-        spawn_host(&emitter_wasm, "emitter", &empty, limits, None).expect("emitter spawns");
+    let emitter = spawn_host(&emitter_wasm, "emitter", &empty, limits, None, &instantiate)
+        .expect("emitter spawns");
     let scheduler = emitter
         .timers
         .clone()
