@@ -24,7 +24,7 @@ Every one of those follows from a single physical fact: an MCU has no room to co
 
 ## 2. Architecture
 
-The leaf runtime is a Rust binary crate — `crates/leaf`, which exists and is built for the host — that links the ★ crates unchanged:
+The leaf runtime is a Rust binary crate — `crates/leaf`, which exists, has a `no_std` boundary drawn through it (§2.1) and is still built and run on the host — that links the ★ crates unchanged:
 
 ```
   eio-abi        status codes, sentinels, alignment (ABI §8, §3, §9.6)
@@ -43,6 +43,23 @@ What the leaf adds on top, and what it MUST NOT:
 - **MUST NOT add:** a second lifecycle driver, a second property-resolution rule, a second router, a second expression interpreter, a second CBOR encoder, or **a second implementation of `eio:core`'s host functions** (DAEMON §1.1 — a leaf supplies a clock and an entropy source and shares the rest). Every one of those exists in a ★ crate precisely so that two hosts cannot disagree, and reimplementing one for size or speed is the divergence ABI §13 calls a conformance bug by definition.
 
 **No allocator is not an option.** The ★ crates permit `alloc`, and ABI §6.3's batches are dynamically sized. A leaf therefore ships a global allocator over a fixed heap. Which allocator, and the heap's size, are per-target build configuration.
+
+### 2.1 The `no_std` boundary through `crates/leaf`
+
+§1 calls a leaf "a `no_std` Rust firmware image", and the crate is one crate rather than two: the boundary is a cargo feature, `std`, on by default. `cargo build -p eio-leaf --no-default-features` builds the runtime half for a bare-metal target, and `just check-nostd` runs exactly that for both of §2's targets on every gate — the leaf is in `nostd_crates` beside the ★ crates for the same reason they are.
+
+**What the boundary follows is the adds/MUST-NOT list above.** Everything the leaf *shares* with a daemon crosses it; everything the leaf *adds* is per-platform and does not:
+
+|Crosses (`no_std` + `alloc`)|Behind `std`, because it is a platform|
+|---|---|
+|`spawn` — ABI §5.1 steps 0–3, generic over the engine, clock, entropy source and `StateStore`|the wasm3 binding (§3): `wasm3x` is `std`|
+|the `eio:timer` scheduler, generic over its clock|the `eio:state` flat-file stand-in (§5): `std::fs`, and flash is §11's|
+|the leaf's budgets (§4) and the router wiring a baked graph needs (§6)|the host clock and entropy source (DAEMON §1.1)|
+||the golden-block fixtures, the demo binary and `tests/` (§9 runs on the host build)|
+
+**A leaf's own `main` is not part of this**, and the crate's `[[bin]]` is skipped on a bare-metal target rather than compiled: a firmware image needs a global allocator and a `#[panic_handler]`, and which ones is the per-target build configuration the paragraph above already defers. They arrive with the target, not before it.
+
+What this therefore does **not** claim: no cross-compiled image has been linked, flashed or run. The boundary is a measurement of how much of a leaf is already written — the portable half is — and it is the input to picking a target, not a substitute for it.
 
 ## 3. The engine
 

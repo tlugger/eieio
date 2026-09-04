@@ -44,7 +44,16 @@ nostd_targets := target_cortex_m4f + " " + target_esp32c3
 # earned its place: it is what found that `log::set_logger` is unavailable
 # without compare-and-swap, which is a real constraint on what the SDK may
 # depend on and was invisible from the guest target.
-nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk"
+#
+# `eio-leaf` is here for the third distinct reason, and it is the one this gate was always
+# aiming at: LEAF §2 calls a leaf "a `no_std` Rust firmware image", so the crate that will
+# become one has a boundary drawn through it — `--no-default-features` builds its runtime
+# half (`spawn`, the scheduler, the budgets, the router wiring) and leaves the wasm3
+# binding, the file-backed state store, the host clock and entropy, and the demo binary
+# behind. That is not the whole crate and is not meant to be; `crates/leaf/src/lib.rs`
+# enumerates what does not cross and why. What this leg buys is that the line stays where
+# it was put.
+nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk eio-leaf"
 
 # The crates a `sdk-vX.Y.Z` tag publishes, in dependency order — `cargo publish` needs each
 # crate's `eio-*` dependencies already on the registry, so this is the publish order and not
@@ -219,14 +228,21 @@ shapes:
 
 # See the comment block at the top of this file for the target rationale.
 
-# Prove the ★ crates still build without std.
+# `--no-default-features` is a no-op for every ★ crate — none of them declares a
+# `[features]` table at all — and is load-bearing for exactly one member: `eio-leaf`
+# defaults to `std` so that its host bring-up, its binary and its whole `tests/` tree
+# keep working untouched, and this is the flag that asks it for the firmware half
+# instead. Passed to the whole loop rather than special-casing one crate, so the list
+# above stays a plain list.
+
+# Prove the ★ crates and the leaf's runtime half still build without std.
 check-nostd:
     #!/usr/bin/env bash
     set -euo pipefail
     for target in {{ nostd_targets }}; do
         for crate in {{ nostd_crates }}; do
             echo "  $crate → $target"
-            cargo build --quiet --package "$crate" --target "$target"
+            cargo build --quiet --package "$crate" --no-default-features --target "$target"
         done
     done
 

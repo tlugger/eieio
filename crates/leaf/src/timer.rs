@@ -30,13 +30,19 @@
 //! against at runtime. The scheduling algorithm itself (the sorted-by-due-time scan, the
 //! re-arm-relative-to-now policy) is small enough that a real leaf could keep this one.
 
-use std::cell::RefCell;
-use std::rc::Rc;
+//! # This module crosses the `no_std` boundary whole
+//!
+//! Nothing here touches a platform: the algorithm, the handle and [`pump`] are generic over
+//! the [`ClockSource`] and the [`Engine`](eio_host_core::Engine) beneath them, which is what
+//! LEAF §2 means by a leaf supplying "a `Timers` implementation against a hardware timer" —
+//! the *clock* is the target's, the scheduling is not. See `crate`'s docs for the whole
+//! boundary.
 
-use eio_host_core::{ClockSource, Outcome, Running, Status, TimerError, Timers, Trap};
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
 
-use crate::core_fns::SystemClock;
-use crate::engine::Guest;
+use eio_host_core::{ClockSource, Engine, Outcome, Running, Status, TimerError, Timers, Trap};
 
 /// One armed timer (ABI §7.3): when it next fires, how long its period is, and whether it
 /// re-arms itself.
@@ -130,8 +136,8 @@ impl Scheduled {
 /// One instance's clock and scheduler together — what [`Scheduler::new`] holds, so that
 /// `set`/`cancel` (which read the clock) and [`pump`] (which does not) can share one `Vec`
 /// without either duplicating the other's state.
-struct Inner {
-    clock: SystemClock,
+struct Inner<C> {
+    clock: C,
     scheduled: Scheduled,
 }
 
@@ -144,14 +150,27 @@ struct Inner {
 /// [`Scheduler`] is *already* an `Rc<RefCell<_>>` handle for exactly that reason: [`crate::spawn`]
 /// keeps one clone for [`pump`] to use and hands another to `register`, and both clones share
 /// the one [`Inner`] underneath.
-#[derive(Clone)]
-pub struct Scheduler(Rc<RefCell<Inner>>);
+///
+/// Generic over the clock, and holding no `SystemClock` of its own, because that is the one
+/// part of `eio:timer` a firmware build must replace: LEAF §2 asks a leaf for "a `Timers`
+/// implementation against a hardware timer", and this is that implementation with the timer
+/// left as a parameter.
+pub struct Scheduler<C>(Rc<RefCell<Inner<C>>>);
 
-impl Scheduler {
-    /// A fresh, empty scheduler reading `clock` — the same [`SystemClock`] the instance's
-    /// `eio:core` answers `time_mono_ms` from (see that type's own docs for why a copy of it is
-    /// the same clock and not a second one).
-    pub fn new(clock: SystemClock) -> Scheduler {
+// Written by hand rather than `#[derive(Clone)]`, for the reason `eio_host_core::Core`'s own
+// hand-written `Clone` gives: the derive would add a `C: Clone` bound that cloning an `Rc`
+// does not need.
+impl<C> Clone for Scheduler<C> {
+    fn clone(&self) -> Scheduler<C> {
+        Scheduler(Rc::clone(&self.0))
+    }
+}
+
+impl<C: ClockSource> Scheduler<C> {
+    /// A fresh, empty scheduler reading `clock` — the same clock the instance's `eio:core`
+    /// answers `time_mono_ms` from (see [`crate::core_fns::SystemClock`]'s own docs for why a
+    /// copy of it is the same clock and not a second one).
+    pub fn new(clock: C) -> Scheduler<C> {
         Scheduler(Rc::new(RefCell::new(Inner {
             clock,
             scheduled: Scheduled::new(),
@@ -168,9 +187,9 @@ impl Scheduler {
     /// What this scheduler's own clock reads right now.
     ///
     /// A driver (or a test) needing `now_ms` for [`pump`] reads it from here rather than
-    /// constructing a second [`SystemClock`] of its own — the same "one clock" rule
-    /// `SystemClock`'s docs state, at the one seam outside `crate::spawn` that needs "now" at
-    /// all.
+    /// constructing a second clock of its own — the same "one clock" rule
+    /// [`crate::core_fns::SystemClock`]'s docs state, at the one seam outside `crate::spawn`
+    /// that needs "now" at all.
     pub fn now_ms(&self) -> i64 {
         self.0.borrow().clock.mono_ms()
     }
@@ -191,7 +210,7 @@ impl Scheduler {
     }
 }
 
-impl Timers for Scheduler {
+impl<C: ClockSource> Timers for Scheduler<C> {
     fn set(&mut self, delay_ms: i64, repeat: bool) -> Result<u32, TimerError> {
         let mut inner = self.0.borrow_mut();
         let now_ms = inner.clock.mono_ms();
@@ -205,13 +224,13 @@ impl Timers for Scheduler {
 
 /// What pumping every timer due at `now_ms` produced.
 ///
-/// No `Debug`: [`Running`]'s engine (wasm3's `Guest`) does not implement it, for the same
-/// reason `eio_host_core::Running` itself carries no such bound — a live guest instance is not
-/// a value a test should be printing.
-pub struct Pumped {
+/// No `Debug`: an [`Engine`] is not required to implement it (wasm3's `Guest` does not), for
+/// the same reason `eio_host_core::Running` itself carries no such bound — a live guest
+/// instance is not a value a test should be printing.
+pub struct Pumped<E> {
     /// The instance, if every fired timer's callback returned rather than killing it. `None`
     /// once [`Pumped::dead`] is set — there is nothing left to hand the caller.
-    pub running: Option<Running<Guest>>,
+    pub running: Option<Running<E>>,
     /// `(timer_id, status)` for every timer that fired, in the order [`Scheduled::due_one`]
     /// chose — including ones that fired before a later one killed the instance.
     pub fired: Vec<(u32, Status)>,
@@ -229,7 +248,11 @@ pub struct Pumped {
 /// §4's watchdog — see this module's own docs for the distinction — and it must be called
 /// between guest callbacks, never nested inside one; a single-threaded caller gets that for
 /// free by construction.
-pub fn pump(scheduler: &Scheduler, mut running: Running<Guest>, now_ms: i64) -> Pumped {
+pub fn pump<E: Engine, C>(
+    scheduler: &Scheduler<C>,
+    mut running: Running<E>,
+    now_ms: i64,
+) -> Pumped<E> {
     let mut fired = Vec::new();
     loop {
         let Some(id) = scheduler.0.borrow_mut().scheduled.due_one(now_ms) else {
@@ -259,6 +282,11 @@ pub fn pump(scheduler: &Scheduler, mut running: Running<Guest>, now_ms: i64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The two tests that need a real clock need `crate::core_fns::SystemClock`, which is
+    // behind `std` — everything else here exercises `Scheduled`, which crosses the boundary.
+    #[cfg(feature = "std")]
+    use crate::core_fns::SystemClock;
 
     #[test]
     fn set_hands_back_sequential_ids() {
@@ -365,6 +393,7 @@ mod tests {
         scheduled.armed.clear();
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn schedulers_cancel_all_reaches_the_shared_state() {
         let scheduler = Scheduler::new(SystemClock::new());
@@ -374,6 +403,7 @@ mod tests {
         assert_eq!(scheduler.cancel(id), Err(TimerError::NotFound));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn a_scheduler_reads_the_clock_it_was_given_and_nothing_else() {
         // `Scheduler::set` computes `due_at` from `SystemClock::mono_ms`, so a timer armed

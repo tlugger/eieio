@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use eio_host_core::{Connection, Delivering, Endpoint, Limits, Outcome, Port, Routes, Status};
-use eio_leaf::{fixtures, spawn, timer};
+use eio_leaf::{fixtures, spawn_host, timer};
 use eio_signal::Value;
 
 /// The period `examples/blocks/emitter` arms its timer with — not exported by the block, so
@@ -34,14 +34,15 @@ fn a_timer_fires_and_the_emission_routes_to_a_second_instance() {
     let limits = Limits::new(64 * 1024, 256);
     let empty = BTreeMap::new();
 
-    let emitter = spawn(&emitter_wasm, "emitter", &empty, limits, None).expect("emitter spawns");
+    let emitter =
+        spawn_host(&emitter_wasm, "emitter", &empty, limits, None).expect("emitter spawns");
     let transform =
-        spawn(&transform_wasm, "transform", &empty, limits, None).expect("transform spawns");
+        spawn_host(&transform_wasm, "transform", &empty, limits, None).expect("transform spawns");
 
     let scheduler = emitter
         .timers
         .clone()
-        .expect("emitter declares eio:timer, so spawn wires it a scheduler");
+        .expect("emitter declares eio:timer, so spawn_host wires it a scheduler");
 
     let descriptors = [emitter.descriptor.clone(), transform.descriptor.clone()];
     let connections = [Connection::new(
@@ -53,7 +54,7 @@ fn a_timer_fires_and_the_emission_routes_to_a_second_instance() {
 
     // `start` armed the timer some small, unknowable number of milliseconds after the
     // scheduler's own origin (however long instantiate/configure/start took) — so "now", read
-    // fresh right after `spawn` returns, is a safe lower bound for "not due yet" and
+    // fresh right after `spawn_host` returns, is a safe lower bound for "not due yet" and
     // `now + EMITTER_PERIOD_MS` a safe upper bound for "certainly due": the timer's own
     // `due_at` sits somewhere no later than `set_time + EMITTER_PERIOD_MS`, and `set_time` can
     // only be less than or equal to this `now`.
@@ -160,11 +161,12 @@ fn a_cancelled_timer_does_not_fire_and_cancelling_an_unarmed_id_is_not_found() {
     let limits = Limits::new(64 * 1024, 256);
     let empty = BTreeMap::new();
 
-    let emitter = spawn(&emitter_wasm, "emitter", &empty, limits, None).expect("emitter spawns");
+    let emitter =
+        spawn_host(&emitter_wasm, "emitter", &empty, limits, None).expect("emitter spawns");
     let scheduler = emitter
         .timers
         .clone()
-        .expect("emitter declares eio:timer, so spawn wires it a scheduler");
+        .expect("emitter declares eio:timer, so spawn_host wires it a scheduler");
 
     // `start` armed exactly one timer on a fresh scheduler, so it is id 0 (ABI §7.3's ids are
     // handed out sequentially from zero) — cancelled here the same way the guest's own

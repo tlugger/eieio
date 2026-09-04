@@ -1,5 +1,4 @@
-//! `eio-leaf` — the leaf-class node runtime, **built for the host** (eieio-x7g.2's first
-//! milestone).
+//! `eio-leaf` — the leaf-class node runtime.
 //!
 //! # What this proves, and what it does not
 //!
@@ -11,9 +10,52 @@
 //! between the two instances. See `tests/end_to_end.rs` for the assertion that closes the
 //! loop.
 //!
-//! **This is a host build, targeting the same `x86_64`/`aarch64` triple as the daemon.** It is
-//! not a cross-compile, not `no_std`, and proves nothing about fitting on an MCU or running
-//! without `std` — see this crate's own report for what was and was not established.
+//! **With the default `std` feature this is still a host build**, targeting the same
+//! `x86_64`/`aarch64` triple as the daemon, and it is still not a cross-compile: nothing here
+//! has been run on an MCU. What the `no_std` boundary below adds is a *measurement* of how
+//! much of it could be, not a claim that it has been.
+//!
+//! # The `no_std` boundary (LEAF §2)
+//!
+//! LEAF §2 calls a leaf "a `no_std` Rust firmware image" and says the ★ crates are `no_std`
+//! precisely so one can exist. `cargo build -p eio-leaf --no-default-features` compiles the
+//! runtime half of this crate for `thumbv7em-none-eabihf` and `riscv32imc-unknown-none-elf`,
+//! and `just check-nostd` runs it on every gate. The point of the exercise is the list below:
+//! it is what the first MCU bring-up is actually signing up for.
+//!
+//! **What crosses**, and is therefore already written:
+//!
+//! - [`leaf_budgets`] — LEAF §4's settings, pure arithmetic over ★ types.
+//! - [`spawn`] — ABI §5.1 steps 0–3: the load-time manifest cross-check, the descriptor, ABI
+//!   §11.1 property resolution, the configure-time compile under the leaf's own budgets, and
+//!   `eio:core`/`eio:state`/`eio:timer` registration. Generic over `E: Engine`, its clock, its
+//!   entropy source and its [`StateStore`], because every one of those is a thing LEAF §2 says
+//!   a leaf *adds* rather than shares.
+//! - [`Instance`] and [`Bindings`] — the shapes a baked graph (LEAF §6) is built out of.
+//! - [`timer`] — the whole scheduler: `Scheduled`'s algorithm, [`timer::Scheduler`] over any
+//!   [`ClockSource`], and [`timer::pump`] over any `Engine`.
+//! - The router wiring a caller does around all of it: [`Connection`], [`Port`], [`Routes`]
+//!   are `eio_host_core`'s and were always `no_std`.
+//!
+//! **What does not cross, and why each one cannot.** None of these is a defect in this crate;
+//! each is a genuinely platform-shaped thing with a LEAF §11 expansion item or a named
+//! blocker behind it:
+//!
+//! | Gated behind `std` | Why it cannot cross |
+//! |---|---|
+//! | [`engine`] — the wasm3 binding | `wasm3x` 0.1.0 builds its wrapper and the wasm3 C sources against `std`. LEAF §3's engine for a real leaf is WAMR anyway, and the binding for it is a separate bead. |
+//! | [`state`] — the flat-file store | `std::fs`. LEAF §5 backs `eio:state` by *flash*; the file is named as a stand-in in its own module docs, and flash layout is a §11 expansion item. |
+//! | [`core_fns::SystemClock`] | `std::time::{Instant, SystemTime}`. DAEMON §1.1's two things a `no_std` crate with no platform beneath it cannot answer; a leaf reads a hardware clock. |
+//! | [`core_fns::BringUpEntropy`] | Seeded from `SystemTime`. Same reason — a leaf reads a hardware entropy source. |
+//! | [`fixtures`] | `std::process::Command`, shelling out to `cargo`. A firmware image has no build system inside it; blocks are baked (LEAF §1, §6). |
+//! | [`run_demo`], [`DemoOutcome`], [`spawn_host`], `main.rs` | The host bring-up itself: `fixtures`, `std::fs`, `println!`. `main.rs` is skipped on a bare-metal target by `required-features`, not by a `cfg` — a `no_std` binary needs a `#[panic_handler]` and an entry point, and *which* ones is per-target build configuration (LEAF §2's allocator paragraph, §11's memory-budget item). |
+//! | The `tests/` directory | Every suite drives the wasm3 binding or reads `expr-tests/` off disk. LEAF §9's suites run on the host build; running them on hardware is part of the MCU bring-up, not of drawing this line. |
+//!
+//! The honest summary: what crosses is everything that is *about the ABI*, and what does not
+//! is everything that is about a *platform*. That is the split LEAF §2 predicts, and this is
+//! the first thing to measure it rather than assert it. There is also no global allocator and
+//! no `#[panic_handler]` here — LEAF §2 requires both of a firmware image and calls them
+//! per-target build configuration, so they arrive with the target, not before it.
 //!
 //! # What is genuinely a leaf's own, versus a bring-up's stand-in
 //!
@@ -36,19 +78,27 @@
 //!   watchdog. There is still no transport client: no golden block this crate drives needs
 //!   one, and LEAF §8 names no MQTT client on purpose.
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+
 pub mod core_fns;
+#[cfg(feature = "std")]
 pub mod engine;
+#[cfg(feature = "std")]
 pub mod fixtures;
+#[cfg(feature = "std")]
 pub mod state;
 pub mod timer;
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
 
 use eio_expr::EvalLimits;
 use eio_host_core::{
-    Configured, Configuring, Descriptor, ExprBudgets, Limits, Running, Starting, resolve,
-    state as state_import,
+    ClockSource, Configured, Configuring, Descriptor, Engine, Entropy, ExprBudgets, Limits,
+    Running, Starting, StateStore, resolve, state as state_import,
 };
 use eio_manifest::{Capability, Manifest};
 
@@ -58,14 +108,18 @@ pub use eio_host_core::{Connection, Endpoint, Overflow, Port, Routes};
 
 /// A running instance, plus what a caller needs to drive and route around it.
 ///
-/// Bundles [`Running`] with its [`core_fns::Core`] (where its emissions land) and its
+/// Bundles [`Running`] with its [`eio_host_core::Core`] (where its emissions land) and its
 /// [`Descriptor`] (the port names [`Routes::resolve`] numbers against) — three things
-/// `spawn` builds together and a caller otherwise has to keep in step by hand.
-pub struct Instance {
+/// [`spawn`] builds together and a caller otherwise has to keep in step by hand.
+///
+/// Generic over the engine, the clock and the entropy source for the reason the crate docs
+/// give: those three are the platform, and the platform is what a firmware build replaces.
+/// [`HostInstance`] is the one instantiation this crate's own bring-up uses.
+pub struct Instance<E, C, R> {
     /// The live instance, mid-lifecycle.
-    pub running: Running<engine::Guest>,
+    pub running: Running<E>,
     /// Where its `emit` calls, log lines and `error` details land.
-    pub core: core_fns::Core,
+    pub core: eio_host_core::Core<C, R>,
     /// Its instance descriptor (ABI §5.2) — port and property names, in index order.
     pub descriptor: Descriptor,
     /// Its manifest, for a caller that wants to know what it declares.
@@ -73,7 +127,26 @@ pub struct Instance {
     /// Its timer scheduler, if it declares `eio:timer` — `None` otherwise. A cloneable handle
     /// (see [`timer::Scheduler`]): a caller keeps this clone to drive [`timer::pump`] between
     /// guest callbacks, while another clone is the one actually registered on the guest.
-    pub timers: Option<timer::Scheduler>,
+    pub timers: Option<timer::Scheduler<C>>,
+}
+
+/// Everything [`spawn`] needs from the platform beneath it.
+///
+/// LEAF §2's "what the leaf adds" list, minus the engine (which is [`spawn`]'s own type
+/// parameter) and the transport client (which LEAF §8 leaves unnamed): a clock and an entropy
+/// source for `eio:core` (DAEMON §1.1), and a [`StateStore`] for `eio:state` if the block
+/// declares it. Grouped into one value rather than passed as three arguments so that the shape
+/// of "the platform" is a thing with a name — a firmware build fills this in and nothing else.
+pub struct Bindings<C, R, S> {
+    /// `time_unix_ms`/`time_mono_ms` (ABI §7.0). Copied, not moved: one copy answers
+    /// `eio:core` and, for a block declaring `eio:timer`, another is the scheduler's — the
+    /// same clock read twice, never two clocks (see [`core_fns::SystemClock`]'s docs).
+    pub clock: C,
+    /// `rand` (ABI §7.0).
+    pub entropy: R,
+    /// The store `eio:state` is registered against (LEAF §5). Required exactly when the
+    /// manifest declares the `state` capability; ignored when it does not.
+    pub state: Option<S>,
 }
 
 /// A leaf's own budgets (LEAF §4): EXPR §9's floors for evaluation, and the daemon's own
@@ -106,24 +179,34 @@ pub fn leaf_budgets() -> ExprBudgets {
 ///
 /// This is ABI §5.1 steps 0-3 in one call: `eio_manifest::validate` (step 0/1's load-time
 /// check — **a leaf MUST run it**, LEAF §3.1), building the descriptor and resolving
-/// properties against `supplied` (ABI §11.1, `eio_host_core::resolve`), instantiating on
-/// wasm3, registering `eio:core` and (if declared) `eio:state`, then `eio_configure` and
-/// `eio_start`.
+/// properties against `supplied` (ABI §11.1, `eio_host_core::resolve`), instantiating through
+/// `instantiate`, registering `eio:core` and (if declared) `eio:state` and `eio:timer`, then
+/// `eio_configure` and `eio_start`.
 ///
-/// `state_dir` is required exactly when the manifest declares the `state` capability —
-/// [`core_fns`]'s module docs are the reason a leaf may not skip that store even for a
-/// bring-up: a write that is not persisted must be refused, not silently accepted.
+/// `instantiate` is a *function*, not a fixed engine, and that is the whole of what makes this
+/// function `no_std`: LEAF §2 lists the engine binding among the things a leaf adds on top of
+/// the ★ crates, so naming one here would put a platform inside the portable half. It is
+/// called after the manifest cross-check and not before, so a module this host will refuse is
+/// refused before any engine is asked to compile it. [`engine::instantiate`] is this crate's
+/// own implementation for the host build; a firmware build passes its own.
 ///
 /// Every failure is collapsed to a `String`: this is bring-up code answering the composition
 /// question, not a production error type, and every caller here is `main.rs` or a test that
 /// wants to `.expect()` it with context.
-pub fn spawn(
+pub fn spawn<E, C, R, S>(
     wasm: &[u8],
     instance_id: &str,
     supplied: &BTreeMap<String, String>,
     limits: Limits,
-    state_dir: Option<&Path>,
-) -> Result<Instance, String> {
+    bindings: Bindings<C, R, S>,
+    instantiate: impl FnOnce(&[u8]) -> Result<E, String>,
+) -> Result<Instance<E, C, R>, String>
+where
+    E: Engine,
+    C: ClockSource + Copy + 'static,
+    R: Entropy + 'static,
+    S: StateStore + 'static,
+{
     // ABI §4's load-time cross-check, and LEAF §3.1's "a leaf MUST run it" — this bring-up
     // runs it at process start as the host-build stand-in for "at firmware build time".
     let manifest = eio_manifest::validate(wasm, None).map_err(|error| error.to_string())?;
@@ -149,27 +232,29 @@ pub fn spawn(
     // One clock, not two: a copy of it goes to `eio:core` below and, if this instance declares
     // `timer`, another copy goes to its scheduler — see `SystemClock`'s own docs for why a
     // `Copy` is the same clock and not a second one.
-    let clock = core_fns::SystemClock::new();
+    let Bindings {
+        clock,
+        entropy,
+        state,
+    } = bindings;
     let budgets = leaf_budgets();
-    let core = core_fns::Core::new(
+    let core = eio_host_core::Core::new(
         limits,
         budgets,
         descriptor.outputs.len() as u32,
         clock,
-        core_fns::BringUpEntropy::new(instance_id),
+        entropy,
     );
 
-    let mut guest = engine::instantiate(wasm)
-        .map_err(|error| format!("instantiating {instance_id:?}: {error}"))?;
+    let mut guest =
+        instantiate(wasm).map_err(|error| format!("instantiating {instance_id:?}: {error}"))?;
     core.register(&mut guest, &properties)
         .map_err(|error| format!("registering eio:core for {instance_id:?}: {error}"))?;
 
     if manifest.declares(Capability::State) {
-        let dir = state_dir.ok_or_else(|| {
-            format!("instance {instance_id:?} declares eio:state but was given no state_dir")
+        let store = state.ok_or_else(|| {
+            format!("instance {instance_id:?} declares eio:state but was given no store")
         })?;
-        let store = state::for_instance(dir, instance_id)
-            .map_err(|error| format!("opening {instance_id:?}'s state file: {error}"))?;
         state_import::register(&mut guest, store)
             .map_err(|error| format!("registering eio:state for {instance_id:?}: {error}"))?;
     }
@@ -211,7 +296,58 @@ pub fn spawn(
     })
 }
 
+// ── the host bring-up, from here down ────────────────────────────────────────
+//
+// Everything below is behind `std`. The line above is the whole of the boundary this crate
+// draws: what is above it is about the ABI, what is below it is about a platform that has a
+// filesystem, a wall clock and a process to shell out from.
+
+/// [`Instance`] as the host bring-up instantiates it — wasm3, the host's clock, the bring-up
+/// entropy source.
+#[cfg(feature = "std")]
+pub type HostInstance = Instance<engine::Guest, core_fns::SystemClock, core_fns::BringUpEntropy>;
+
+/// [`spawn`] with this crate's host bindings filled in: wasm3, [`core_fns::SystemClock`],
+/// [`core_fns::BringUpEntropy`] and a [`state::FileStateStore`] under `state_dir`.
+///
+/// The signature every caller in this crate had before the `no_std` boundary was drawn, kept
+/// so that `main.rs` and `tests/` say what they mean rather than restating the platform at
+/// every call site.
+///
+/// `state_dir` is required exactly when the manifest declares the `state` capability —
+/// [`core_fns`]'s module docs are the reason a leaf may not skip that store even for a
+/// bring-up: a write that is not persisted must be refused, not silently accepted.
+#[cfg(feature = "std")]
+pub fn spawn_host(
+    wasm: &[u8],
+    instance_id: &str,
+    supplied: &BTreeMap<String, String>,
+    limits: Limits,
+    state_dir: Option<&std::path::Path>,
+) -> Result<HostInstance, String> {
+    let store = match state_dir {
+        Some(dir) => Some(
+            state::for_instance(dir, instance_id)
+                .map_err(|error| format!("opening {instance_id:?}'s state file: {error}"))?,
+        ),
+        None => None,
+    };
+    spawn(
+        wasm,
+        instance_id,
+        supplied,
+        limits,
+        Bindings {
+            clock: core_fns::SystemClock::new(),
+            entropy: core_fns::BringUpEntropy::new(instance_id),
+            state: store,
+        },
+        engine::instantiate,
+    )
+}
+
 /// What one run of [`run_demo`] observed — the milestone's end-to-end assertion surface.
+#[cfg(feature = "std")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DemoOutcome {
     /// `eio_process_signals`'s status on `counter` for the inbound batch.
@@ -242,8 +378,9 @@ pub struct DemoOutcome {
 ///
 /// `state_dir` backs `counter`'s `eio:state` (LEAF §5); see the [`state`] module for what
 /// backs it and why.
-pub fn run_demo(state_dir: &Path) -> Result<DemoOutcome, String> {
-    use std::rc::Rc;
+#[cfg(feature = "std")]
+pub fn run_demo(state_dir: &std::path::Path) -> Result<DemoOutcome, String> {
+    use alloc::rc::Rc;
 
     use eio_host_core::{Delivering, Outcome};
     use eio_signal::{Batch, Signal, Value};
@@ -262,8 +399,8 @@ pub fn run_demo(state_dir: &Path) -> Result<DemoOutcome, String> {
     let limits = Limits::new(64 * 1024, 256);
     let empty = BTreeMap::new();
 
-    let counter = spawn(&counter_wasm, "counter", &empty, limits, Some(state_dir))?;
-    let transform = spawn(&transform_wasm, "transform", &empty, limits, None)?;
+    let counter = spawn_host(&counter_wasm, "counter", &empty, limits, Some(state_dir))?;
+    let transform = spawn_host(&transform_wasm, "transform", &empty, limits, None)?;
 
     // The baked connection table (LEAF §6): one connection, named the way a service file
     // would name it, resolved once against both descriptors before any signal moves.
