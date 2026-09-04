@@ -1,8 +1,9 @@
 //! ABI §4.3's portable-subset instruction table (LEAF-SPEC §9 suite 3): what a wasm3-class
 //! engine MUST correctly execute ([`PORTABLE_SUBSET`]) and what it MUST refuse
 //! ([`CARVED_OUT`]), shared between `crates/conformance/tests/wasm3.rs` and
-//! `crates/leaf/tests/instruction_table.rs` — the only two places that measure this, each
-//! against its own engine rather than through `eio_host_core::Engine`'s driver or
+//! `crates/leaf/tests/instruction_table.rs` (which drives it through *both* of the leaf's
+//! engine bindings) — the only places that measure this, each against its own engine
+//! construction rather than through `eio_host_core::Engine`'s driver or
 //! `eio_conformance`'s `Host`/`suite` machinery, neither of which fits a bare WAT snippet
 //! with no manifest and no ABI lifecycle.
 //!
@@ -14,15 +15,21 @@
 //!
 //! A row names an instruction and a WAT fragment — the top-level module fields the case
 //! needs (typically one `func`, sometimes a `table`/`elem`/`type`/`global` alongside it).
-//! [`assemble`] is the one thing both callers do identically with a fragment: wrap it in a
+//! [`assemble`] is the one thing every caller does identically with a fragment: wrap it in a
 //! module with the exported memory a real block always has ([`Host::instantiate`] in
-//! `wasm3.rs`, and `eio_leaf::engine::instantiate`, both refuse a module without one) and
-//! parse it to bytes. Everything after that — building the engine, compiling the module,
-//! calling the export — is each caller's own, because that is exactly the call site LEAF §9
-//! suite 3 exists to keep honest: `crates/conformance/tests/wasm3.rs` builds a bespoke
-//! `wasm3x::Config` for the reference measurement, `eio_leaf::engine::instantiate` builds its
-//! own for the leaf, and neither should have to look like the other for this table to run
-//! on both.
+//! `wasm3.rs`, and both of `eio_leaf`'s `instantiate` functions, all refuse a module without
+//! one) and parse it to bytes. Everything after that — building the engine, compiling the
+//! module, calling the export — is each caller's own, because that is exactly the call site
+//! LEAF §9 suite 3 exists to keep honest: `crates/conformance/tests/wasm3.rs` builds a
+//! bespoke `wasm3x::Config` for the reference measurement, `eio_leaf::wasm3::instantiate` and
+//! `eio_leaf::wamr::instantiate` build their own for the leaf, and none of them should have to
+//! look like the others for this table to run on all of them.
+//!
+//! [`CARVED_OUT`] is the half whose *answer* is per-engine rather than universal, and
+//! `crates/leaf/tests/instruction_table.rs`'s module docs are where that is worked through:
+//! wasm3 refuses the remainder, WAMR runs it whole, and the carve-out ABI §4.3 actually
+//! requires lives in `eio_manifest::validate` — a ★ crate every host shares — rather than in
+//! any engine's feature configuration.
 //!
 //! [`PORTABLE_SUBSET`]'s fragments are self-checking: each computes the instruction under
 //! test and compares it, *inside the module*, against the value only a correct execution

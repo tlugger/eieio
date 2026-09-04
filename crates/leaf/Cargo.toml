@@ -19,21 +19,38 @@ path = "src/lib.rs"
 name = "eio-leaf"
 path = "src/main.rs"
 # The demo binary is the host bring-up, not a firmware image: it prints to stdout, shells out
-# to `cargo` to build the golden blocks, and links wasm3. `required-features` is what keeps
-# `cargo build --no-default-features --target thumbv7em-none-eabihf` from trying to link a
-# `no_std` binary with no `#[panic_handler]` and no entry point — cargo skips a target whose
-# required features are off, so the bare-metal gate builds the library and nothing else.
-required-features = ["std"]
+# to `cargo` to build the golden blocks, and drives its graph on wasm3. `required-features` is
+# what keeps `cargo build --no-default-features --target thumbv7em-none-eabihf` from trying to
+# link a `no_std` binary with no `#[panic_handler]` and no entry point — cargo skips a target
+# whose required features are off, so the bare-metal gate builds the library and nothing else.
+# `wasm3` rather than `std`, because the demo names one engine: `run_demo` hands `spawn`
+# `wasm3::instantiate`, so what the binary needs is that engine's feature, not the platform's.
+required-features = ["wasm3"]
 
-# ── the no_std boundary (LEAF §2) ────────────────────────────────────────────
+# ── the no_std boundary (LEAF §2) and the engine selector (LEAF §3) ──────────
 #
-# `default = ["std"]` so every existing call site — `main.rs`, `tests/`, `just ci` — keeps
-# working unchanged, and `--no-default-features` is what a firmware build uses. What `std`
-# gates, and why each piece cannot cross, is enumerated in `src/lib.rs`'s crate docs; this is
-# only the Cargo half of that statement.
+# `default` turns on everything the host bring-up needs, so every existing call site —
+# `main.rs`, `tests/`, `just ci` — keeps working unchanged, and `--no-default-features` is what
+# a firmware build uses. What `std` gates, and why each piece cannot cross, is enumerated in
+# `src/lib.rs`'s crate docs; this is only the Cargo half of that statement.
+#
+# `wasm3` and `wamr` are the two engines LEAF §3 names, and they are separate features because
+# LEAF §3.2 makes the engine a per-image choice: a firmware build enables exactly one, and each
+# is a `#[cfg]`-gated module implementing `eio_host_core::Engine` rather than something `spawn`
+# knows about (`spawn` takes the `instantiate` function). The *host* build enables both, and
+# that is a measurement rig's shape rather than a leaf's: LEAF §9's suites have to run against
+# each binding, and "divergence between hosts is a conformance bug by definition" (ABI §13) is
+# only checkable inside the leaf tier if both are linked into one test run.
+#
+# Both imply `std`: `wasm3x` builds the wasm3 C sources and its own wrapper against `std`, and
+# `wamrx-sys` builds WAMR's C core and needs `CString`/`Mutex`/`Once` to drive it. Neither
+# crosses the `no_std` boundary today, which is why an engine binding for a bare-metal target
+# is settled by LEAF §11's MCU cross-compile and not here.
 [features]
-default = ["std"]
-std = ["dep:wasm3x"]
+default = ["std", "wasm3", "wamr"]
+std = []
+wasm3 = ["std", "dep:wasm3x"]
+wamr = ["std", "dep:wamrx-sys"]
 
 [dependencies]
 # The engine-agnostic host half this milestone exists to prove composes: the lifecycle
@@ -56,13 +73,11 @@ eio-signal.workspace = true
 # directly rather than reaching for it through the host-agnostic crate).
 eio-expr.workspace = true
 
-# wasm3 (LEAF §3's bring-up/debugging engine): no AOT path, interpreted throughout, and
+# wasm3 (LEAF §3's second measured interpreter): no AOT path, interpreted throughout, and
 # already the leaf-class interpreter `crates/conformance/tests/wasm3.rs` measures against
-# ABI §4.3's accepted set. WAMR's interpreter is the other option LEAF §3 names; wasm3 was
-# chosen here because its API needs no native-registration workaround — see
-# `crates/conformance/Cargo.toml`'s note on why `wamrx` cannot serve as a host binding at
-# all (its `Linker` closures have no access to the calling instance, which every ABI §7
-# function touching guest memory needs).
+# ABI §4.3's accepted set. It was the first binding written here because its API needs no
+# native-registration workaround — `wasm3x` hands a host closure the calling `Caller`, which
+# every ABI §7 function touching guest memory needs.
 #
 # Optional, and gated behind `std`: `wasm3x` builds the wasm3 C sources and its own wrapper
 # against `std`, so it cannot cross the `no_std` boundary. LEAF §2 lists an engine binding as
@@ -70,6 +85,26 @@ eio-expr.workspace = true
 # own — which is why `spawn` is generic over `E: eio_host_core::Engine` and this binding is
 # one implementation of that trait rather than the one `spawn` names.
 wasm3x = { version = "0.1.0", optional = true }
+
+# WAMR (LEAF §3's leaf engine), in interpreter mode — the mode §3 says a bring-up or a
+# debugging build uses. The AOT mode §6.1 describes needs `wamrc`, which is blocked on six
+# recorded toolchain failures (eieio-7d8.21) and is a bead of its own; the interpreter needs
+# none of it, because WAMR's core is C and this machine's C compiler works.
+#
+# **No `features` key, deliberately.** `wamrx-sys` 0.3.0 defaults to exactly `bulk-memory` and
+# `reference-types`, which is LEAF §3.1's requirement stated as a build configuration: enable
+# those two, and do not go adding SIMD, tail call, multi-memory, memory64, threads, exceptions
+# or GC for a convenience. WAMR selects features at CMake time, so the conforming set is kept
+# here by writing nothing rather than by anything a call site could forget.
+#
+# `wamrx` — the safe wrapper this crate backs — is deliberately absent, and `src/wamr.rs`'s
+# module docs are the long version of why: its `Linker::define_func` closure never sees the
+# calling instance, its `Module`/`Instance` handles are `pub(crate)` so no partial mix of the
+# two layers exists, and its `Engine` tears the runtime down (wiping the native registry with
+# it) when the last clone drops. So the binding is written against `wamrx-sys`'s raw FFI, the
+# same layer `wamrx`'s own `Linker` is built on — the fifth sanctioned `unsafe` site in this
+# repository (CLAUDE.md), with a `// SAFETY:` comment on every block.
+wamrx-sys = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
 # Whether the ABI §13 conformance harness can drive this binding at all is one of this
