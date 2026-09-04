@@ -1,0 +1,35 @@
+{
+  "name": "emission-is-bounded-within-one-callback",
+  "spec": "§5.2, §6.2, §8, §9.7",
+  "note": "ABI §9.7 rule 9: a host that publishes max_emission_bytes bounds the payload bytes it accepts from emit within one callback, and answers ERR_LIMIT past it. The block emits the same five-byte batch three times against a budget of twelve and checks the three answers itself (0, 0, ERR_LIMIT), returning -1, -2 or -3 to name whichever was wrong — so a status of 0 is the assertion. Two deliveries, because the second is the half a per-instance counter would fail: the budget is per callback, and ABI §6.2's routing-after-the-callback is what makes the drain the boundary. errors 0 pins that a refusal is a status code and not a death (§8), and the two emissions that did land are asserted so a host cannot pass by refusing all three.",
+  "module": "blocks/emission_budget.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": 12 },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e00" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "emit", "emit", "emit" ],
+        "emissions": [
+          { "port": "out", "batch": "81a1616e01" },
+          { "port": "out", "batch": "81a1616e01" }
+        ]
+      }
+    },
+    {
+      "action": { "deliver": { "port": "in", "batch": "81a1616e00" } },
+      "expect": {
+        "status": 0,
+        "calls": [ "emit", "emit", "emit" ],
+        "emissions": [
+          { "port": "out", "batch": "81a1616e01" },
+          { "port": "out", "batch": "81a1616e01" }
+        ]
+      }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 0 }
+}

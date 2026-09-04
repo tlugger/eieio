@@ -211,6 +211,14 @@ pub struct LimitsSpec {
     pub max_payload: u32,
     /// Largest signal count per batch.
     pub max_batch: u32,
+    /// Largest total payload `emit` accepts within one callback, or `null` for a scenario
+    /// whose host does not bound the emission queue (ABI §9.7 rule 9).
+    ///
+    /// Spelled in every scenario that publishes limits, `null` included, and deliberately
+    /// without a `#[serde(default)]`: a harness that quietly defaulted it to "unbounded"
+    /// would be picking the number a block reads, which is the same reason
+    /// [`Scenario::limits`] as a whole has no default.
+    pub max_emission_bytes: Option<u32>,
 }
 
 /// The execution budget (ABI §10).

@@ -3,7 +3,7 @@
   "spec": "§4.2, §6.2, §7.3",
   "note": "Emission does not depend on delivery. The block arms a timer in start and emits when it fires, which is the shape a simulator has — and it is the working side of ABI §4.2's pairing rule, since this module imports eio:timer and exports eio_on_timer. The prop call is ABI §3's SIGNAL_NONE: there is no signal inside a timer callback, and a signal-dependent expression configured here would answer ERR_NO_SIGNAL_CONTEXT rather than a null.",
   "module": "../../../examples/blocks/target/wasm32-unknown-unknown/release/emitter.wasm",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
     { "action": "start", "expect": { "status": 0, "calls": [ "timer_set" ], "emissions": [] } },

@@ -3,7 +3,7 @@
   "spec": "§5.2, §6.2, §9.7",
   "note": "max_batch bounds the batches a host delivers to a guest; it does not bound emission. The block ignores its input and emits a fixed batch of four signals while the descriptor publishes a max_batch of two, so a host that also bounded (or truncated) emission by max_batch would refuse the emit or corrupt the batch, and either way fail this scenario. §6.2's three refusals stay the whole list.",
   "module": "blocks/over_batch.wat",
-  "limits": { "max_payload": 1024, "max_batch": 2 },
+  "limits": { "max_payload": 1024, "max_batch": 2, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "status": 0 } },
     { "action": "start", "expect": { "status": 0 } },

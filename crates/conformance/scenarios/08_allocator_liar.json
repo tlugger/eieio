@@ -3,7 +3,7 @@
   "spec": "§9.5, §9.6, §13.2",
   "note": "ABI §9.6: a misaligned pointer is the guest offering memory it cannot honour, so nothing the host does next is trustworthy and the instance MUST be discarded. The very first inbound payload is the descriptor, so this block dies in configure and never runs a line of its own.",
   "module": "blocks/liar.wat",
-  "limits": { "max_payload": 1024, "max_batch": 16 },
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
   "steps": [
     { "action": "configure", "expect": { "dead": "engine" } }
   ],
