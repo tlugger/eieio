@@ -1,0 +1,63 @@
+[package]
+name = "eio-leaf-gen"
+description = "The build-host generator that turns a service file into LEAF §6.4's baked leaf graph"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# A lib beside the binary, for the reason `eio-daemon`'s and `eio-leaf`'s exist: `tests/` is a
+# second crate and links a library, and LEAF §6.4.4's parity suite is the whole point of this
+# crate having a testable surface at all.
+[lib]
+name = "eio_leaf_gen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eio-leaf-gen"
+path = "src/main.rs"
+
+[dependencies]
+# The service file format (SERVICE-SPEC), including §7's stage-1 and stage-2 validation. This
+# is why the generator is its own crate and not a module of `eio-leaf`: `eio-service` is `std`
+# and cannot compile without atomics (workspace `Cargo.toml`'s note on `toml`), and nothing
+# parses a service file on a leaf tier (CLAUDE.md, SCOPE §3.7). The parsing happens here, on
+# the build host, and none of it reaches the image.
+eio-service.workspace = true
+
+# ABI §4.3's load-time cross-check, which LEAF §3.1 says a leaf MUST run "at firmware build
+# time, where a refusal costs a build rather than a field failure" — this crate is that time.
+# Also `Module::memory_pages`, which LEAF §4.2's per-instance page budget is checked against.
+eio-manifest.workspace = true
+
+# `Descriptor::from_manifest` and `resolve` — the two functions LEAF §6.4.1 says a generator
+# calls and prints the results of, rather than reimplementing. Also `Routes::resolve`, run here
+# so that a table which would not resolve on the device is a build failure instead.
+eio-host-core.workspace = true
+
+# The `Baked*` types themselves (LEAF §6.4.2) live in the runtime crate, because they are what
+# the image is built out of. Default features off: this crate needs the graph types and
+# `leaf_limits`, and has no business linking wasm3 or WAMR to print a file.
+eio-leaf.workspace = true
+
+# The command-line surface. `eio` and `cargo eio` use the same crate and the same derive API.
+clap.workspace = true
+
+[dev-dependencies]
+# The parity suite (LEAF §6.4.4) drives the generated graph through a real engine and asserts
+# it reaches the same routed result `eio_leaf::run_demo`'s hand-written table does, so the test
+# build wants the whole runtime crate — both engines and the golden-block fixtures.
+eio-leaf = { workspace = true, features = ["std", "wasm3", "wamr"] }
+
+# Batches and values, for the three signals the parity suite delivers and the `val` it reads
+# back out of the far end.
+eio-signal.workspace = true
+
+# ABI §4.3's refusal needs a module that *fails* it, and a checked-in `.wasm` nobody can read
+# is a worse fixture than three lines of WAT — the same reason every other crate here carries
+# this dependency for tests only.
+wat.workspace = true
+
+[lints]
+workspace = true
