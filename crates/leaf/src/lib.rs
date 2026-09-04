@@ -87,8 +87,9 @@
 //! - [`timer`] backs `eio:timer` with a single-threaded, poll-driven scheduler (eieio-x7g.2's
 //!   second milestone) — see that module's own docs for why its [`timer::pump`] is a
 //!   legitimate scheduler and not a second lifecycle driver, and for why it is not LEAF §4's
-//!   watchdog. There is still no transport client: no golden block this crate drives needs
-//!   one, and LEAF §8 names no MQTT client on purpose.
+//!   watchdog. There is still no transport client: LEAF §8 now names one — `minimq` 0.13,
+//!   with the measurement behind it in §8.1 — but no golden block this crate drives needs a
+//!   bus, and a host build has no radio to put one on.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -147,7 +148,7 @@ pub struct Instance<E, C, R> {
 /// Everything [`spawn`] needs from the platform beneath it.
 ///
 /// LEAF §2's "what the leaf adds" list, minus the engine (which is [`spawn`]'s own type
-/// parameter) and the transport client (which LEAF §8 leaves unnamed): a clock and an entropy
+/// parameter) and the transport client (LEAF §8's `minimq`, which no host build links): a clock and an entropy
 /// source for `eio:core` (DAEMON §1.1), and a [`StateStore`] for `eio:state` if the block
 /// declares it. Grouped into one value rather than passed as three arguments so that the shape
 /// of "the platform" is a thing with a name — a firmware build fills this in and nothing else.
@@ -256,8 +257,8 @@ where
         if !matches!(capability, Capability::State | Capability::Timer) {
             return Err(format!(
                 "instance {instance_id:?} declares capability {capability:?}, which this \
-                 milestone's bring-up does not wire (`state` and `timer` are; LEAF §8 names no \
-                 transport client and this crate has no `gpio`/`i2c`/`http` yet)"
+                 milestone's bring-up does not wire (`state` and `timer` are; this crate links \
+                 no LEAF §8 transport and has no `gpio`/`i2c`/`http` yet)"
             ));
         }
     }
