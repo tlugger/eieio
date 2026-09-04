@@ -30,7 +30,12 @@
   import * as api from './lib/api/client';
   import { resolveManifest } from './lib/derive/capabilities';
   import { makePropertyNameResolver } from './lib/derive/props';
-  import { revalidateBeforeAct, type RevalidationOutcome } from './lib/api/manifests';
+  import {
+    manifestForAct,
+    revalidateBeforeAct,
+    type CachedManifestLookup,
+    type RevalidationOutcome,
+  } from './lib/api/manifests';
   import {
     addBlockOperations,
     connectOperations,
@@ -377,10 +382,19 @@
   // `handleTapConnection` (so `resolvePropName`, below, has the freshest manifest available by
   // the time a tapped connection's `expr_failure` events start arriving — eieio-m9s.14's
   // fallback stays in place regardless, see this bead's final report for why).
-  async function ensureFreshManifest(reference: string): Promise<void> {
-    if (!selectedNode || selectedNode.class === 'leaf') return; // DESIGNER §3.1: a leaf serves no management API to ask.
-    const cached = manifests.find((m) => m.block_ref === reference);
-    if (!cached) return; // Nothing cached for this reference — the palette's browse flow owns fetching it, not this one.
+  async function ensureFreshManifest(reference: string): Promise<CachedManifestLookup> {
+    // Absence is answered before anything else, including the leaf check below, because it is
+    // not a question about a node at all (DESIGNER §3.3's absence rule, eieio-m9s.45): a
+    // reference this cache has never held has nothing to revalidate and nothing to render, and
+    // that is as true on a leaf — which serves no management API to ask — as anywhere else.
+    // This used to `return` here, silently, which is the bug: the config modal then opened on a
+    // block whose ports and properties the Designer had never seen. The site decides what to do
+    // with the answer; §3.3 gives a different rule to each of the three, so this reports rather
+    // than refuses.
+    const cached = resolveManifest(reference, manifests);
+    const lookup = manifestForAct(reference, cached);
+    if (lookup.status === 'absent') return lookup;
+    if (!selectedNode || selectedNode.class === 'leaf') return lookup; // DESIGNER §3.1: a leaf serves no management API to ask.
     const nodeId = String(selectedNode.id);
     let outcome: RevalidationOutcome;
     try {
@@ -395,7 +409,7 @@
       // §3.3's whole point is that a failed revalidation must not do that.
       outcome = { status: 'unreachable', reason: error instanceof Error ? error.message : String(error) };
     }
-    if (outcome.status !== 'updated') return;
+    if (outcome.status !== 'updated') return lookup;
     const refreshed = { ...(outcome.manifest as object), block_ref: reference } as BlockManifest;
     manifests = manifests.map((m) => (m.block_ref === reference ? refreshed : m));
     // Best-effort: the in-memory palette is already corrected regardless of whether this
@@ -406,6 +420,7 @@
     // of them structurally and never reads a field), while `putCachedManifest` takes the shape
     // a node actually sends. This is the seam where the opaque value gets its name back.
     await api.putCachedManifest(reference, outcome.manifest as NodeManifest).catch(() => {});
+    return { status: 'present', manifest: refreshed };
   }
 
   /** Every distinct block reference a service actually uses — the set `handleStart` and
@@ -527,6 +542,12 @@
       // is one of the three claims a stale manifest can get wrong, and starting a service is
       // exactly that check's moment — `ServiceCanvas`'s capability badges re-render off the
       // same `manifests` this refreshes.
+      //
+      // The `'absent'` answers are deliberately discarded (§3.3's absence rule): a start MUST
+      // NOT be blocked by one. The badge annotates a block the canvas draws either way, the
+      // node re-derives every block's capabilities from the WASM it is about to instantiate and
+      // refuses on its own (DAEMON §3), and refusing here would hand the Designer a veto `eio
+      // services start` has not got — which §8's parity rule forbids.
       await Promise.all(serviceBlockRefs(currentService!).map((ref) => ensureFreshManifest(ref)));
       await api.startService(String(selected!.nodeId), selected!.serviceName);
       currentService = await api.getService(String(selected!.nodeId), selected!.serviceName);
@@ -605,7 +626,24 @@
     // one of the three claims a stale manifest can get wrong — revalidate before showing it,
     // not after.
     const blockRef = currentService?.blocks[id]?.block;
-    if (blockRef) await ensureFreshManifest(blockRef);
+    if (blockRef) {
+      const lookup = await ensureFreshManifest(blockRef);
+      if (lookup.status === 'absent') {
+        // §3.3's absence rule (eieio-m9s.45): of the three act sites this is the one that
+        // *refuses*, because the modal is the manifest — ports, properties, and the fields
+        // arriving at each input are all of it. With none, opening would announce "This block
+        // has no properties", which is not something the Designer knows, while the file's own
+        // `props` sit in the instance being neither shown nor editable and an accept computed
+        // against an empty property list would quietly narrow the operator's edit to the name.
+        //
+        // Refused the same way a tap on a stopped service is (below): a banner naming what is
+        // wrong, not the modal's own `errorMessage` — `editErrorBlockId` stays `null` precisely
+        // because there is no modal to route it into. The node runs the service regardless; the
+        // reason string names the way out (§3.3's browse-and-preview).
+        editErrorMessage = lookup.reason;
+        return;
+      }
+    }
     configuringInstanceId = id;
   }
 
@@ -654,6 +692,11 @@
       // manifest gets wrong. Fired without awaiting: opening the tap must not wait on a
       // network round trip, and eieio-m9s.14's index fallback covers whatever arrives before
       // this resolves.
+      //
+      // An `'absent'` answer is discarded here too (§3.3's absence rule): the property *name*
+      // annotates an `expr_failure` line that is a real runtime failure with or without it, so
+      // the line still renders, with the bare `prop` index that fallback already supplies.
+      // Hiding a failure behind a cache miss would be strictly worse than showing the index.
       if (currentService) void Promise.all(serviceBlockRefs(currentService).map((ref) => ensureFreshManifest(ref)));
     }
   }
@@ -769,7 +812,12 @@
 {/if}
 {/if}
 
-{#if configuringInstance && currentService}
+<!-- `configuringManifest` in the guard is DESIGNER §3.3's absence rule made structural
+     (eieio-m9s.45): `handleConfigure` already refuses to set `configuringInstanceId`
+     without a cached manifest and says why, and this is the backstop that makes the
+     refusal unconstructible rather than remembered — `ConfigModal`'s `manifest` prop is
+     required, so svelte-check fails any other way of mounting it. -->
+{#if configuringInstance && configuringManifest && currentService}
   <ConfigModal
     instance={configuringInstance}
     manifest={configuringManifest}

@@ -10,6 +10,12 @@
 //     index to a property name (§6) — revalidates first, against the node, through the
 //     catch-all proxy, the same way the entry was fetched.
 //
+// §3.3's absence rule (eieio-m9s.45) is the other half, and it is a *different* question:
+// staleness is about a manifest this cache holds, absence is about not holding one. No act site
+// fetches what it is missing — see `manifestForAct` for why neither endpoint that could be made
+// to answer actually answers this question — so the site refuses (the config modal, which is the
+// manifest and nothing else) or degrades (the capability badge, the `prop`-index resolver).
+//
 // This module holds that logic as plain functions, the way `derive/capabilities.ts` and
 // `derive/props.ts` hold theirs, so it tests without a component or a mounted app in the loop.
 // It knows nothing about `fetch`, sessions, or the proxy itself — a caller (`App.svelte`) hands
@@ -113,6 +119,68 @@ function withoutBlockRef(manifest: unknown): unknown {
  *  bookkeeping field on either side. */
 export function manifestsEqual(a: unknown, b: unknown): boolean {
   return deepEqual(withoutBlockRef(a), withoutBlockRef(b));
+}
+
+/** What an act site (§3.3) finds when it asks the cache for the manifest it is about to act on.
+ *  Deliberately a separate answer from {@link RevalidationOutcome}: that one is about a manifest
+ *  the Designer *holds* and whether it may have moved, and it has nothing to say about one that
+ *  was never there. */
+export type CachedManifestLookup =
+  /** The cache holds an entry for this reference. `manifest` is it, unchanged. */
+  | { status: 'present'; manifest: unknown }
+  /** The cache holds nothing for this reference. `reason` is operator-facing, names the
+   *  reference, and says how to fix it. */
+  | { status: 'absent'; reason: string };
+
+/**
+ * DESIGNER §3.3's absence rule (eieio-m9s.45): **absence is not staleness**, and no act site
+ * fetches the entry it is missing.
+ *
+ * `revalidateBeforeAct` below answers "could what I hold have moved". This answers the question
+ * that comes before it — "do I hold anything at all" — which the staleness rule used to swallow:
+ * a revalidation with nothing to revalidate returns early having said nothing, and the config
+ * modal then opened on a block whose ports and properties the Designer had never seen. The case
+ * is ordinary rather than exotic, because a service file is the node's and not the Designer's: a
+ * reload picks up a hand-edited file, or one an agent wrote, naming a block never browsed here.
+ *
+ * **Why this returns a refusal instead of fetching** (§3.3 records the argument in full, because
+ * "just fetch it" is the obvious answer and it is wrong twice over):
+ *
+ *   - `GET /blocks/available/{reference}` answers what a *registry* offers, explicitly not what
+ *     the node installed (DAEMON §9.8) — which is exactly why an entry sourced from it is
+ *     *unverified* the moment it is stored. Rendering a running block's ports from it is the
+ *     stale-manifest failure the three act sites exist to prevent, manufactured on purpose.
+ *   - `GET /blocks` cannot be asked at all. A node keys its block cache by name and version
+ *     (DAEMON §4) and renders every entry `name:version`, so a file naming
+ *     `ghcr.io/tlugger/filter:1.2.0` has no entry in that listing keyed by what it names — the
+ *     same asymmetry that makes a registry-ful cache entry permanently `'unreachable'` in
+ *     `revalidateBeforeAct`. Fetch-on-absence would fail for precisely the references most
+ *     likely to be absent, and fail silently, back to the empty render it was meant to prevent.
+ *
+ * The `cachedManifest` argument is whatever `derive/capabilities.ts`'s `resolveManifest` found —
+ * the exact-match lookup is that function's rule and is deliberately not repeated here.
+ */
+export function manifestForAct(reference: string, cachedManifest: unknown): CachedManifestLookup {
+  if (cachedManifest === undefined || cachedManifest === null) {
+    return { status: 'absent', reason: describeMissingManifest(reference) };
+  }
+  return { status: 'present', manifest: cachedManifest };
+}
+
+/**
+ * What an operator is told when an act site refuses (§3.3). It names the reference — never the
+ * block's instance id or label, since the reference is what the cache is keyed by and what has
+ * to be added — and it names the one way in: this section's own browse-and-preview, per node.
+ *
+ * Kept beside `manifestForAct` rather than in the component that shows it because the refusal
+ * and its wording are the same decision: a refusal that did not say how to undo itself would be
+ * a dead end, and §3.3 requires the site to "say which reference it lacks and how to add it".
+ */
+export function describeMissingManifest(reference: string): string {
+  return (
+    `The Designer has no manifest for ${reference}, so this block's ports and properties cannot be shown. ` +
+    `Open the block library, browse the repository this reference names on this node, and preview it.`
+  );
 }
 
 /**

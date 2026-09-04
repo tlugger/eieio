@@ -18,7 +18,16 @@
 
   interface Props {
     instance: BlockInstance;
-    manifest: BlockManifest | undefined;
+    /** **Required, and that is DESIGNER §3.3's absence rule rather than a convenience**
+     *  (eieio-m9s.45): this modal *is* the manifest — ports, properties, and the fields
+     *  arriving at each input are all of what it renders — so a block the manifest cache has
+     *  nothing for has no modal. `App.svelte` refuses to open one and names the reference it
+     *  lacks instead; typing this prop non-optional is what makes that refusal something
+     *  svelte-check enforces rather than something a caller remembers. It was optional, and
+     *  the modal rendered "This block has no properties" for a manifest it did not have —
+     *  which is not the same claim, and hid the instance's own `props` from the operator
+     *  editing them. */
+    manifest: BlockManifest;
     manifests: BlockManifest[];
     blocks: Record<string, BlockInstance>;
     connections: Connection[];
@@ -67,7 +76,7 @@
 
   function handleAccept() {
     const changed: Record<string, string | undefined> = {};
-    const properties = manifest?.properties ?? [];
+    const properties = manifest.properties;
     for (const prop of properties) {
       const had = Object.prototype.hasOwnProperty.call(instance.props, prop.name);
       const has = Object.prototype.hasOwnProperty.call(overrides, prop.name);
@@ -107,7 +116,7 @@
   const verification = $derived(describeVerification(instance.block));
 
   const upstream = $derived.by((): UpstreamField[] => {
-    const inputs = manifest?.inputs ?? [];
+    const inputs = manifest.inputs;
     const rows: UpstreamField[] = [];
     for (const input of inputs) {
       const edges = connections.filter((c) => c.toId === instance.id && c.toPort === input.name);
@@ -158,7 +167,7 @@
           autocomplete="off"
         />
         <div class="modal__type">
-          {manifest?.name ?? instance.block} · <code>{instance.id}</code>
+          {manifest.name} · <code>{instance.id}</code>
           {#if verification === 'unverified'}
             <span
               class="modal__verification"
@@ -182,19 +191,15 @@
 
     {#if docsOpen}
       <div class="modal__docs">
-        {#if manifest}
-          <p>{manifest.description ?? 'No description.'}</p>
-          <dl>
-            <dt>Version</dt>
-            <dd>{manifest.version}</dd>
-            <dt>Capabilities</dt>
-            <dd>{manifest.capabilities.length > 0 ? manifest.capabilities.join(', ') : 'none'}</dd>
-            <dt>Targets</dt>
-            <dd>{manifest.targets.length > 0 ? manifest.targets.join(', ') : 'host-implemented (no compiled artifact)'}</dd>
-          </dl>
-        {:else}
-          <p>No manifest resolved for <code>{instance.block}</code>.</p>
-        {/if}
+        <p>{manifest.description ?? 'No description.'}</p>
+        <dl>
+          <dt>Version</dt>
+          <dd>{manifest.version}</dd>
+          <dt>Capabilities</dt>
+          <dd>{manifest.capabilities.length > 0 ? manifest.capabilities.join(', ') : 'none'}</dd>
+          <dt>Targets</dt>
+          <dd>{manifest.targets.length > 0 ? manifest.targets.join(', ') : 'host-implemented (no compiled artifact)'}</dd>
+        </dl>
       </div>
     {/if}
 
@@ -217,7 +222,7 @@
     {/if}
 
     <div class="modal__properties">
-      {#if manifest && manifest.properties.length > 0}
+      {#if manifest.properties.length > 0}
         {#each manifest.properties as prop (prop.name)}
           <ExpressionField
             name={prop.name}
@@ -233,6 +238,9 @@
           />
         {/each}
       {:else}
+        <!-- Now only ever a *true* statement: the manifest is required (see `Props`), so this
+             is the manifest declaring no properties, never the Designer having no manifest —
+             DESIGNER §3.3's absence rule, eieio-m9s.45. -->
         <p class="modal__no-properties">This block has no properties.</p>
       {/if}
     </div>
