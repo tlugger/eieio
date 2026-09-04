@@ -24,14 +24,90 @@
     node: NodeSummary | null;
     onSelect: (blockRef: string) => void;
     onClose: () => void;
+    /** `GET /blocks/available?repository=` on {@link node} (DAEMON §9.8) — the candidate
+     *  references one repository offers there, uninstalled. */
+    onBrowseRegistry: (repository: string) => Promise<string[]>;
+    /** `GET /blocks/available/{reference}`, cached: the palette gains an entry describing a
+     *  block the node has **not** installed (DESIGNER §3.3 — *unverified* from the moment it is
+     *  stored, since a browse writes nothing to the node's own cache). */
+    onPreview: (reference: string) => Promise<void>;
+    /** `POST /blocks/pull` (DAEMON §9, §4.1): install it on the node. The cache invalidation
+     *  DESIGNER §3.3 requires travels with the pull inside `lib/api/client.ts`'s `pullBlock`,
+     *  so nothing on this side of the prop has to remember it. */
+    onInstall: (reference: string) => Promise<void>;
   }
 
-  let { manifests, node, onSelect, onClose }: Props = $props();
+  let { manifests, node, onSelect, onClose, onBrowseRegistry, onPreview, onInstall }: Props = $props();
 
   let query = $state('');
   /** "Only what this node can run" — disabled in the template when `node` is `null`, since there
    *  is nothing to check compatibility against. */
   let onlyRunnable = $state(false);
+
+  // --- Installing from a registry (DESIGNER §3.3, §5; DAEMON §9.8, §4.1) ----------------------
+  //
+  // The palette reads the Designer's manifest cache and nothing else — but until eieio-m9s.40
+  // nothing in this SPA ever *filled* that cache, so a fresh Designer showed an empty library
+  // with no way to add to it. This is that way in, and it is deliberately per node: DAEMON §9.8
+  // makes browsing the node's job because the node holds the registry credentials and enforces
+  // the signature policy, so two nodes with different registries configured genuinely offer
+  // different blocks. There is no Designer-wide "all blocks everywhere" to show here.
+  //
+  // A repository, not a registry: `GET /v2/_catalog` is an optional OCI extension GHCR refuses
+  // outright, so nothing can be asked to enumerate itself. The operator names
+  // `[registry/][namespace/]name` and the node lists that repository's tags.
+
+  let repository = $state('');
+  let browsing = $state(false);
+  let browseError = $state<string | null>(null);
+  /** The candidate references the last browse found, or `null` before the first one. Empty is a
+   *  real answer (a repository with no tags) and reads differently from "not asked yet". */
+  let offered = $state<string[] | null>(null);
+  /** The reference an install or a preview is in flight for — one at a time, so a row can say
+   *  which of its two buttons is working without a second piece of state per row. */
+  let pending = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
+
+  /** DESIGNER §3.1: a leaf serves no management API at all, so it can neither be browsed nor
+   *  pulled to — its blocks are compiled into firmware (SCOPE §3.7). Refused by name here for
+   *  the same reason the proxy refuses one by name: a connection error would read as a node
+   *  that is down. */
+  const canInstall = $derived(node !== null && node.class !== 'leaf');
+
+  /** Which of the offered references the palette already describes — an exact match on the whole
+   *  reference, the same rule DESIGNER §3.3 keys `manifest_cache` by. Note what this does *not*
+   *  claim: a cached entry means the Designer has a manifest for that reference, never that the
+   *  node has it installed. A preview caches without installing. */
+  const inPalette = $derived(new Set(manifests.map((m) => m.block_ref)));
+
+  async function browse(event: SubmitEvent) {
+    event.preventDefault();
+    const repo = repository.trim();
+    if (repo === '' || !canInstall) return;
+    browsing = true;
+    browseError = null;
+    actionError = null;
+    try {
+      offered = await onBrowseRegistry(repo);
+    } catch (error) {
+      offered = null;
+      browseError = error instanceof Error ? error.message : String(error);
+    } finally {
+      browsing = false;
+    }
+  }
+
+  async function act(reference: string, run: (reference: string) => Promise<void>) {
+    pending = reference;
+    actionError = null;
+    try {
+      await run(reference);
+    } catch (error) {
+      actionError = error instanceof Error ? error.message : String(error);
+    } finally {
+      pending = null;
+    }
+  }
 
   // eieio-m9s.21: derived from `manifests` — the manifest cache this component is handed — on
   // every read, never copied into this component's own state (DESIGNER §2 makes the cache the
@@ -145,10 +221,86 @@
             No blocks match "{query}".
           {:else if onlyRunnable}
             No blocks are confirmed to run on {node?.name}.
+          {:else}
+            Nothing in the palette yet — browse a repository below to add a block.
           {/if}
         </li>
       {/if}
     </ul>
+
+    <!-- DAEMON §9.8: browsing is the node's job, per node, because the node holds the registry
+         credentials and enforces the signature policy. There is no Designer-wide catalogue to
+         show, and this section says so rather than implying one. -->
+    <div class="library__registry">
+      <form class="library__registry-form" onsubmit={browse}>
+        <input
+          bind:value={repository}
+          type="text"
+          class="library__registry-input"
+          placeholder="ghcr.io/you/block"
+          aria-label="Repository to browse"
+          disabled={!canInstall}
+        />
+        <button type="submit" class="library__registry-browse" disabled={!canInstall || browsing || repository.trim() === ''}>
+          {browsing ? 'Listing…' : 'List tags'}
+        </button>
+      </form>
+
+      {#if !canInstall}
+        <p class="library__registry-note">
+          {node
+            ? `${node.name} is leaf-class: its blocks are compiled into firmware, not pulled over HTTP (SCOPE §3.7).`
+            : 'Select a node to browse a registry — what is installable is per node (DAEMON §9.8).'}
+        </p>
+      {:else}
+        <p class="library__registry-note">
+          A repository on {node?.name}, `[registry/]namespace/name` — a registry cannot be asked to
+          enumerate itself (DAEMON §9.8).
+        </p>
+      {/if}
+
+      {#if browseError}
+        <p class="library__registry-error" role="alert">{browseError}</p>
+      {/if}
+      {#if actionError}
+        <p class="library__registry-error" role="alert">{actionError}</p>
+      {/if}
+
+      {#if offered !== null}
+        {#if offered.length === 0}
+          <p class="library__registry-note">That repository offers no tags on {node?.name}.</p>
+        {:else}
+          <ul class="library__offered">
+            {#each offered as reference (reference)}
+              <li class="library__offered-row">
+                <code class="library__offered-ref">{reference}</code>
+                {#if inPalette.has(reference)}
+                  <span class="library__offered-known">in palette</span>
+                {/if}
+                <button
+                  type="button"
+                  class="library__offered-action"
+                  disabled={pending !== null}
+                  title="Read this reference's manifest from {node?.name} and show it in the palette, without installing it"
+                  onclick={() => act(reference, onPreview)}
+                >
+                  {pending === reference ? '…' : 'Preview'}
+                </button>
+                <button
+                  type="button"
+                  class="library__offered-action library__offered-action--install"
+                  disabled={pending !== null}
+                  title="Pull this reference into {node?.name}'s block cache"
+                  onclick={() => act(reference, onInstall)}
+                >
+                  {pending === reference ? '…' : 'Install'}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+      {/if}
+    </div>
   </div>
 </div>
 
@@ -348,5 +500,110 @@
     text-align: center;
     color: var(--chrome-text-muted);
     font-size: 13px;
+  }
+
+  /* The install section sits below the list and above nothing — a footer, so the palette itself
+     stays the first thing read (DESIGNER §5: the library opens over the canvas on demand). */
+  .library__registry {
+    flex: 0 0 auto;
+    border-top: 1px solid var(--chrome-border);
+    padding: 10px;
+  }
+
+  .library__registry-form {
+    display: flex;
+    gap: 8px;
+  }
+
+  .library__registry-input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 6px 10px;
+    border: 1px solid var(--chrome-border);
+    border-radius: 6px;
+    background: var(--chrome-bg);
+    color: var(--chrome-text);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .library__registry-browse {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    border: 1px solid var(--chrome-border);
+    border-radius: 6px;
+    background: var(--chrome-bg);
+    color: var(--chrome-text);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .library__registry-browse:disabled,
+  .library__offered-action:disabled,
+  .library__registry-input:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+
+  .library__registry-note {
+    margin: 6px 0 0;
+    font-size: 10px;
+    color: var(--chrome-text-muted);
+    font-style: italic;
+  }
+
+  .library__registry-error {
+    margin: 6px 0 0;
+    font-size: 10px;
+    color: var(--state-errored);
+  }
+
+  .library__offered {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    max-height: 140px;
+    overflow-y: auto;
+  }
+
+  .library__offered-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+  }
+
+  .library__offered-ref {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+
+  .library__offered-known {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--chrome-text-muted);
+    font-style: italic;
+  }
+
+  .library__offered-action {
+    flex: 0 0 auto;
+    padding: 3px 8px;
+    border: 1px solid var(--chrome-border);
+    border-radius: 6px;
+    background: var(--chrome-bg);
+    color: var(--chrome-text);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .library__offered-action--install {
+    background: var(--accent);
+    color: var(--accent-contrast);
+    border-color: transparent;
   }
 </style>
