@@ -242,8 +242,13 @@ impl IntoResponse for Failure {
 }
 
 /// The `422` envelope's shape (DESIGNER-SPEC §3.2): `{ errors }`, nothing else.
+///
+/// `pub(crate)`, not private: `service_parse`'s own 422 (eieio-m9s.37) answers the identical
+/// shape for the identical reason — both endpoints turn a `Vec<eio_service::Error>` into the
+/// same `ErrorOut` list — and naming this type from there is what keeps that one `#[utoipa::path]`
+/// declaration rather than a second, hand-copied struct describing the same JSON.
 #[derive(Debug, Serialize, ToSchema)]
-struct ErrorsBody {
+pub(crate) struct ErrorsBody {
     errors: Vec<ErrorOut>,
 }
 
@@ -404,7 +409,12 @@ fn edit_error(index: usize, error: EditError) -> Failure {
 /// `Error::Property` can be traced back to the `set_prop` operation that wrote it — see the
 /// module doc for why that is the only stage-1 violation a per-operation check does not
 /// already catch.
-fn service_errors(errors: Vec<Error>, operations: Option<&[Operation]>) -> Failure {
+///
+/// `pub(crate)`: `service_parse::parse` (eieio-m9s.37) calls this with `operations: None` too —
+/// a plain read has no operations to attribute a `Property` error back to, same as this
+/// module's own initial `Document::parse` above — rather than reimplementing the
+/// `Vec<eio_service::Error> -> Vec<ErrorOut>` mapping a second time.
+pub(crate) fn service_errors(errors: Vec<Error>, operations: Option<&[Operation]>) -> Failure {
     Failure::Invalid(
         errors
             .into_iter()

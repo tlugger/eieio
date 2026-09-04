@@ -1,4 +1,5 @@
 // eieio-m9s.30: the real fetches behind `listSystems`/`listNodes`/`listBlockManifests`.
+// eieio-m9s.37 adds `parseServiceText` (`POST /api/service-parse`) to that set below.
 //
 // No test here needs a running backend — DESIGNER §3.1's own words are the bead's own rule:
 // "a test run must not depend on a backend being up." `fetch` is stubbed at the global, and
@@ -19,6 +20,7 @@ import {
   probeNode,
   addRegistry,
   deleteRegistry,
+  parseServiceText,
   SessionRequiredError,
   WrongPasswordError,
   BackendRequestError,
@@ -710,5 +712,134 @@ describe('deleteRegistry — DELETE /api/registries/{id}', () => {
     );
     expect(failure).toBeInstanceOf(BackendRequestError);
     expect((failure as Error).message).toContain('this Designer serves no DELETE /api/registries/3');
+  });
+});
+
+describe('parseServiceText — POST /api/service-parse', () => {
+  it('posts {toml}, with credentials, and decodes a well-formed response', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        name: 'kitchen',
+        autostart: false,
+        overflow: 'backpressure',
+        blocks: {
+          b7k2: { id: 'b7k2', name: 'Thermometer', block: 'temp-sensor:1.0.0', props: {} },
+        },
+        connections: [{ from_id: 'b7k2', from_port: 'out', to_id: 'f3m9', to_port: 'in' }],
+        ui: { b7k2: { x: 10, y: 20 } },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await parseServiceText('# whatever text a GET returned\nname = "kitchen"\n');
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/service-parse');
+    expect(init.method).toBe('POST');
+    expect(init.credentials).toBe('same-origin');
+    expect(JSON.parse(init.body as string)).toEqual({
+      toml: '# whatever text a GET returned\nname = "kitchen"\n',
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      service: {
+        name: 'kitchen',
+        autostart: false,
+        overflow: 'backpressure',
+        blocks: {
+          b7k2: { id: 'b7k2', name: 'Thermometer', block: 'temp-sensor:1.0.0', props: {} },
+        },
+        // The wire's snake_case from_id/from_port/to_id/to_port, reshaped into the shell's own
+        // camelCase Connection fields — see `backend.ts`'s own doc on why this reshaping
+        // happens here rather than by renaming either shape to match the other.
+        connections: [{ fromId: 'b7k2', fromPort: 'out', toId: 'f3m9', toPort: 'in' }],
+        ui: { b7k2: { x: 10, y: 20 } },
+      },
+    });
+  });
+
+  it('answers {ok: false, errors} on a 422, without throwing', async () => {
+    // SERVICE §7: a file that does not parse is the ordinary case, not a server fault — this
+    // must come back as data, the same way `/api/service-edit`'s own 422 already does, never
+    // as a rejected promise a caller would have to wrap in try/catch to render.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(422, {
+        errors: [{ message: 'unknown field `autostrat`, expected `autostart`' }],
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await parseServiceText('autostrat = true\n');
+
+    expect(result).toEqual({
+      ok: false,
+      errors: [{ message: 'unknown field `autostrat`, expected `autostart`' }],
+    });
+  });
+
+  it('carries a property failure\'s instance/property/code/span through untouched', async () => {
+    const errorOut = {
+      message: 'b7k2.threshold: Parse at 0..4: not a valid expression',
+      instance: 'b7k2',
+      property: 'threshold',
+      code: 'PARSE',
+      span: { start: 0, end: 4 },
+    };
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(422, { errors: [errorOut] })));
+
+    const result = await parseServiceText('whatever text produced this on the real backend');
+
+    expect(result).toEqual({ ok: false, errors: [errorOut] });
+  });
+
+  it('answers with no `ui` field when the file had none, rather than inventing an empty object', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse(200, {
+          name: 'empty',
+          autostart: false,
+          overflow: 'backpressure',
+          blocks: {},
+          connections: [],
+        }),
+      ),
+    );
+
+    const result = await parseServiceText('name = "empty"\n');
+
+    expect(result).toEqual({
+      ok: true,
+      service: {
+        name: 'empty',
+        autostart: false,
+        overflow: 'backpressure',
+        blocks: {},
+        connections: [],
+        ui: undefined,
+      },
+    });
+  });
+
+  it('throws SessionRequiredError on a 401', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'nope' })));
+    await expect(parseServiceText('name = "x"\n')).rejects.toBeInstanceOf(SessionRequiredError);
+  });
+
+  it('throws BackendRequestError on a 500, rather than answering {ok: false}', async () => {
+    // A 422 is SERVICE §7's ordinary "this text does not parse" outcome and is data (above);
+    // a 500 is this host itself failing, which is not the same kind of thing and must not be
+    // silently folded into the same {ok: false} shape a caller would treat as "fix your file".
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(500, { error: 'internal', message: 'the sky is falling' })),
+    );
+    const failure = await parseServiceText('name = "x"\n').then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(BackendRequestError);
+    expect((failure as Error).message).toContain('the sky is falling');
   });
 });

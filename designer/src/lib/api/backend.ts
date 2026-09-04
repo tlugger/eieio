@@ -1,7 +1,12 @@
-// The real fetches behind three of `client.ts`'s exports — DESIGNER §3.1's own small REST
-// surface: `GET /api/systems`, `GET /api/nodes`, `GET /api/blocks`. Those are the only routes
-// `crates/designer` serves directly (everything else is proxied to a node, DESIGNER §3.1's
-// catch-all, and needs one running — out of this bead's scope by the sub-plan's own words).
+// The real fetches behind several of `client.ts`'s exports — DESIGNER §3.1's own small REST
+// surface: `GET /api/systems`, `GET /api/nodes`, `GET /api/blocks`, and (eieio-m9s.37)
+// `POST /api/service-parse`. Those are routes `crates/designer` serves directly (everything
+// else proxied-service-, tap- or log-shaped is proxied to a node, DESIGNER §3.1's catch-all,
+// and needs one running — out of this bead's scope by the sub-plan's own words).
+// `service-parse` sits beside them rather than with the proxy calls for the same reason
+// `service-edit` would if this file had wired it: DESIGNER §3.2 (amended) makes it a stateless
+// transform this crate's own backend answers, with no node reached and no service identity —
+// not a forward to one.
 //
 // Kept out of client.ts itself so that file's job stays "which implementation, not how it
 // talks": client.ts imports this module and mock.ts side by side and picks between them per
@@ -15,10 +20,15 @@
 // assert against.
 
 import type {
+  BlockInstance,
   BlockManifest,
   NewNodeInput,
   NewRegistryInput,
   NodeSummary,
+  OverflowPolicy,
+  ParsedService,
+  ParsedServiceError,
+  ParseServiceResult,
   RegistrySummary,
   SystemSummary,
 } from './types';
@@ -318,4 +328,73 @@ export async function listBlockManifests(): Promise<BlockManifest[]> {
     block_ref: entry.block_ref,
     ...entry.manifest,
   })) as BlockManifest[];
+}
+
+/**
+ * The wire shape of `POST /api/service-parse`'s 200 body
+ * (`crates/designer/src/api/service_parse.rs`'s `Out`): a real, field-for-field mirror,
+ * `connections` included — see {@link ParsedService}'s own doc for why `connections` is NOT
+ * reshaped until {@link parseServiceText} below builds the `ParsedService` this function's
+ * caller actually wants.
+ */
+interface ServiceParseOut {
+  name: string;
+  autostart: boolean;
+  overflow: OverflowPolicy;
+  blocks: Record<string, BlockInstance>;
+  connections: Array<{ from_id: string; from_port: string; to_id: string; to_port: string }>;
+  ui?: Record<string, unknown>;
+}
+
+/**
+ * `POST /api/service-parse` (DESIGNER §3.2, amended eieio-m9s.37): the read counterpart of
+ * `/api/service-edit`, reached the same way — this crate's own backend, not the proxy, because
+ * neither endpoint reaches a node (see `backend.ts`'s own module doc, above).
+ *
+ * Cannot reuse {@link postJson}: DESIGNER §3.2 makes a `422` here an *expected*, structured
+ * outcome a caller switches on (SERVICE §7 — "a file that does not parse is the ordinary
+ * case"), the same way `/api/service-edit`'s own `422` already is, never a thrown
+ * `BackendRequestError` the way an actual server fault would be. `postJson` has no way to tell
+ * those apart short of a caller catching by status code, so this function decodes `422` into
+ * {@link ParseServiceResult}'s `{ok: false}` arm itself and reserves the thrown path for
+ * `401`/other real failures, matching `serviceEdit`'s own mock counterpart in spirit (`ok`
+ * discriminates a real outcome; a throw means the request itself did not complete).
+ *
+ * Reshapes the wire's snake_case `connections` (`from_id`/`from_port`/`to_id`/`to_port`) into
+ * {@link Connection}'s existing camelCase fields — see {@link ParsedService}'s own doc for why
+ * that reshaping happens here and not by changing either shape to match the other.
+ */
+export async function parseServiceText(toml: string): Promise<ParseServiceResult> {
+  const path = '/api/service-parse';
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ toml }),
+  });
+  if (response.status === 401) {
+    throw new SessionRequiredError(path);
+  }
+  if (response.status === 422) {
+    const body = (await response.json()) as { errors: ParsedServiceError[] };
+    return { ok: false, errors: body.errors };
+  }
+  if (!response.ok) {
+    throw await backendErrorFrom(path, response);
+  }
+  const body = (await response.json()) as ServiceParseOut;
+  const service: ParsedService = {
+    name: body.name,
+    autostart: body.autostart,
+    overflow: body.overflow,
+    blocks: body.blocks,
+    connections: body.connections.map((connection) => ({
+      fromId: connection.from_id,
+      fromPort: connection.from_port,
+      toId: connection.to_id,
+      toPort: connection.to_port,
+    })),
+    ui: body.ui,
+  };
+  return { ok: true, service };
 }

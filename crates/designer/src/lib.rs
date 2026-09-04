@@ -159,6 +159,10 @@ pub fn routes() -> Vec<Route> {
             axum::routing::put(api::blocks::put).delete(api::blocks::delete),
         ),
         (&["POST"], "/service-edit", post(api::service_edit::edit)),
+        // The read counterpart of the line above (eieio-m9s.37, DESIGNER §3.2 amended): same
+        // statelessness, same reason (`api::service_parse`'s module doc), text in either
+        // direction.
+        (&["POST"], "/service-parse", post(api::service_parse::parse)),
         // `any()`: every method reaches the same handler, so one representative method is
         // enough for the auth-boundary test to probe — the guard sits in front of dispatch and
         // does not care which method matched it.

@@ -60,6 +60,7 @@ use utoipa::OpenApi;
         super::blocks::put,
         super::blocks::delete,
         super::service_edit::edit,
+        super::service_parse::parse,
     ),
     tags(
         (name = "session", description = "This Designer's own login gate (DESIGNER §3)"),
@@ -68,6 +69,7 @@ use utoipa::OpenApi;
         (name = "registries", description = "Block registry sources (DESIGNER §2)"),
         (name = "blocks", description = "The manifest cache the palette reads from (DESIGNER §3.3)"),
         (name = "service-edit", description = "The stateless, structure-preserving service-file editor (DESIGNER §3.2)"),
+        (name = "service-parse", description = "The read counterpart of service-edit: text in, the canvas's structure out (DESIGNER §3.2, amended)"),
     ),
 )]
 pub struct Document;

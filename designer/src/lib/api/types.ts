@@ -267,6 +267,64 @@ export interface ServiceDefinition {
   text: string;
 }
 
+/**
+ * `POST /api/service-parse` (DESIGNER §3.2, amended eieio-m9s.37): the structure a canvas
+ * draws, derived from a service file's *text* on every request — never stored, never a second
+ * source of truth (see {@link ServiceDefinition.text}'s own note on the one-editor rule this
+ * mirrors in the read direction). Mirrors `crates/designer/src/api/service_parse.rs`'s `Out`
+ * field for field.
+ *
+ * Deliberately its own type rather than a slice of {@link ServiceDefinition}: that interface
+ * also carries `state`/`error`/`etag`/`text`, which are proxy- and daemon-derived facts about
+ * *which* service this is, not part of what a bare parse of *some* text answers — this
+ * endpoint "has no notion of which service it is [reading]" (DESIGNER §3.2's own words about
+ * its write counterpart, true here in the same way). A caller assembling a full
+ * `ServiceDefinition` combines this with those other facts itself; this type does not invent a
+ * partial one.
+ *
+ * `blocks`' values reuse {@link BlockInstance} — an exact shape match with the wire's own
+ * `BlockOut` (`id`, `name?`, `block`, `props`) — but `connections` do NOT reuse {@link
+ * Connection} directly: the wire's `ConnectionOut` is `{from_id, from_port, to_id, to_port}`
+ * (snake_case, Rust's own convention, matching this crate's other real wire DTOs like {@link
+ * NodeSummary}'s `system_id`/`last_seen`), and `backend.ts`'s `parseServiceText` reshapes each
+ * one into {@link Connection}'s existing camelCase fields before this type ever sees it — the
+ * same kind of reshaping `listBlockManifests` already does for `GET /api/blocks`.
+ */
+export interface ParsedService {
+  name: string;
+  autostart: boolean;
+  overflow: OverflowPolicy;
+  blocks: Record<string, BlockInstance>;
+  connections: Connection[];
+  /**
+   * `[ui]`, reshaped to JSON member for member and never interpreted (SERVICE §6 — see
+   * `crates/designer/src/api/service_parse.rs`'s own module doc, which this mirrors). **Not**
+   * {@link UiLayout}: that shape is this shell's own convention for the value it *writes*
+   * through `set_ui` (`lib/service/toml-values.ts`), not a fact about what `[ui]` contains on
+   * read — reading `x`/`y`/`zoom` (or anything else) out of this object is a caller's own job,
+   * the same convention DESIGNER §4.1 already gives the write path. Absent when the file
+   * declares no `[ui]` table at all, which is not the same thing as an empty one.
+   */
+  ui?: Record<string, unknown>;
+}
+
+/** One entry of `POST /api/service-parse`'s `422 { errors }` — the identical shape {@link
+ *  ServiceEditError} already carries for `/api/service-edit`'s own 422, because both endpoints
+ *  turn the same `eio_service::Error` list into the same `ErrorOut` JSON on the Rust side
+ *  (`crates/designer/src/api/service_parse.rs`'s module doc: "reused rather than restated"). A
+ *  type alias, not a second interface, so the two cannot drift by one growing a field the other
+ *  does not get. */
+export type ParsedServiceError = ServiceEditError;
+
+/** `POST /api/service-parse`'s own result, matching {@link ServiceEditResult}'s
+ * `{ok}`-discriminated shape: a structure on success, SERVICE §7's own error list on a file
+ * that does not parse — the ordinary case for a hand-edited file, not a bug to swallow (see
+ * `backend.ts`'s `parseServiceText`, and this bead's own "prove it can fail" report for what a
+ * caller that discarded `errors` and rendered an empty service would get wrong). */
+export type ParseServiceResult =
+  | { ok: true; service: ParsedService }
+  | { ok: false; errors: ParsedServiceError[] };
+
 /** SERVICE-SPEC §9 / DESIGNER §3.2 (amended commit dc83e98, landed in
  * `crates/designer`'s `service_edit.rs` — a real backend this bead does not
  * own or generate a schema from; see `response_shapes.rs`'s module doc):

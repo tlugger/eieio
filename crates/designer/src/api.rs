@@ -8,5 +8,6 @@ pub mod openapi;
 pub mod proxy;
 pub mod registries;
 pub mod service_edit;
+pub mod service_parse;
 pub mod session;
 pub mod systems;
