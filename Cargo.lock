@@ -1185,6 +1185,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "eio-leaf-mono"
+version = "0.1.0"
+dependencies = [
+ "eio-host-core",
+ "eio-leaf",
+]
+
+[[package]]
 name = "eio-manifest"
 version = "0.1.0"
 dependencies = [

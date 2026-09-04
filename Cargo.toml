@@ -19,6 +19,7 @@ members = [
     "crates/host-core",
     "crates/leaf",
     "crates/leaf-gen",
+    "crates/leaf-mono",
     "crates/manifest",
     "crates/service",
     "crates/signal",

@@ -52,14 +52,22 @@ What the leaf adds on top, and what it MUST NOT:
 
 |Crosses (`no_std` + `alloc`)|Behind `std`, because it is a platform|
 |---|---|
-|`spawn` — ABI §5.1 steps 0–3, generic over the engine, clock, entropy source and `StateStore`|the wasm3 binding (§3): `wasm3x` is `std`|
+|`spawn` — ABI §5.1 steps 0–3, generic over the engine, clock, entropy source and `StateStore`|both engine bindings (§3): `wasm3x` is `std`, and `eio-wamr-host` drives WAMR's C core with `CString`, `Mutex` and `Once`|
 |the `eio:timer` scheduler, generic over its clock|the `eio:state` flat-file stand-in (§5): `std::fs`, and flash is §11's|
 |the leaf's budgets (§4) and the router wiring a baked graph needs (§6)|the host clock and entropy source (DAEMON §1.1)|
 ||the golden-block fixtures, the demo binary and `tests/` (§9 runs on the host build)|
 
 **A leaf's own `main` is not part of this**, and the crate's `[[bin]]` is skipped on a bare-metal target rather than compiled: a firmware image needs a global allocator and a `#[panic_handler]`, and which ones is the per-target build configuration the paragraph above already defers. They arrive with the target, not before it.
 
-What this therefore does **not** claim: no cross-compiled image has been linked, flashed or run. The boundary is a measurement of how much of a leaf is already written — the portable half is — and it is the input to picking a target, not a substitute for it.
+**Building `eio-leaf` alone type-checks the left column; it does not compile it** (eieio-x7g.2.19). Rustc type-checks a generic function's body once, in the abstract, and monomorphises it only where it is instantiated — and almost everything in that column is generic: `spawn<E, C, R, S>`, `spawn_resolved<E, C, R, S>`, `spawn_graph<E, C, R, S>`, `timer::Scheduler<C>`, `timer::pump<E, C>`. `crates/leaf` instantiates none of them itself; every call site is in its `main.rs` or its `tests/`, and both are `std`. Measured on `riscv32imc-unknown-none-elf` before the anchor below existed, everything `libeio_leaf.rlib` emitted was `leaf_budgets`, `leaf_limits`, `timer::Scheduled` and `BakedGraph`'s non-generic methods. `spawn` and `pump` emitted nothing at all, on either target.
+
+**That leg is not worthless and this section does not treat it as one.** A `std::fs::read` in a generic body fails to compile against a target with no `std` whether or not anything instantiates it, and catching that is what the gate is mainly for. What type-checking alone cannot reach is what rustc defers to monomorphisation — `const` evaluation over a type parameter, bounds satisfied only at the concrete type — and, underneath all of it, LLVM actually lowering those bodies to instructions for a 32-bit target with no atomics and no FPU.
+
+**So the gate instantiates them.** `crates/leaf-mono` (`eio-leaf-mono`) is a workspace member with one job: it calls `spawn`, `spawn_graph`, `pump` and `Scheduler::new` at concrete types, so that building it for both of §2's targets emits code for the whole left column. It is in `nostd_crates` beside `eio-leaf`, and both legs are wanted — one proves the library carries no `std`, the other proves those bodies lower to instructions.
+
+**What that crate is allowed to be.** It implements no ABI §7 host function, adds no clock (it uses `eio_host_core::Clock`, which already exists), and supplies one type whose every method refuses — an engine that traps, an entropy source that errors, a store that reports `StateError::Io`. Nothing calls its functions; they are `pub` so that rustc treats them as codegen roots, and that is the whole of their purpose. It is a separate crate rather than a `#[cfg(not(feature = "std"))]` block inside `crates/leaf` for the reason §2's MUST-NOT list gives in general: `crates/leaf` is the crate that becomes firmware, and a fixture that exists *only* in the firmware configuration is the worst place to put one. Nothing depends on `eio-leaf-mono`, so it cannot reach an image. **It is scaffolding with an end date**: §11's first MCU cross-compile supplies a real engine, clock and store, and the anchor should be deleted when it does rather than kept beside them.
+
+What this therefore does **not** claim: no cross-compiled image has been linked, flashed or run. The boundary is a measurement of how much of a leaf is already written — the portable half is, and it now demonstrably compiles for both targets rather than merely type-checking — and it is the input to picking a target, not a substitute for it.
 
 ## 3. The engine
 

@@ -70,6 +70,11 @@ crates/
   leaf/     ★ its runtime half     the leaf runtime; `std` by default (LEAF §2.1)
   leaf-gen/ the build-host generator: a service file becomes LEAF §6.4's baked
             graph. `std`, never linked into an image (LEAF §6.4.5)
+  leaf-mono/ the bare-metal codegen anchor: instantiates `leaf`'s generic
+            runtime half at concrete types so `check-nostd` emits code for it
+            rather than only type-checking it. Nothing depends on it, and it is
+            deleted when the first MCU cross-compile makes it redundant
+            (LEAF §2.1)
   wamr-host/ the WAMR interpreter binding of `eio_host_core::Engine`, written for
             neither of its two callers: `leaf`'s `wamr` feature and, as a
             dev-dependency, the conformance harness (LEAF §3)

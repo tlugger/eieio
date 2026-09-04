@@ -53,7 +53,24 @@ nostd_targets := target_cortex_m4f + " " + target_esp32c3
 # behind. That is not the whole crate and is not meant to be; `crates/leaf/src/lib.rs`
 # enumerates what does not cross and why. What this leg buys is that the line stays where
 # it was put.
-nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk eio-leaf"
+#
+# `eio-leaf-mono` is here for the fourth reason, and it exists only for this gate: it is what
+# makes the `eio-leaf` leg above emit machine code rather than only type-check (eieio-x7g.2.19).
+# Almost everything that crosses the leaf's boundary is generic — `spawn<E, C, R, S>`,
+# `timer::Scheduler<C>`, `timer::pump<E, C>` — and rustc monomorphises a generic function only
+# where it is instantiated. `eio-leaf` instantiates none of its own: every call site is in
+# `main.rs` or `tests/`, and both are `std`. Measured before this crate existed, the whole of
+# `libeio_leaf.rlib` on rv32imc was `leaf_budgets`, `leaf_limits`, `timer::Scheduled` and
+# `BakedGraph`'s non-generic methods — `spawn` and `pump` emitted nothing at all.
+#
+# `eio-leaf-mono` instantiates them at concrete types and nothing else; `crates/leaf-mono/src/lib.rs`
+# is the long version, including why it is a crate of its own rather than a `#[cfg]` block inside
+# `crates/leaf` (which is the crate that becomes firmware) and how it stays clear of what
+# eieio-x7g.4 refused. Both legs are wanted: `eio-leaf` proves the *library* has no `std` in it,
+# `eio-leaf-mono` proves those bodies also lower to instructions for a target with no atomics and
+# no FPU. Deleting either weakens the gate; the second one goes away when eieio-x7g.2.11's real
+# engine, clock and store make it redundant.
+nostd_crates := "eio-abi eio-signal eio-expr eio-manifest eio-host-core eio-sdk eio-leaf eio-leaf-mono"
 
 # The crates a `sdk-vX.Y.Z` tag publishes, in dependency order — `cargo publish` needs each
 # crate's `eio-*` dependencies already on the registry, so this is the publish order and not
@@ -313,7 +330,12 @@ shapes:
 # instead. Passed to the whole loop rather than special-casing one crate, so the list
 # above stays a plain list.
 
-# Prove the ★ crates and the leaf's runtime half still build without std.
+# `cargo build` and not `cargo check`, which is load-bearing rather than habit: `check` stops
+# at type-checking, and `eio-leaf-mono` is in the list above to be *codegen'd*. Swapping this
+# for `cargo check` to make the gate faster would silently delete the eieio-x7g.2.19 leg while
+# leaving every line of it in place.
+
+# Prove the ★ crates and the leaf's runtime half still build — and codegen — without std.
 check-nostd:
     #!/usr/bin/env bash
     set -euo pipefail
