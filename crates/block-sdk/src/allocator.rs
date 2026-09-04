@@ -24,20 +24,159 @@
 //! allocator does not need the size is free to ignore it — `echo.wat`'s bump allocator
 //! does — but this one uses it, and a host that passed a different size than it allocated
 //! would corrupt the heap. That is the host's obligation, not something a guest can check.
+//!
+//! # Which allocator, and the one line that decides a block's page count
+//!
+//! `dlmalloc`, configured (SDK §5.5). The configuration is [`GRANULARITY`] and nothing else,
+//! and it is the difference between a block that fits in the one page `wasm-ld` declares for
+//! it and a block that needs two. Its doc comment carries the measurement.
 
 use core::alloc::Layout;
 
 use eio_abi::ALLOC_ALIGN;
 
-/// The global allocator, on the only target that has a heap to give.
+/// The granularity `dlmalloc` requests linear memory at (SDK §5.5).
+///
+/// **This is the whole of the fix, and it is a number about `wasm-ld`'s layout rather than
+/// about any host's budget.** `wasm-ld` sizes a module's declared minimum linear memory to
+/// hold the statics and the shadow stack and nothing else, so with SDK §5.2's 16 KiB stack a
+/// golden block's first page is ≈ 26 KiB used and ≈ 38 KiB unused. `dlmalloc`'s wasm backend
+/// *will* take that remainder — `preexisting_chunk_from_linker` reads `__heap_base` and
+/// `__heap_end` and donates the span between them — but only if the span is at least as large
+/// as the first request the allocator makes, and that request is rounded up to the
+/// granularity. At `dlmalloc`'s default 64 KiB granularity it never is: 38 KiB < 64 KiB, the
+/// donation is declined, and, because the backend's donation flag is one-shot, the remainder
+/// is lost for the life of the instance. Every allocation a block ever serves then comes from
+/// `memory.grow`, so an SDK-built block needs a **second** 64 KiB page before its first
+/// `eio_alloc` — which is what LEAF §4.2's reserve was measuring when it read two.
+///
+/// **4 096 rather than the largest value that works.** The threshold was swept over ABI §13's
+/// scenarios on WAMR at every granularity from 16 bytes to 64 KiB: 16, 256, 1 024, 4 096,
+/// 8 192, 16 384 and 32 768 all bring every golden block to **one** page; 65 536 — the default
+/// — takes them to two. So the linker's remainder is measured at ≥ 32 KiB and < 64 KiB, which
+/// agrees with the ≈ 38 KiB SDK §5.2 computes from the stack size. 32 768 is therefore the
+/// largest value that works *today* and has ≈ 6 KiB of margin: a block with 6 KiB more statics
+/// than a golden one silently falls back to two pages. 4 096 has ≈ 34 KiB of margin, which is
+/// most of a page, and costs nothing to have — past the donation every request is rounded up
+/// to a whole page by `memory.grow` anyway, so the granularity has no effect on anything after
+/// the first allocation.
+///
+/// **What this does not do is bound anything.** A block still grows exactly when it needs to
+/// and exactly as far as its host allows; the only change is that it spends the address space
+/// its own memory section already declared before asking for more. That is why this is not a
+/// leaf's budget arriving in ABI §11.1's portable module — SDK §5.2's ceiling paragraph
+/// applies unchanged, and no number from LEAF §4.2 appears here.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub(crate) const GRANULARITY: usize = 4096;
+
+// The sweep above, as a build error rather than a comment: 32 768 is the largest granularity
+// measured to keep a golden block at one page, and a power of two is what `set_granularity`
+// accepts. Raising this past the measurement is the one edit that would silently restore the
+// second page, since a two-page block still builds, still validates and still runs.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+const _: () = assert!(
+    GRANULARITY.is_power_of_two() && GRANULARITY <= 32 * 1024,
+    "SDK §5.5: the granularity must be a power of two no larger than the 32 KiB the sweep \
+     measured, or `dlmalloc` declines the linker's remainder and the block needs a second page"
+);
+
+/// The allocator itself, on the only target that has a heap to give.
 ///
 /// `dlmalloc` is what Rust's own `std` uses on `wasm32-unknown-unknown`, so a block gets the
 /// allocator it would have had from `std` — without the `std`. Gated by target rather than
 /// by `cfg` on a `use`, and the dependency itself is target-gated in `Cargo.toml`: the crate
 /// has no backend for the bare-metal targets `just check-nostd` walks.
+///
+/// **Spelled out rather than `dlmalloc::GlobalDlmalloc`** for one reason: [`GRANULARITY`].
+/// `GlobalDlmalloc` is a unit struct over a private `static` the crate constructs with
+/// `Dlmalloc::new()`, so there is nowhere to call `set_granularity`. This is that type's four
+/// forwarding methods with the one line `GlobalDlmalloc` has no way to express.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+static mut DLMALLOC: dlmalloc::Dlmalloc = {
+    let mut heap = dlmalloc::Dlmalloc::new();
+    assert!(heap.set_granularity(GRANULARITY));
+    heap
+};
+
+/// The `#[global_allocator]`: a handle, because the allocator's own state is the `static`
+/// above.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 #[global_allocator]
-static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
+static ALLOCATOR: Heap = Heap;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+struct Heap;
+
+/// The one `&mut` to [`DLMALLOC`], which is what every method below needs and what makes the
+/// `unsafe` here worth naming once instead of four times.
+///
+/// # Safety
+///
+/// The returned reference must not be alive across another call to this function. Every caller
+/// below takes it, calls one `dlmalloc` method and drops it, which is what makes that hold:
+/// none of the four re-enters the allocator, and ABI §4.3 excludes the threads proposal, so
+/// there is no second thread to hold one concurrently. This is the same argument
+/// `dlmalloc`'s own `GlobalDlmalloc` makes — its `acquire_global_lock` is an assertion that
+/// `target_feature = "atomics"` is off and nothing else.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+unsafe fn heap() -> &'static mut dlmalloc::Dlmalloc {
+    // SAFETY: the caller's obligation above is exactly the aliasing rule this needs, and the
+    // `static` has no other referent anywhere in the crate — `DLMALLOC` is private to this
+    // module and named only here. ABI §4.3 excludes the threads proposal from the accepted
+    // set, so there is no second thread that could be inside this function at the same time.
+    unsafe { &mut *(&raw mut DLMALLOC) }
+}
+
+// SAFETY: `dlmalloc` returns pointers to blocks of the requested size and alignment or null,
+// which is `GlobalAlloc`'s whole contract on the implementor's side, and every method below
+// forwards its arguments unchanged. ABI §9.6's 8-byte alignment is not assumed here: it is
+// requested, by the `Layout` `layout()` builds, and asserted by this module's tests.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+unsafe impl core::alloc::GlobalAlloc for Heap {
+    /// # Safety
+    ///
+    /// `GlobalAlloc::alloc`'s own contract. ABI §9.1 makes `eio_alloc` the only way the
+    /// boundary reaches this, and `layout()` is what builds every `Layout` it passes.
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: `heap()`'s obligation is that the reference does not outlive the call —
+        // it is dropped at the end of this expression, and `malloc` cannot re-enter the
+        // global allocator. ABI §4.3 excludes the threads proposal, so there is no second
+        // thread that could hold one concurrently.
+        unsafe { heap().malloc(layout.size(), layout.align()) }
+    }
+
+    /// # Safety
+    ///
+    /// `GlobalAlloc::dealloc`'s own contract: `ptr` came from [`Self::alloc`] with this
+    /// `layout`. ABI §9.1 is what makes that checkable — `eio_alloc`/`eio_free` are the only
+    /// allocation channel across the boundary.
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: `heap()`'s obligation, as in `alloc` above, and for the same reason —
+        // ABI §4.3 excludes threads and `free` does not re-enter the global allocator.
+        unsafe { heap().free(ptr, layout.size(), layout.align()) }
+    }
+
+    /// # Safety
+    ///
+    /// As [`Self::alloc`]; ABI §9.1 again. Forwarded rather than left to the trait's default
+    /// so a zeroing allocation costs one `calloc` and not an `alloc` plus a `write_bytes`.
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: `heap()`'s obligation, as in `alloc` above — ABI §4.3 excludes threads and
+        // `calloc` does not re-enter the global allocator.
+        unsafe { heap().calloc(layout.size(), layout.align()) }
+    }
+
+    /// # Safety
+    ///
+    /// As [`Self::dealloc`]; ABI §9.1 again. Forwarded rather than left to the trait's
+    /// default because the default is alloc-copy-free: `dlmalloc` can extend a block in
+    /// place, and a guest's `Vec` growth is the allocation pattern the ★ crates produce most.
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: `heap()`'s obligation, as in `alloc` above — ABI §4.3 excludes threads and
+        // `realloc` does not re-enter the global allocator.
+        unsafe { heap().realloc(ptr, layout.size(), layout.align(), new_size) }
+    }
+}
 
 /// The layout `eio_alloc`/`eio_free` use for `size` bytes, or `None` if there is no such
 /// allocation.

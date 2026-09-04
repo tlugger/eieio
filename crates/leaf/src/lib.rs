@@ -205,30 +205,40 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// The linear memory one instance may reach, in 64 KiB pages — LEAF §4.2's per-instance
 /// reserve, and the one number a leaf answers ABI §4.1 with at both ends.
 ///
-/// # It is a footprint, not a declaration
+/// # It is a footprint, not a declaration — and the two happen to agree again
 ///
-/// The obvious number here is one page: `wasm-ld` emits `(memory 1)` for every one of ABI
-/// §13.2's golden blocks once SDK §5.2's link default is in force, so a leaf that reserved one
-/// page each would look right. **It is wrong, measured**: a Rust guest's declared minimum is
-/// its statics and its shadow stack, and its *heap* is not in there. `dlmalloc` on
-/// `wasm32-unknown-unknown` takes every byte it hands out from `memory.grow`, so the first
-/// `eio_alloc` a block ever serves leaves the page it declared. At a one-page bound, `counter`
-/// fails `eio_configure` with `ERR_LIMIT` before a single signal is routed.
+/// `wasm-ld` emits `(memory 1)` for every one of ABI §13.2's golden blocks once SDK §5.2's link
+/// default is in force, so one page is what a leaf that read declarations would reserve. That
+/// is not why this is one: **a declared page and a needed page are different questions**, and
+/// for most of this platform's history they had different answers. A Rust guest's declared
+/// minimum is its statics and its shadow stack, and its *heap* is not in there; `dlmalloc` at
+/// its default 64 KiB granularity declines the ≈ 38 KiB the linker left inside that page and
+/// takes every byte it hands out from `memory.grow` instead, so the first `eio_alloc` a block
+/// ever served left the page it declared. This constant read **two** for exactly that reason,
+/// and a one-page bound failed `counter`'s `eio_configure` with `ERR_LIMIT` before a signal was
+/// routed.
 ///
-/// **Two pages is the measurement**, taken over the whole of LEAF §9's suite 1 on WAMR's
-/// interpreter by `tests/memory_growth.rs`: every scenario driving an SDK-built golden block
-/// needs exactly two, every hand-written `.wat` fixture needs one, and nothing in the suite
-/// needs three. Unlike the execution-stack row beside it, this number is **not** a property of
-/// the host it was measured on — linear memory is the guest's own address space, so a 32-bit
-/// target sees the same pages — which makes it one of the few rows in §4.2 the MCU bring-up
-/// does not have to re-take.
+/// SDK §4.1 is what closed the gap: `dlmalloc` configured with a 4 096-byte granularity takes
+/// the linker's remainder, which it had been rejecting only because the remainder was smaller
+/// than one granule. Nothing about a block's *behaviour* changed — it grows exactly when it
+/// needs to, and this reserve still bounds that — but its first allocation no longer costs a
+/// page.
 ///
-/// # What it costs, and it is the whole of §4.2's headline
+/// **One page is the measurement**, taken over the whole of LEAF §9's suite 1 on WAMR's
+/// interpreter by `tests/memory_growth.rs`, which runs at every bound from one upward and
+/// records the smallest each scenario holds at: every scenario in the suite, SDK-built golden
+/// blocks and hand-written `.wat` fixtures alike, needs exactly one. Unlike the execution-stack
+/// row beside it, this number is **not** a property of the host it was measured on — linear
+/// memory is the guest's own address space, so a 32-bit target sees the same pages — which
+/// makes it one of the few rows in §4.2 the MCU bring-up does not have to re-take.
 ///
-/// 128 KiB per instance rather than 64 leaves §4.2's 192 KiB heap floor sizing for **one**
-/// block instance, not two. That is a finding rather than a choice: the reserve was derived
-/// from a declaration that does not describe a Rust guest's footprint. §4.2 carries the
-/// corrected arithmetic.
+/// # What it buys, and it is the whole of §4.2's headline
+///
+/// 64 KiB per instance rather than 128 leaves §4.2's 192 KiB heap floor sizing for **two**
+/// block instances rather than one, at 2 × 64 + 2 × 8 + 48 = 192 KiB exactly. Both of those
+/// numbers have been wrong in both directions inside one epic, which is the argument for a
+/// reserve that is re-measured on every `just ci` rather than quoted. §4.2 carries the
+/// arithmetic.
 ///
 /// # Where it is enforced, and why in two places
 ///
@@ -251,7 +261,7 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// **The growth half reaches WAMR and not wasm3**, measured: wasm3's only linear-memory
 /// ceiling is a compile-time define of a published crate. See [`wamr::instantiate`] and
 /// `tests/memory_growth.rs` for the gap and where its fix belongs.
-pub const V1_MEMORY_PAGES: u32 = 2;
+pub const V1_MEMORY_PAGES: u32 = 1;
 
 /// A leaf's own ABI §5.2 limits (LEAF §4.2, §4.3): `max_payload` 4 096, `max_batch` 8,
 /// `max_emission_bytes` 4 096.

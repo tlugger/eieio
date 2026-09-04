@@ -216,7 +216,7 @@ waiting.
 
 ## 4. Guest internals (the unsafe budget)
 
-- `#![no_std]` + `alloc`. The allocator is `dlmalloc` (Rust's own `wasm32` default, so a block gets the allocator it would have had from `std` without the `std`) behind `eio_alloc`/`eio_free`, with ABI §9.6's 8-byte alignment guarantee.
+- `#![no_std]` + `alloc`. The allocator is `dlmalloc` (Rust's own `wasm32` default, so a block gets the allocator it would have had from `std` without the `std`) behind `eio_alloc`/`eio_free`, with ABI §9.6's 8-byte alignment guarantee, and configured with one line — §4.1's granularity, which is what decides whether a block fits in the page `wasm-ld` declares for it.
 - The entire `unsafe` surface, enumerated for audit: allocator export glue, `(ptr,len) ↔ &[u8]` conversions at each export entry and host-fn call site, and the panic handler. Nothing else. Every `unsafe` block carries a `// SAFETY:` comment citing the ABI section that justifies it.
 - **The enumeration covers generated code.** The `#[block]` macro emits `unsafe` — the instance statics ABI §1.2's single-threaded actor model permits, and the inbound-payload conversion at each export entry — and that code is compiled into every block. Which crate the text happens to sit in does not change whose `unsafe` it is, so the macro's templates are audited under this section like the rest.
 - **Panics abort → trap → instance death** (ABI §6 invariant 6). The SDK's job is making panics rare in safe code (`get_or`, checked ops in examples) — not catching them. `panic = "abort"` enforced via the build tooling.
@@ -228,6 +228,30 @@ waiting.
 **`dlmalloc` MUST be a target-gated dependency, not a target-gated `use`.** Its `global` feature has backends for wasm and unix only; on `thumbv7em-none-eabihf` and `riscv32imc-unknown-none-elf` it fails to compile outright. A `#[cfg]` at the use site does not prevent cargo from building the crate, so the gate belongs in `Cargo.toml`. This is recorded because the failure mode is a compile error in a dependency with no obvious connection to the flag that caused it.
 
 `eio_alloc`/`eio_free` are exported on `wasm32-unknown-unknown` only. ABI §3 carries pointers as `i32`, which is exact where pointers are 32 bits and lossy everywhere else; the allocation *behaviour* is therefore reachable in native pointer width for testing, and only the `i32` conversion is guest-gated. A build asserts that the guest target's pointers really do fit.
+
+#### The granularity is 4 096, and it is the reason an SDK block fits in one page (normative)
+
+**`dlmalloc` is used as `Dlmalloc` with `set_granularity(4096)`, not as `GlobalDlmalloc`.** That is the whole configuration and it is not a preference: at the crate's default 64 KiB granularity every SDK-built block needs a **second** 64 KiB page before it serves its first allocation, and at 4 096 none of them do.
+
+**Why the default costs a page.** `wasm-ld` sizes a module's declared minimum linear memory to hold the statics and the shadow stack and nothing else. With §5.2's 16 KiB stack a golden block's first page is ≈ 26 KiB used, leaving ≈ 38 KiB of address space the module has already declared and never touches. `dlmalloc`'s wasm backend *will* take that remainder — `preexisting_chunk_from_linker` reads `__heap_base` and `__heap_end` and donates the span between them — but only if the span is at least as large as the allocator's first request, and that request is rounded up to the granularity. 38 KiB is not 64 KiB, so the donation is declined; and because the backend's donation flag is one-shot, the remainder is then lost for the life of the instance and every byte a block ever hands out comes from `memory.grow`.
+
+**This is what LEAF §4.2's reserve was measuring when it read two pages.** A declaration of one page and a runtime need of two is not a block being large, it is an allocator declining memory the block already owns. The reserve is one page again, and LEAF §4.2 carries the arithmetic that follows from it.
+
+**4 096 rather than the largest value that works.** The threshold is swept rather than reasoned about, over ABI §13's scenarios on WAMR: 16, 256, 1 024, 4 096, 8 192, 16 384 and 32 768 bytes all bring every golden block to one page; 65 536 — the default — takes them to two. So the linker's remainder is measured at ≥ 32 KiB and < 64 KiB, which agrees with the ≈ 38 KiB §5.2 computes from the stack size. 32 768 is the largest value that works today and has ≈ 6 KiB of margin: a block with 6 KiB more statics than a golden one would silently fall back to two pages. 4 096 has ≈ 34 KiB of margin and costs nothing to have, because past the donation `memory.grow` rounds every request up to a whole page and hands the whole page back — the granularity has no effect on anything after the first allocation. `crates/block-sdk`'s `GRANULARITY` is the single definition and a `const` assertion holds it at or below the 32 KiB the sweep measured.
+
+**This is not a leaf's budget in a portable module, and the distinction is the one §5.2 draws for the shadow stack.** Nothing here bounds anything: a block still grows exactly when it needs to and exactly as far as its host allows, `--max-memory` is still not set, and no number from LEAF §4.2 appears in the SDK. What changed is only *where the first allocations come from* — the address space the module's own memory section already declared, before asking for more. A daemon-class node sees the same behaviour it saw before, one `memory.grow` later. There is therefore nothing to put behind a feature or leave a block author to override: unlike a stack size, this is not a trade one tier wants and another does not.
+
+**The alternatives were measured, not dismissed.** Each was built into all five golden blocks and run through the same page probe:
+
+|Allocator|Pages an SDK block needs|What it gives up|
+|---|---|---|
+|`dlmalloc`, default 64 KiB granularity|**2**|Nothing — it is simply leaving the linker's remainder unused.|
+|**`dlmalloc`, 4 096 granularity**|**1**|Nothing measurable. Modules are 178 bytes *smaller*.|
+|`talc` (`TalckWasm`)|**2**|Its `WasmHandler` grows from `memory.grow` and never reads `__heap_base`, so it has the same defect with none of the configurability. Modules ≈ 3.4 KiB smaller.|
+|A bump allocator over `__heap_base`|**1**|`dealloc` is a no-op, so an instance's peak is its *lifetime total*. A block allocating a `Batch` per signal grows without bound and is eventually refused for ever. Modules ≈ 7.9 KiB smaller.|
+|`embedded-alloc`'s TLSF|**1**|It is a fixed-arena allocator with no growth path: `init` is once-only, so a block is capped at the linker's remainder and can never serve a payload larger than it. That is precisely the leaf budget this section refuses to smuggle in. Also pulls in `critical-section` and needs a hand-written `Impl` for a target that has no critical sections. Modules ≈ 6 KiB smaller.|
+
+The two that reach one page do it by giving up growth, in one direction or the other; the configured `dlmalloc` reaches it by giving up nothing, which is why the smaller modules are not worth buying.
 
 ### 4.2 What the SDK may depend on
 
@@ -391,7 +415,11 @@ because the data section (~10 KiB) sits above the stack. Within the three that w
 choice is how the first page is divided between stack and the guest's own heap, and 16 KiB is
 the balance: it leaves ≈ 38 KiB of the page below `memory.grow`, which is more than nine times
 LEAF §4.2's `max_payload` of 4 096 and therefore room for the inbound payloads `eio_alloc`
-serves (ABI §9.5) without growing. 32 KiB halves that heap to buy stack a block has no reason
+serves (ABI §9.5) without growing. **That last clause was aspirational when it was written and
+is now true**: at `dlmalloc`'s default granularity the allocator declined those 38 KiB and grew
+instead, so the balance this paragraph strikes bought nothing at all. §4.1's granularity is what
+makes the remainder reachable, and it is why the number here is a division of a page rather than
+a sacrifice of one. 32 KiB halves that heap to buy stack a block has no reason
 to use — a block author writes no recursion the SDK cannot bound — and 8 KiB gives the guest's
 own frames no more room than LEAF §4.2 reserves for the *engine's* execution stack, which is a
 smaller machine doing a larger job. Module size is unaffected: the five differ from their
