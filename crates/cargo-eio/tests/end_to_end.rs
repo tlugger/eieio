@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use cargo_eio::build::{PROFILE, SHADOW_STACK_BYTES, shadow_stack};
+
 /// Where generated blocks go: cargo's own per-test scratch directory, cleaned with `target/`.
 fn scratch(test: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
@@ -134,6 +136,32 @@ fn the_template_builds_and_passes_its_own_tests_unedited() {
             .min_pages,
         Some(1),
         "the template's module declares more than one page of linear memory"
+    );
+    assert_eq!(
+        stack_sizes(
+            &std::fs::read_to_string(root.join(".cargo/config.toml"))
+                .expect("the template wrote a .cargo/config.toml")
+        ),
+        vec![SHADOW_STACK_BYTES],
+        "the generated `.cargo/config.toml` does not carry `build::SHADOW_STACK_BYTES` — \
+         the template's placeholder was not substituted, or came from somewhere else"
+    );
+
+    // And the same block with that file removed, which is the *other* route to the same
+    // number: `build`'s own low-priority `build.rustflags`. Nothing else in this suite
+    // exercises it, because every block it builds sits under a `.cargo/config.toml` whose
+    // `[target.<triple>]` rustflags outrank it by design (§5.2).
+    std::fs::remove_file(root.join(".cargo/config.toml")).expect("removing the cargo config");
+    let output = eio(&root, &["build"]);
+    assert!(output.status.success(), "{}", transcript(&output));
+    let wasm = std::fs::read(module(&root)).expect("the module was built");
+    assert_eq!(
+        eio_manifest::Module::read(&wasm)
+            .expect("a readable module")
+            .min_pages,
+        Some(1),
+        "with no `.cargo/config.toml`, `cargo eio build`'s own `build.rustflags` is the only \
+         thing setting the shadow stack, and it has stopped working"
     );
 
     let written =
@@ -317,10 +345,13 @@ fn the_golden_blocks_build_through_the_tooling_a_block_author_uses() {
             "the manifest describes the block just built"
         );
 
-        // SDK §5.2's `-zstack-size` default on the `cargo eio build` path, over the blocks
-        // that had 17 declared pages before it existed. `crates/conformance/tests/golden.rs`
-        // pins the same number over the plain `cargo build` the harness uses; neither test
-        // covers the other's route to the flag.
+        // SDK §5.2's `-zstack-size` default over the blocks that had 17 declared pages
+        // before it existed. Reaching them here through `examples/blocks/.cargo/config.toml`,
+        // whose `[target.<triple>]` rustflags outrank the `build.rustflags` this command
+        // passes (§5.2) — the tool's own default is exercised by
+        // `the_template_builds_and_passes_its_own_tests_unedited`, on a block with that file
+        // removed. `crates/conformance/tests/golden.rs` pins the same page count over the
+        // plain `cargo build` the harness uses.
         let lib = name.replace('-', "_");
         let wasm =
             std::fs::read(blocks.join(format!("target/wasm32-unknown-unknown/release/{lib}.wasm")))
@@ -333,4 +364,114 @@ fn the_golden_blocks_build_through_the_tooling_a_block_author_uses() {
             "{name} declares more than one page of linear memory"
         );
     }
+}
+
+/// SDK §5.2's invocation, as the specification states it right now.
+///
+/// Extracted rather than restated, the way `crates/manifest/tests/roundtrip.rs` extracts ABI
+/// §11's example manifest instead of keeping a second copy of it: a literal in this file
+/// would be one more place the number is written, which is the defect this test exists to
+/// close.
+fn spec_config_overrides() -> Vec<String> {
+    let spec = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/specs/SDK-SPEC.md",
+    ))
+    .expect("SDK-SPEC.md is two directories up from this crate");
+
+    let fenced = spec
+        .split_once("### 5.2 Size-optimization defaults")
+        .expect("SDK-SPEC has a §5.2")
+        .1
+        .split_once("```\n")
+        .expect("§5.2 opens with a fenced invocation")
+        .1
+        .split_once("```")
+        .expect("the fence closes")
+        .0;
+
+    fenced
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("--config "))
+        .map(|setting| setting.trim_matches('\'').to_string())
+        .collect()
+}
+
+/// Every `-zstack-size=<n>` written literally in `text`, as numbers.
+///
+/// A `-zstack-size=` followed by something that is not a decimal — the template's
+/// placeholder, and nothing else in this repository — yields nothing, which is what makes an
+/// empty result the assertion that a file hard-codes no stack size at all.
+fn stack_sizes(text: &str) -> Vec<u32> {
+    text.match_indices("-zstack-size=")
+        .filter_map(|(at, needle)| {
+            text[at + needle.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+        .collect()
+}
+
+#[test]
+fn the_shadow_stack_size_is_written_once() {
+    // The number reaches four places and is *chosen* in one. `build::SHADOW_STACK_BYTES` is
+    // that one: `build` formats its `--config` override from it and `new` renders the
+    // template's `.cargo/config.toml` from it, so neither can drift. What is left is the two
+    // restatements a Rust constant cannot reach — a specification, and a separate cargo
+    // workspace — and this test is what makes those fail loudly instead of quietly building
+    // at a different stack size. That was the whole defect: a copy that had wandered to
+    // 32 KiB still produces a one-page module and still passes every `min_pages == 1`
+    // assertion in this repository.
+
+    // SDK §5.2 is the decision, not a copy of it, so the spec keeps stating the number and
+    // the code is pinned against what it states — including the four profile overrides, which
+    // reach cargo on the same command line and have exactly the same drift to fear.
+    let stated = spec_config_overrides();
+    let passed: Vec<String> = PROFILE
+        .iter()
+        .map(|setting| (*setting).to_string())
+        .chain([shadow_stack()])
+        .collect();
+    assert_eq!(
+        stated, passed,
+        "`cargo eio build` no longer passes what SDK §5.2 says it passes — amend the spec and \
+         the code together, which is this repository's prime directive"
+    );
+
+    // `examples/blocks/` is its own cargo workspace: nothing in it can `use` a constant from
+    // this crate, so its `.cargo/config.toml` is a genuine copy and stays one. It is checked
+    // instead. `crates/conformance/tests/golden.rs` pins the *effect* of that file — all five
+    // golden blocks at one page — and cannot see the value, because the harness deliberately
+    // depends on nothing of the Rust block toolchain.
+    let golden = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/blocks/.cargo/config.toml"
+    );
+    let golden = std::fs::read_to_string(golden).expect("the golden blocks' cargo config");
+    assert_eq!(
+        stack_sizes(&golden),
+        vec![SHADOW_STACK_BYTES],
+        "examples/blocks/.cargo/config.toml has drifted from `build::SHADOW_STACK_BYTES` \
+         ({SHADOW_STACK_BYTES}); it is a separate cargo workspace and cannot read the constant, \
+         so it is checked here instead"
+    );
+
+    // And the template carries the placeholder rather than a number, so `cargo eio new` has
+    // no copy to drift at all. Asserted on the source because a rendered one proves only that
+    // *this* build agreed with itself.
+    let template = concat!(env!("CARGO_MANIFEST_DIR"), "/template/cargo-config.toml.in");
+    let template = std::fs::read_to_string(template).expect("the template's cargo config");
+    assert!(
+        template.contains("{{stack_size}}"),
+        "the template's `.cargo/config.toml` no longer renders its stack size from \
+         `build::SHADOW_STACK_BYTES`"
+    );
+    assert_eq!(
+        stack_sizes(&template),
+        Vec::<u32>::new(),
+        "the template's `.cargo/config.toml` has grown a hard-coded stack size again"
+    );
 }

@@ -22,5 +22,12 @@
 # `[target.<triple>]` rather than `[build]` deliberately: it is the higher-priority of the
 # two rustflags sources, so raising the number here would also outrank `cargo eio build`'s
 # own default — the same lever SDK §5.1 gives a generated block repo.
+#
+# **The number below is a copy, and the only one left.** This is a separate cargo workspace,
+# so nothing here can read `cargo_eio::build::SHADOW_STACK_BYTES`, which is where §5.2's stack
+# size is chosen and from which both `cargo eio build`'s `--config` and `cargo eio new`'s
+# template are formatted. `crates/cargo-eio/tests/end_to_end.rs` reads this file and fails if
+# the two disagree — `golden.rs` above cannot, since a drifted value here would still give one
+# page and still pass it.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "link-arg=-zstack-size=16384"]
