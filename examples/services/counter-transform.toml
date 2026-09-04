@@ -1,0 +1,29 @@
+# Count the signals, then add 41 to the count.
+#
+# Two of ABI §13.2's golden blocks wired end to end, and the only example service whose
+# blocks this repository can actually build — which is what makes it the fixture LEAF
+# §6.4.4's parity suite bakes into a leaf graph and runs. `kitchen.toml` is the format's
+# showcase and names blocks nobody has written; this one is the format's *executable*
+# example.
+#
+# It is also the regression target `crates/leaf`'s hand-written demo table is: baking this
+# file has to drive the same two instances to the same routed result `eio_leaf::run_demo`
+# reaches by hand (LEAF §6.4, eieio-x7g.2.4).
+
+name = "counter-transform"
+
+connections = [ "counter.out -> transform.in" ]
+
+[blocks.counter]
+name = "Count"
+# `counter` declares `eio:state`, so its total survives a restart (ABI §13.2, LEAF §5).
+block = "counter:1.0.0"
+
+[blocks.transform]
+name = "Add 41"
+block = "transform:1.0.0"
+
+# No `[blocks.transform.props]`: `transform`'s one property has the manifest default
+# `(+ $n 41)`, and ABI §11.1's required/default rule is what supplies it. Leaving it out is
+# the point — it is the rule `eio_host_core::resolve` applies, and a baked graph carries what
+# that call returned rather than what the file wrote (LEAF §6.4.1).

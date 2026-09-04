@@ -18,6 +18,7 @@ members = [
     "crates/expr-wasm",
     "crates/host-core",
     "crates/leaf",
+    "crates/leaf-gen",
     "crates/manifest",
     "crates/service",
     "crates/signal",
@@ -363,6 +364,15 @@ eio-daemon = { path = "crates/daemon", version = "0.1.0" }
 eio-sdk-macros = { path = "crates/block-sdk-macros", version = "0.1.0" }
 eio-expr = { path = "crates/expr", version = "0.1.0" }
 eio-host-core = { path = "crates/host-core", version = "0.1.0" }
+# The runtime crate, depended on by `eio-leaf-gen` for LEAF §6.4.2's `Baked*` types: a
+# generator prints data of the types the image is built out of, so they live with the image
+# and not with the tool that writes them.
+#
+# `default-features = false` here rather than at the call site, because cargo will not let a
+# member turn a workspace dependency's defaults off: the generator wants the graph types and
+# `leaf_limits` and has no business linking wasm3 or WAMR to print a file, so the *dependency*
+# is the runtime half and a dependent that needs an engine names the feature.
+eio-leaf = { path = "crates/leaf", version = "0.1.0", default-features = false }
 eio-manifest = { path = "crates/manifest", version = "0.1.0" }
 eio-sdk = { path = "crates/block-sdk", version = "0.1.0" }
 eio-service = { path = "crates/service", version = "0.1.0" }

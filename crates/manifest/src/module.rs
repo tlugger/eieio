@@ -114,11 +114,23 @@ pub struct Module<'a> {
     /// §3 requires an exported `memory` and every import MUST be an `eio:*` function
     /// (§4.3, §7), so a block's memory is always one it defines itself.
     ///
-    /// Read out unconditionally, not behind the portable-subset policy, because it is not
-    /// a judgement: it is the one number about a module a memory-constrained host has to
-    /// know *before* it decides whether it can run it. LEAF §4.2 refuses a module whose
-    /// minimum exceeds its per-instance page budget at firmware build time, and SDK §5.2's
-    /// link default is what keeps a block built with `cargo eio build` at one page.
+    /// Read in this walk rather than by a second one over the same bytes, because there is
+    /// exactly one reader of a `.wasm` in this repository and that is worth keeping. Read
+    /// unconditionally, not behind the portable-subset policy, because it is not a
+    /// judgement: nothing in ABI §4 judges the number, and a host with room for it runs
+    /// the module. It is the one number about a module a memory-constrained host has to
+    /// know *before* it decides whether it can run it.
+    ///
+    /// The *minimum*, because that is what an instantiation has to be able to satisfy; a
+    /// declared maximum only bounds growth, and costs nothing until a module grows into it.
+    /// LEAF §4.2 refuses a module whose minimum exceeds its per-instance page budget at
+    /// firmware build time — the same class of check as ABI §4.3's load-time cross-check,
+    /// made on the build host where a refusal costs a build rather than a field failure —
+    /// and SDK §5.2's link default is what keeps a block built with `cargo eio build` at
+    /// one page.
+    ///
+    /// A module declaring a second memory is refused by [`crate::portable`] long before
+    /// anything reads this, so only the first is recorded.
     pub min_pages: Option<u64>,
 }
 

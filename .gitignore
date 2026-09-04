@@ -30,3 +30,4 @@ designer/build/
 
 # Working plans from the /implement skill
 *.eio-plan.md
+.claude/worktrees/
