@@ -11,6 +11,15 @@
 //! the same number on the *other* build path, the one a block author uses; both are pinned
 //! because the two reach SDK §5.2's shadow-stack default by different routes and either could
 //! lose it alone.
+//!
+//! What this file checks is the *effect* — one page — and it deliberately does not check the
+//! stack size that produces it. `examples/blocks/.cargo/config.toml` is a copy of that number
+//! (a separate cargo workspace cannot read `cargo_eio::build::SHADOW_STACK_BYTES`), and a copy
+//! that had drifted to 8 or 32 KiB would still produce one page and still pass everything
+//! below. The *value* in that file is therefore pinned against the constant by
+//! `crates/cargo-eio/tests/end_to_end.rs`, which is where the constant lives; restating it
+//! here would only add a fifth place to keep in agreement, and this harness depends on
+//! nothing of the Rust block toolchain by design (ABI §13, SDK §7).
 
 use std::path::Path;
 
