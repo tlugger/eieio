@@ -76,14 +76,6 @@ This choice is **measured, not assumed** — `crates/conformance/tests/wamr.rs` 
 
 **`crates/leaf` binds both** (`src/wasm3.rs` and `src/wamr.rs`, eieio-x7g.2.5). The WAMR binding is the interpreter, and it costs no `wamrc` and no C++ toolchain: WAMR's core is C, so the mode this section calls "what a bring-up uses" is reachable on a machine where §6.1's AOT compiler is not. It is written against `wamrx-sys`'s raw FFI rather than the `wamrx` safe wrapper, for the reason `crates/conformance/tests/wamr.rs` established first — `wamrx::Linker`'s closures never see the calling instance, which every ABI §7 function touching guest memory needs — and it is the fifth sanctioned `unsafe` site in the repository (CLAUDE.md), with a `// SAFETY:` comment on every block.
 
-### 3.2 One engine per image, two in a host build
-
-**A leaf image links exactly one engine.** Which one is a build-time choice — Cargo features `wasm3` and `wamr` on `crates/leaf` — and it is a choice rather than a default because §3.1's feature enforcement, §4's watchdog and §6.1's AOT artifact are all per-engine.
-
-Nothing in this document names an engine at a call site, and the code MUST NOT either: `spawn` takes the `instantiate` function, so an engine is an argument. That is what makes the following possible, and it is a *host build's* shape rather than a leaf's:
-
-**The host build links both, so that §9's suites can be run against each in one process.** ABI §13 makes divergence between hosts a conformance bug by definition, and until this crate linked two engines that rule could only ever be checked between the leaf and the daemon — never between two leaves. It now is: `crates/leaf/tests/` runs suite 1, suite 3, the end-to-end graph and the timer scheduler once per engine and asserts the same answers. A firmware build enables one feature and gets one engine.
-
 ### 3.1 The engine is the only place the feature set is enforced (ABI §4.3)
 
 ABI §4.3 splits refusal across two layers, and a leaf implements both. Stated concretely, because "configure the engine to the accepted set" is not an instruction anyone can follow twice the same way:
@@ -92,6 +84,14 @@ ABI §4.3 splits refusal across two layers, and a leaf implements both. Stated c
 - **wasm3** has no feature switches; what it accepts is what it was compiled with. Its acceptance was measured instruction by instruction (ABI §4.3) rather than read off a list, and that measurement is the specification of what a wasm3 leaf accepts.
 
 **Neither engine can express the carve-out**, because a proposal is one switch and the accepted set is part of two of them. `eio_manifest::validate` is the second layer and runs on every host, leaf included — it is a ★ crate for exactly this reason. **A leaf MUST run it**, at firmware build time where a refusal costs a build rather than a field failure.
+
+### 3.2 One engine per image, two in a host build
+
+**A leaf image links exactly one engine.** Which one is a build-time choice — Cargo features `wasm3` and `wamr` on `crates/leaf` — and it is a choice rather than a default because §3.1's feature enforcement, §4's watchdog and §6.1's AOT artifact are all per-engine.
+
+Nothing in this document names an engine at a call site, and the code MUST NOT either: `spawn` takes the `instantiate` function, so an engine is an argument. That is what makes the following possible, and it is a *host build's* shape rather than a leaf's:
+
+**The host build links both, so that §9's engine-driven suites can be run against each in one process.** ABI §13 makes divergence between hosts a conformance bug by definition, and until this crate linked two engines that rule could only ever be checked between the leaf and the daemon — never between two leaves. It now is: `crates/leaf/tests/` runs suite 1, suite 3, the end-to-end graph and the timer scheduler once per engine and asserts the same answers. A firmware build enables one feature and gets one engine.
 
 ## 4. Budgets
 
