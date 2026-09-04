@@ -422,6 +422,13 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 - The contract stated plainly: **callbacks MUST return promptly. Blocking is a defect. Long work is chunked via timers.**
 - Budgets are host configuration, not ABI constants; leaf hosts will be tighter. The conformance suite (§13) includes a hostile-block test that spins.
 
+**What a budget mechanism owes, whatever it is.** Fuel, epoch interruption and a hardware watchdog have nothing in common but the job below, and these two obligations are that job. They are requirements on the *host*, identical on every host, and they are stated here rather than in each host's own document because a host that derives them again in its own words has written a second copy of them to drift from.
+
+1. **A terminated call MUST return to the host as a trap, not as a status code.** §8 is explicit in both directions: a budget death kills the instance, and a non-zero callback return does not. A mechanism that unwound a terminated call as an ordinary return would turn a death into life, and the host would have nothing left to tell a killed callback apart from a block reporting an error with a status.
+2. **The gap between the decision to terminate and the return MUST be bounded**, and a mechanism that cannot bound it does not enforce a deadline, it requests one. Where the bound comes from is the mechanism's own: an interpreter bounds it by checking for the request at least once per loop back-edge and once per call, and a host driving the engine's clock from outside bounds it by that clock's resolution (DAEMON §5.1's epoch tick, LEAF §4.4's watchdog stage). Without a bound the host's next move is whatever it does about a call that never came back — on a leaf that is a node reset (LEAF §4.6), which is the divergence this obligation keeps off the normal path.
+
+**A host whose binding cannot meet both does not have a budget, and MUST say so rather than report one.** §13.1 gives the harness a skip class for exactly that: the scenarios expecting a budget death are skipped by name, because the only other thing an unbudgeted host can do with a block that never returns is hang.
+
 ---
 
 ## 11. Manifest schema
@@ -568,6 +575,8 @@ Both the daemon and the leaf runtime MUST pass the harness against the golden bl
 The harness drives a **host**; the wasmtime reference implementation is one host and not the subject. A conformant host MUST therefore be drivable by it, which costs exactly two things: a way to instantiate a module, and a way to call its exports and read and write its linear memory. Anything more the harness needed of a host would be a requirement this specification does not make.
 
 A host also states which capability namespaces (§7.2–§7.6) it implements, and the harness asks *before* instantiating. Only `eio:core` is promised unconditionally (§7.0); every other namespace is a question about the device, settled at deploy validation (SCOPE §3.3). A scenario needing one the host does not implement is reported **skipped, with the namespace named** — never passed over, because a suite that counted an unreachable scenario as a pass would claim coverage the platform does not have. Asking beforehand is also what keeps the report legible: a module importing an unimplemented namespace fails to *link*, and a link failure reads as "this module is broken".
+
+A host also states **whether it enforces §10's budget**, and one that does not has the scenarios expecting a budget death reported **skipped, with the death named**. §10 requires a budget of every host, but a budget is built on an engine's ability to stop a call that is already running, and an engine binding may have no such entry point — §10's two obligations name what one costs. This skip is the same kind as the capability skip above it and the unrefused-proposal skip below: not an excuse and not a pass, a divergence made visible, and §13's rule applies to it in full. It exists because the alternative for an unbudgeted host is not a red suite but a hung one — a block that never returns never returns — and a suite that hangs reports nothing at all. LEAF §4.5 is a binding that answers so today, and says what it is missing.
 
 The reference binding is written **independently of any production host's**, deliberately. A harness sharing the daemon's engine binding could only ever report that the binding agrees with itself, and "both hosts MUST pass" would be a statement about one implementation.
 

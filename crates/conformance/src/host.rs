@@ -84,14 +84,19 @@ pub trait Host {
     /// Whether this host can enforce ABI §10's per-callback budget.
     ///
     /// `true` by default, because §10 requires it of a host: "every callback runs under a
-    /// host-enforced budget: fuel (wasmtime), epoch interruption, or watchdog (WAMR/wasm3)".
+    /// host-enforced budget: fuel (wasmtime), epoch interruption, or watchdog (WAMR/wasm3)",
+    /// and §10's two obligations on any such mechanism are what having one costs — the
+    /// terminated call returns as a trap and not a status code, and the gap between the
+    /// request and the return is bounded.
     ///
     /// A *binding* may still lack one — neither leaf interpreter offers one here (wasm3 has no
     /// fuel counter at all; WAMR's `wasm_runtime_set_instruction_count_limit` is compiled out
     /// of the linked library), and a watchdog is the leaf runtime's to add rather than the
-    /// interpreter's to provide. A host that answers `false`
-    /// has scenarios expecting a budget death skipped by name instead of hanging, which is the
-    /// only other thing an unbudgeted host could do with a block that never returns.
+    /// interpreter's to provide (LEAF §4.5). A host that answers `false` has scenarios
+    /// expecting a budget death skipped by name instead of hanging: that is **ABI §13.1's
+    /// skip class for an unbudgeted host**, beside the unimplemented capability namespace and
+    /// the unrefused proposal, and like both of those it is a divergence made visible rather
+    /// than a pass. The alternative is not a red suite but a hung one, which reports nothing.
     fn enforces_budgets(&self) -> bool {
         true
     }

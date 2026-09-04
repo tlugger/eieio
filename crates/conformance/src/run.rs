@@ -115,7 +115,9 @@ pub fn run<H: Host>(loaded: &Loaded, host: &mut H) -> Report {
 
     // ABI §10 is a requirement on a *host*, but a binding may have no budget mechanism at
     // all — and a scenario that expects a budget death would then not fail, it would never
-    // return. Skipped by name, like an unimplemented capability.
+    // return. §13.1's third skip class: skipped by name, like an unimplemented capability
+    // namespace and an engine that does not refuse a proposal, and no more a pass than
+    // either of those.
     if !host.enforces_budgets()
         && let Some(kind) = scenario.steps.iter().find_map(|step| step.expect.dead)
         && matches!(kind, DeathKind::Fuel | DeathKind::Deadline)
