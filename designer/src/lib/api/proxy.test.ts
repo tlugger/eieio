@@ -500,6 +500,20 @@ function sseResponse(chunks: string[]): Response {
   return new Response(openEndedStream(chunks), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
+/** An SSE response whose body *ends* after its chunks, unlike `sseResponse`'s deliberately
+ *  open-ended one — `connectSse`'s "the node's side ended the stream" path, which is the
+ *  disconnect the backoff loop exists for (eieio-m9s.39). */
+function endingSseResponse(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
 describe('streamTap — GET /api/nodes/{id}/daemon/taps/{id}/stream, SSE over the proxy hop', () => {
   it('opens the proxied stream URL with credentials: same-origin set explicitly', async () => {
     const fetchMock = vi.fn().mockResolvedValue(sseResponse(['event: signals\ndata: {}\n\n']));
@@ -834,6 +848,98 @@ describe('client.ts — a proxied 401 reopens the login gate too (eieio-m9s.38, 
     try {
       await expect(clientListServices('5')).rejects.toBeInstanceOf(ProxyRequestError);
       expect(notified).toBe(false);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe('client.ts — a 401 on a tap or log stream reopens the login gate too (eieio-m9s.39)', () => {
+  // The bug: `streamTap`/`streamLogs` return a `StreamHandle` synchronously, so `watchSession`
+  // — which sits in front of a `Promise` — cannot wrap them, and `sse.ts` used to treat a 401
+  // exactly like a dropped connection: `'reconnecting'` and backoff, forever. A dead session
+  // therefore left a tap panel spinning while every other call in the app raised the gate.
+  // `sse.ts` now ends a permanently-failing stream as `'closed'` with the status attached, and
+  // `client.ts`'s `watchStreamSession` routes a 401 there to the same `onSessionRequired`
+  // listeners `watchSession` notifies. DESIGNER §6 records the rule.
+  it('notifies onSessionRequired when a tap stream is answered 401', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'no live session' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    const statuses: Array<{ status: string; detail?: { status?: number } }> = [];
+    try {
+      // --- Prove it can fail (1): drop `watchStreamSession(...)` from `streamTap`'s
+      // real-backend branch in `client.ts` and `notified` stays false. Drop the
+      // `isPermanentStreamStatus` branch from `sse.ts`'s loop instead and this hangs on
+      // 'reconnecting' until the waitFor times out — the exact bug, reproduced.
+      const handle = clientStreamTap('5', 'tap-1', {
+        onEvent: () => {},
+        onStatus: (status, detail) => statuses.push({ status, detail }),
+      });
+      await vi.waitFor(() => expect(notified).toBe(true));
+      expect(statuses.map((s) => s.status)).toEqual(['connecting', 'closed']);
+      expect(statuses.find((s) => s.status === 'closed')?.detail?.status).toBe(401);
+      handle.close();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('notifies onSessionRequired when a log stream is answered 401', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse(401, { error: 'unauthorized', message: 'no live session' })),
+    );
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    try {
+      const handle = clientStreamLogs('5', {}, { onEvent: () => {}, onStatus: () => {} });
+      await vi.waitFor(() => expect(notified).toBe(true));
+      handle.close();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it('a dropped stream still reconnects, and does not touch the gate', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    // A response body that simply ends: `connectSse`'s "the node's side ended the stream"
+    // path — a disconnect, which is exactly what the backoff loop is for.
+    const fetchMock = vi.fn().mockImplementation(async () => endingSseResponse(['data: {}\n\n']));
+    vi.stubGlobal('fetch', fetchMock);
+
+    let notified = false;
+    const unsubscribe = onSessionRequired(() => {
+      notified = true;
+    });
+
+    const statuses: string[] = [];
+    try {
+      const handle = clientStreamLogs('5', {}, { onEvent: () => {}, onStatus: (s) => statuses.push(s) });
+      // The default backoff's first step is 500ms (`sse.ts`'s `DEFAULT_BACKOFF_MS`) and
+      // `proxy.ts` supplies no `wait` override, so this is a real half-second wait — the price
+      // of asserting the retry through the same seam a component uses.
+      await vi.waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2), { timeout: 3000 });
+      expect(statuses).toContain('reconnecting');
+      // --- Prove it can fail (2): widen `isPermanentStreamStatus` to any non-2xx (or make a
+      // disconnect close the stream) and this fails — a node restarting would stop reporting
+      // for good instead of reconnecting.
+      expect(statuses).not.toContain('closed');
+      expect(notified).toBe(false);
+      handle.close();
     } finally {
       unsubscribe();
     }
