@@ -28,8 +28,15 @@ use eio_host_core::{StateError, StateStore};
 ///
 /// Namespacing — `(service, instance)`, per LEAF §5 and DAEMON §10 — is the caller's: this
 /// type holds exactly one instance's keys, and `main.rs` gives each instance its own file
-/// under `state/<instance_id>.bin`, the same shape a daemon's `(service, instance)` composed
-/// key would collapse to when a leaf's one-service constant is dropped from view.
+/// under `state/<instance_id>.bin`.
+///
+/// **That drops the service component, and LEAF §5.1 now says what is being dropped**: the
+/// constant is the service file's `name`, the same string a daemon composes into the same
+/// position of the same key, which is what makes the key-layout parity §5 claims a fact
+/// rather than a shape. This stand-in has no service file behind it — a bring-up runs a demo
+/// graph, not a deployment — so it leaves the component out rather than inventing a value
+/// for it. A real flash-backed store carries it, from the baked graph's `service` field
+/// (LEAF §5.2, §6.4.2).
 pub struct FileStateStore {
     path: PathBuf,
     entries: BTreeMap<Vec<u8>, Vec<u8>>,
