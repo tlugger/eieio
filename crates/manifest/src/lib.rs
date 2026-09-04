@@ -116,7 +116,7 @@ pub use abi::{
     REQUIRED_EXPORTS, Signature, ValType,
 };
 pub use check::{Admission, validate, validate_against, validate_unaided};
-pub use error::{Error, ModuleError, NameSite};
+pub use error::{Error, MemoryBound, ModuleError, NameSite};
 pub use module::{Export, ExportKind, FuncType, Import, MANIFEST_SECTION, Module};
 pub use name::{
     MAX_NAME_BYTES, PORT_ERR_NAME, PORT_NAME_PATTERN, REF_NAME_PATTERN, VERSION_PATTERN,

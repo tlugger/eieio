@@ -95,8 +95,22 @@ pub use eio_wamr_host::Guest;
 /// it up, and by `tests/exec_stack.rs`, rather than restated in either.
 pub const EXEC_STACK_SIZE: u32 = 8 * 1024;
 
-/// Loads and instantiates `wasm` on WAMR's interpreter (ABI §5.1 step 1), with LEAF §4.2's
-/// per-instance engine stack.
+/// Loads and instantiates `wasm` on WAMR's interpreter (ABI §5.1 step 1), with both of LEAF
+/// §4.2's per-instance reserves: [`EXEC_STACK_SIZE`] and [`crate::V1_MEMORY_PAGES`].
+///
+/// The page reserve is ABI §4.1's growth bound, and it is passed here rather than trusted to
+/// the module's own declaration because a module declaring no maximum — which is every block
+/// `cargo eio build` produces (SDK §5.2) — has declared nothing an engine will enforce. WAMR
+/// takes the smaller of this and the module's own maximum and refuses to go below the module's
+/// declared minimum, so it can bound growth without ever granting an instance less than it
+/// asked for. Past it, `memory.grow` answers −1: core WASM's own result, which reaches ABI §9
+/// only as `eio_alloc` returning 0 and §9.5's `ERR_LIMIT`, never as a death (§8).
+///
+/// [`crate::wasm3`] has no equivalent, measured: `d_m3MaxLinearMemoryPages` is a compile-time
+/// define of the published `wasm3x-sys` crate and `M3Runtime::memoryLimit` is internal to
+/// wasm3 — and clamps *bytes* while leaving the page count, which would be worse than no bound.
+/// `tests/memory_growth.rs` records that gap as a passing assertion so the day it closes, the
+/// suite says so.
 ///
 /// Signature-compatible with [`crate::wasm3::instantiate`] on purpose: both are the
 /// `impl FnOnce(&[u8]) -> Result<E, String>` [`crate::spawn`] takes, so selecting an engine
@@ -118,6 +132,24 @@ pub fn instantiate(wasm: &[u8]) -> Result<Guest, String> {
 /// Zero is refused rather than passed through, because WAMR reads zero as its own
 /// `DEFAULT_WASM_STACK_SIZE` — see [`eio_wamr_host::instantiate`].
 pub fn instantiate_with_stack(wasm: &[u8], stack_size: u32) -> Result<Guest, String> {
-    eio_wamr_host::instantiate(wasm, stack_size)
+    instantiate_with(wasm, stack_size, Some(crate::V1_MEMORY_PAGES))
+}
+
+/// [`instantiate`], with both of §4.2's per-instance reserves given rather than taken from
+/// [`EXEC_STACK_SIZE`] and [`crate::V1_MEMORY_PAGES`] — **the measurement seam, and nothing a
+/// leaf calls.**
+///
+/// `tests/memory_growth.rs` is why the growth bound is an argument: a bound nobody measures is
+/// a guess, and both halves of §4.2's memory row are bisected through here — the page reserve
+/// over LEAF §9's suite 1, exactly as `tests/exec_stack.rs` bisects the stack one.
+///
+/// `None` bounds nothing, which is ABI §4.1's other conforming answer and the reference
+/// harness's (`crates/conformance/tests/wamr.rs`). A leaf never passes it.
+pub fn instantiate_with(
+    wasm: &[u8],
+    stack_size: u32,
+    max_pages: Option<u32>,
+) -> Result<Guest, String> {
+    eio_wamr_host::instantiate(wasm, stack_size, max_pages)
         .map_err(|error: InstantiateError| error.to_string())
 }

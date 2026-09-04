@@ -30,7 +30,7 @@ use eio_manifest::Capability;
 /// A floor to raise as skips are closed, never a number to adjust downwards. The four that do
 /// not reach it are the leaf's, not an engine's — see [`LeafHost::capabilities`] and
 /// [`LeafHost::enforces_budgets`] — which is exactly why both engines answer it.
-const SCENARIOS_REACHED: usize = 30;
+const SCENARIOS_REACHED: usize = 31;
 
 /// One of `eio_leaf`'s engine bindings, as a conformance [`Host`].
 ///

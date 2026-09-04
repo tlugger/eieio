@@ -39,6 +39,7 @@ use eio_host_core::{
     Connection, Descriptor, Endpoint, Overflow, PORT_ERR, Port, PropertySource, Routes, Target,
 };
 use eio_leaf_gen::{Baked, Error, Inputs, V1_MEMORY_PAGES};
+use eio_manifest::MemoryBound;
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 
@@ -561,11 +562,19 @@ fn a_module_over_the_page_budget_is_refused() {
         .join("../../examples/services/counter-transform.toml");
     let error = bake(&path, 0).expect_err("one page is over a zero-page budget");
     let Error::MemoryBudget {
-        declared, budget, ..
+        bound,
+        declared,
+        budget,
+        ..
     } = &error
     else {
         panic!("expected a memory-budget refusal, got {error}");
     };
+    assert_eq!(
+        *bound,
+        MemoryBound::Minimum,
+        "the golden blocks declare no maximum, so this can only be the minimum"
+    );
     assert_eq!(
         *declared, GOLDEN_BLOCK_PAGES,
         "what the golden blocks declare after SDK §5.2's default"
@@ -576,6 +585,44 @@ fn a_module_over_the_page_budget_is_refused() {
     assert!(
         message.contains("stack-size"),
         "the refusal names the fix: {message}"
+    );
+}
+
+/// ABI §4.1's other end, and the advice that goes with it.
+///
+/// A leaf refuses a module whose declared **maximum** is over budget for a different reason
+/// than one whose minimum is — the module has said it may grow past what the leaf reserved,
+/// and capping it at instantiation would grant it less than it declared, which §4.1 refuses in
+/// as many words. The check itself is `eio_manifest`'s and is measured there
+/// (`crates/manifest/tests/module.rs`); what is this crate's is the sentence a deployer reads,
+/// and it must not be the other one. Sending someone to `-zstack-size` for a `--max-memory`
+/// they wrote themselves is a wasted afternoon, and the two messages are one field apart.
+///
+/// Constructed rather than baked because no artifact in `examples/blocks/` declares a maximum:
+/// `wasm-ld` emits none unless asked and SDK §5.2 deliberately does not ask, which is the
+/// whole reason the engine bound (LEAF §4.2, `crates/leaf/tests/memory_growth.rs`) exists
+/// beside this refusal rather than instead of it.
+#[test]
+fn a_maximum_over_budget_is_refused_with_its_own_advice() {
+    let message = Error::MemoryBudget {
+        id: "n-1".to_string(),
+        block: "greedy@1.0.0".to_string(),
+        bound: MemoryBound::Maximum,
+        declared: 4,
+        budget: V1_MEMORY_PAGES,
+    }
+    .to_string();
+
+    assert!(message.contains("maximum"), "which end it was: {message}");
+    assert!(message.contains("LEAF §4.2"), "{message}");
+    assert!(
+        message.contains("ABI §4.1"),
+        "the refusal cites the rule that forbids capping it instead: {message}"
+    );
+    assert!(
+        !message.contains("stack-size"),
+        "a maximum is not the shadow stack, and saying so would send a deployer to the wrong \
+         knob: {message}"
     );
 }
 
