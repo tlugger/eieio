@@ -13,6 +13,8 @@ src/lib.rs           the block: one struct, one #[block] attribute, one Block im
 tests/native.rs      the fast layer — the block as native Rust, no engine (SDK §6.1)
 conformance/         the boundary layer — the same block as .wasm, under the reference
                      harness (ABI §13.1)
+.cargo/config.toml   the shadow-stack size, which decides how much linear memory this
+                     block declares (SDK §5.2)
 ```
 
 Both test layers exist because neither catches the other's bugs. `tests/native.rs` runs in
@@ -32,6 +34,11 @@ profile (SDK §5.2), then runs the same load-time validation a node runs — exp
 signatures, imports within the declared capabilities, the embedded manifest — and writes
 that manifest as `manifest.json` beside the `.wasm`. A module that builds is a module a node
 accepts.
+
+It also prints the module's declared minimum linear memory. One page, 64 KiB, is what this
+template produces and what a leaf-class node can instantiate (LEAF §4.2); the shadow stack
+in `.cargo/config.toml` is the lever, and raising it is fine as long as you know the block
+is not headed for a leaf.
 
 ## Configuring it
 

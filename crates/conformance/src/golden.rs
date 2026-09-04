@@ -20,14 +20,19 @@
 //! sits beside it rather than inside it: it is how *this repository* produces its own
 //! fixtures, and a host implemented elsewhere would supply its own.
 //!
-//! # No flags
+//! # No flags on the command line
 //!
-//! `cargo build --release --target wasm32-unknown-unknown`, with `RUSTFLAGS` cleared. The
-//! profile in `examples/blocks/Cargo.toml` restates SDK §5.2's defaults, so this produces the
-//! same module `cargo eio build` does — and clearing the environment is what keeps that a
-//! statement about the toolchain rather than about the developer's shell. ABI §4.3's accepted
-//! feature set is what rustc emits by default; a golden block that needed a flag would be
-//! evidence against the feature set, not a build to fix.
+//! `cargo build --release --target wasm32-unknown-unknown`, with `RUSTFLAGS` cleared. Both of
+//! SDK §5.2's defaults are restated where a plain `cargo build` picks them up — the profile
+//! in `examples/blocks/Cargo.toml`, the shadow stack in `examples/blocks/.cargo/config.toml`
+//! — so this produces the same module `cargo eio build` does. The working directory is set to
+//! `examples/blocks` for the second of the two: cargo finds a config file by walking up from
+//! the working directory and not from the manifest, so a build pointed here with
+//! `--manifest-path` would silently link a 1 MiB shadow stack and declare 17 pages. Clearing
+//! the environment is what keeps all of this a statement about the toolchain rather than
+//! about the developer's shell — `RUSTFLAGS` outranks every config source. ABI §4.3's
+//! accepted feature set is what rustc emits by default; a golden block that needed a
+//! `-C target-feature` would be evidence against the feature set, not a build to fix.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

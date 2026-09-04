@@ -248,7 +248,8 @@ A `cargo eio` subcommand (separate `cargo-eio` crate):
 ```
 cargo eio new <name>         template block repo (CI included)          §5.1
 cargo eio build              wasm32-unknown-unknown, panic=abort, opt for size,
-                             embed eio:manifest section, emit manifest.json
+                             a leaf-sized shadow stack, embed eio:manifest
+                             section, emit manifest.json
                              (no feature flags: ABI §4.3's accepted set is what
                              rustc emits by default, and the flag this line
                              used to carry was measured to do nothing)   §5.2
@@ -306,6 +307,7 @@ approximate.
 ```
 <name>/
   Cargo.toml               the block crate; NOT a workspace member of anything
+  .cargo/config.toml       §5.2's shadow-stack default, restated
   src/lib.rs               one #[block] struct and its Block impl (§1)
   tests/native.rs          the TestHost layer (§6.1)
   conformance/*.json       the harness layer (§6, ABI §13.1)
@@ -314,7 +316,7 @@ approximate.
   README.md
 ```
 
-Four things about it are normative, because each is load-bearing somewhere else:
+Five things about it are normative, because each is load-bearing somewhere else:
 
 - **`[lib] crate-type = ["cdylib", "rlib"]`.** The `cdylib` is the block; the `rlib` is what
   lets `tests/native.rs` name the block's type at all. A `cdylib`-only crate cannot be
@@ -331,6 +333,12 @@ Four things about it are normative, because each is load-bearing somewhere else:
   restating them is what makes a plain `cargo build --release --target wasm32-unknown-unknown`
   produce the same module. A block author who reaches for cargo directly should not get a
   different artifact.
+- **`.cargo/config.toml` restates §5.2's shadow stack**, for the same reason and under
+  `[target.wasm32-unknown-unknown]` rather than `[build]`. A rustflag cannot live in a
+  `Cargo.toml`, so this is the file that gives the previous rule its other half — and the
+  table is the target-specific one deliberately: it outranks the `build.rustflags` §5.2
+  passes, so **this file is where a block raises its stack, and editing it moves both build
+  paths together**. `[build]` here would move only the plain one.
 
 The conformance scenarios name the built module by path, relative to the scenario file
 (`../target/wasm32-unknown-unknown/release/<lib>.wasm`), because ABI §13.1 already says a
@@ -348,6 +356,7 @@ cargo build --release --target wasm32-unknown-unknown
   --config 'profile.release.opt-level="z"'
   --config 'profile.release.lto=true'
   --config 'profile.release.strip=true'
+  --config 'build.rustflags=["-C", "link-arg=-zstack-size=16384"]'
 ```
 
 |Setting|Why|
@@ -356,11 +365,62 @@ cargo build --release --target wasm32-unknown-unknown
 |`opt-level = "z"`|Size over speed. A block's work is bounded by its fuel budget (ABI §10), not by its instruction count.|
 |`lto = true`|Fat LTO across the block and the SDK; it is what removes the capability wrappers a block never calls.|
 |`strip = true`|Symbol names are the largest single component of an unstripped guest, and no host reads them: ABI §8's death report is a trap and a status code, and §4.3's diagnostics name imports and proposals rather than functions.|
+|`-zstack-size=16384`|`wasm-ld` defaults the shadow stack to 1 MiB, which put every one of ABI §13.2's golden blocks at **17 declared pages, 1088 KiB** — 3.5× the whole of LEAF §4.2's target chip. 16 KiB takes all five to one page. The next paragraphs are why that number, why a default and not a ceiling, and why the module's *maximum* is left alone.|
 
 They are passed as `--config` rather than left to the block's own manifest **deliberately, and
 this is the point of the subcommand existing**: config-level profile settings override the
 manifest's, so a block cannot ship with `panic = "unwind"` by editing a file. §4's rule is not
 one a block author may opt out of on their own machine.
+
+**The shadow stack is the one setting here that is a default rather than an enforcement, and
+the difference is the point.** The profile rows above are enforced: `--config` outranks the
+block's `Cargo.toml`, and §4's `panic = "abort"` is not negotiable. The stack size arrives as
+`build.rustflags`, which is the **lowest**-priority of cargo's four rustflags sources — cargo
+takes the first source that has any, in the order `RUSTFLAGS` env → `target.<triple>.rustflags`
+→ `build.rustflags`, and does not merge them. So a block that genuinely needs a deeper stack
+sets `[target.wasm32-unknown-unknown] rustflags` in its own `.cargo/config.toml` (§5.1 puts
+the file there for exactly this) and gets it — from `cargo eio build` *and* from a plain
+`cargo build`, identically, which is the property §5.1 asks of the profile.
+
+**16 384 bytes, and the alternatives were measured rather than reasoned about.** 8 KiB, 16 KiB
+and 32 KiB all produce a one-page module across the five golden blocks; 64 KiB produces two,
+because the data section (~10 KiB) sits above the stack. Within the three that work, the
+choice is how the first page is divided between stack and the guest's own heap, and 16 KiB is
+the balance: it leaves ≈ 38 KiB of the page below `memory.grow`, which is more than nine times
+LEAF §4.2's `max_payload` of 4 096 and therefore room for the inbound payloads `eio_alloc`
+serves (ABI §9.5) without growing. 32 KiB halves that heap to buy stack a block has no reason
+to use — a block author writes no recursion the SDK cannot bound — and 8 KiB gives the guest's
+own frames no more room than LEAF §4.2 reserves for the *engine's* execution stack, which is a
+smaller machine doing a larger job. Module size is unaffected: the five differ from their
+1 MiB-stack builds by three bytes.
+
+**Nothing here is a ceiling, and a ceiling does not belong here.** `cargo eio build` produces
+ABI §11.1's portable module, the one that MUST always ship and that a daemon-class node runs
+with no memory pressure worth the name. The number a declared minimum has to be checked
+against is a *per-instance page budget*, and this command does not know one: it is a property
+of a target, and LEAF §4.2 already places the refusal at firmware build time, where the budget
+is known and where a refusal costs a build rather than a field failure. A second check here,
+against a leaf's number hard-coded into the SDK, would be a second definition of the leaf's
+memory budget — the drift this project's whole conformance argument exists to prevent. **A
+block that declares more than one page is a valid block.** It is refused when, and only when,
+somebody tries to put it on a leaf.
+
+What `build` does instead is **print the module's declared minimum linear memory** beside its
+size, every time. That is the number LEAF §4.2 refuses on, and printing it is what turns a
+displaced default — an author's `RUSTFLAGS`, which outranks everything above — into something
+visible at the build that caused it rather than at somebody else's firmware build.
+
+**`--max-memory` is not set, and that is a decision.** The shadow stack and the memory type's
+*maximum* are different knobs pointed at different problems. The stack size moves the declared
+**minimum**, which is the number a host must satisfy before an instance exists and the only one
+it cannot negotiate — the whole of the defect. A maximum is a limit on `memory.grow`, and
+setting one would change every block's behaviour rather than its size: a guest that could have
+grown to serve a large batch would instead have `eio_alloc` return 0, which is ABI §9.5's
+`ERR_LIMIT` path — a real, conforming, *different* outcome, imposed on the daemon tier to
+encode a budget only the leaf tier has. It would also buy a host nothing it does not already
+have, since a host that cares about growth must cap it itself; a maximum a module declares
+about its own appetite is not a constraint a host may take on trust. So: the minimum is the
+SDK's to keep small, the maximum is the host's to enforce.
 
 **No feature flags of any kind are passed.** ABI §4.3's accepted set is exactly what rustc
 emits by default; the flag earlier drafts required here was measured to do nothing. Note

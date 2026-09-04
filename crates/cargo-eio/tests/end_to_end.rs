@@ -123,6 +123,19 @@ fn the_template_builds_and_passes_its_own_tests_unedited() {
     let wasm = std::fs::read(module(&root)).expect("the module was built");
     let embedded = eio_manifest::validate(&wasm, None).expect("a host would load this module");
 
+    // SDK §5.2's shadow-stack default, reaching the template through its own
+    // `.cargo/config.toml` (§5.1) rather than through the flag `build` passes. Pinned on the
+    // generated repo because that file is the one a block author edits, and a template that
+    // shipped without it would put every new block back on `wasm-ld`'s 1 MiB stack — 17
+    // declared pages, which LEAF §4.2's v1 leaf refuses outright.
+    assert_eq!(
+        eio_manifest::Module::read(&wasm)
+            .expect("a readable module")
+            .min_pages,
+        Some(1),
+        "the template's module declares more than one page of linear memory"
+    );
+
     let written =
         std::fs::read_to_string(root.join("target/wasm32-unknown-unknown/release/manifest.json"))
             .expect("manifest.json was written beside the module");
@@ -302,6 +315,22 @@ fn the_golden_blocks_build_through_the_tooling_a_block_author_uses() {
         assert_eq!(
             parsed.name, name,
             "the manifest describes the block just built"
+        );
+
+        // SDK §5.2's `-zstack-size` default on the `cargo eio build` path, over the blocks
+        // that had 17 declared pages before it existed. `crates/conformance/tests/golden.rs`
+        // pins the same number over the plain `cargo build` the harness uses; neither test
+        // covers the other's route to the flag.
+        let lib = name.replace('-', "_");
+        let wasm =
+            std::fs::read(blocks.join(format!("target/wasm32-unknown-unknown/release/{lib}.wasm")))
+                .expect("the module was built");
+        assert_eq!(
+            eio_manifest::Module::read(&wasm)
+                .expect("a readable module")
+                .min_pages,
+            Some(1),
+            "{name} declares more than one page of linear memory"
         );
     }
 }
