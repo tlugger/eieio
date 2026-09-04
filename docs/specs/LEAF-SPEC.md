@@ -108,9 +108,94 @@ A CBOR decoder needs a nesting bound or a hostile batch is a stack overflow, and
 - A leaf MUST NOT silently drop a write. Refusing with `ERR_THROTTLED` is the contract; succeeding and not persisting is not.
 - ABI §7.2's "blocks MUST treat persistence as best-effort and not as a message queue" is what makes the refusal safe. A block that cannot tolerate a refused write is a block that cannot run on a leaf, and that is a property of the block.
 
-**Namespacing is `(service, instance)`**, as DAEMON §10 establishes and for the same reason: a node does not know its System. On a leaf there is exactly one service, so the service component is constant — it is kept anyway, because dropping it would make a leaf's key layout differ from a daemon's for no gain, and `eieio`'s whole conformance argument is that the two agree.
+**Namespacing is `(service, instance)`**, as DAEMON §10 establishes and for the same reason: a node does not know its System. On a leaf there is exactly one service, so the service component is constant — it is kept anyway, because dropping it would make a leaf's key layout differ from a daemon's for no gain, and `eieio`'s whole conformance argument is that the two agree. §5.1 says what the constant *is*, which is what turns that sentence into a claim something can check.
 
-The **wear budget policy** — how much writing is too much, over what window, and what a leaf does when a block ignores repeated refusals — is **OPEN** (SCOPE §3.7).
+The **wear budget policy** — how much writing is too much, over what window, and what a leaf does when a block ignores repeated refusals — is **OPEN** (SCOPE §3.7). §5.2 is the layout underneath it and does not decide it: where the region is and how big it may be are separable from how fast it may be written, and only the first is settled here.
+
+### 5.1 What the constant service component is
+
+**The service component is the service file's `name`** (SERVICE §3), verbatim as the file spells it and with no normalisation — the same string, read from the same field, that a daemon composes into the same position of the same key (DAEMON §10's composition takes it from the parsed service's `name`). §6.4.2 bakes it as `BakedNode::service`, which is where a leaf's copy comes from and why nothing on the device computes it.
+
+**Naming the value is the whole of the parity claim**, and until it was named there was no parity to have. "Keep the component, because dropping it would make a leaf's key layout differ from a daemon's" holds only if the component *carries what a daemon's carries*. A leaf that kept a constant `"service"`, or the node id, or the empty string would have a daemon's key shape and none of its content — and would read in a dump as though it agreed. So the rule is not "keep a constant". It is:
+
+> Given one service file, a daemon and a leaf compose the same `(service, instance, key)` triple for the same block.
+
+That is checkable on the build host, from the same file, with no device — the shape §6.4.4 already gives a generator's other obligations.
+
+Two consequences, stated because the stronger version of each is what a reader will otherwise assume:
+
+- **The parity is of key composition, not of the store's bytes.** A daemon's redb tuple encoding and a leaf's flash records are each their own host's, and nothing here makes a state store portable between tiers. What is shared is the trait, the composition, and the three host functions above it — which is what stops the two hosts *disagreeing*, and is all ABI §13's argument needs.
+- **A service's name is therefore a state identity, on both tiers.** Renaming a service in the file leaves every namespace the old name wrote behind and starts new ones — on a daemon at the next reload, on a leaf at the next flash. That is DAEMON §10's "nothing garbage-collects a namespace" seen from the other end; §5.3 says what a leaf does with what is left.
+
+`crates/leaf`'s flat-file stand-in does not do this: it gives each instance a file at `state/<instance_id>.bin` and drops the service component entirely. That was defensible while the component had no stated value, and it is a divergence now that it has one — one a bring-up with no service file behind it cannot close, and a real flash-backed store must (eieio-x7g.2.14).
+
+### 5.2 Flash layout: two regions, and how the image finds the second
+
+§6.3 settles what is *in* the image — the runtime, the baked graph and every block artifact — and with it that a leaf's flash holds two regions and not four:
+
+|Region|What is in it|Lifecycle|
+|---|---|---|
+|the **image**|the runtime, the baked graph (§6.4), every block artifact (§6.3), and everything else a build decided (§6)|replaced wholesale by a flash|
+|the **state region**|`eio:state`'s keys and values, and nothing else|written only by a running leaf; untouched by a flash (§5.3)|
+
+**There is no third region, and the two absences are the load-bearing part.** Configuration is in the image because §6 bakes it. The node id is in the image because §6.4.3 makes it a required build input. Both are worth saying rather than leaving to follow, because the embedded reflex is to put identity in a writable key-value store beside the state — and a device with a baked id *and* a stored one has two answers to who it is, which is the failure §6.4.3's whole argument is about not having. **What a build decided is in the image; what a block wrote is in the state region; nothing is in both.**
+
+**The image MUST NOT carry the state region's absolute address.** It finds the region *by name*, through whatever description of its own flash the target already has, and an offset compiled into the runtime is forbidden — not for elegance, but because it would be a second place the layout is written down, and the failure when the two disagree is a write into somebody else's sectors rather than an error.
+
+On the v1 target (§6.2) that description is the ESP-IDF partition table, and these are the platform's figures rather than this document's choices:
+
+- The partition table lives at flash offset **`0x8000`** and occupies one **4 KB** sector, so the first partition may begin no earlier than `0x9000`. Every partition offset MUST be 4 KB aligned, and an app partition additionally 64 KB aligned. ([ESP-IDF: Partition Tables](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-guides/partition-tables.html))
+- **A bare-metal image boots through that table exactly as an ESP-IDF one does** — ROM bootloader, second-stage bootloader at `0x0`, partition table at `0x8000`, app at `0x10000` — because `espflash` bundles an ESP-IDF second-stage bootloader and synthesises an ESP-IDF partition table whether or not the ELF it is given came from ESP-IDF ([The Rust on ESP Book: Bootloader](https://docs.espressif.com/projects/rust/book/application-development/bootloader.html)). §6.2 chose a `no_std` triple; it did not buy a different boot path, and this is the place that matters.
+- **The table is therefore already the one place the layout is written down**, which is why the image reads it rather than carrying a copy of what it says.
+
+**How much flash there is to divide** ([ESP32-C3 Datasheet](https://documentation.espressif.com/esp32-c3_datasheet_en.html) §1, §4.1.2): the recommended embedded-flash part, `ESP32-C3FH4X`, carries **4 MB** in package, as do the `ESP32-C3-MINI-1` module and the `ESP32-C3-DevKitM-1` built on it; `ESP32-C3FH8X` and the `-H8` modules carry 8 MB, and the chip supports **16 MB** of external flash at most (§4.1.2.2). Of that, **8 MB maps into the instruction address space and 8 MB into the data address space, in 64 KB blocks** (§4.1.2.2) — which is the ceiling under which §6.3's linked-in artifacts are read straight out of `.rodata`, and it is not a ceiling a service graph is likely to reach on a 4 MB part. Against 4 MB, the 16 KB floor below is 0.4% of the device; the image gets the rest, and this layout costs a leaf essentially nothing.
+
+**Erase granularity is 4 KB and a program page is 256 bytes** on the SPI NOR parts this class uses ([Winbond W25Q32JV](https://www.winbond.com/resource-files/w25q32jv%20revg%2003272018%20plus.pdf)), rated at 100 000 program/erase cycles per sector. **That last number is class-representative and not a measurement of any device this project will ship**: on a `-MINI-1` the die is in package and Espressif's own module datasheet declines to name its vendor. That is corroboration for SCOPE §3.7 keeping the wear budget **OPEN** rather than an argument for closing it — the endurance figure a policy would have to be built on is not yet knowable for the part this tier will actually ship.
+
+What this document fixes is only what is its own:
+
+- **The state region is one partition of type `data`, named `eio_state`.** The name is the contract between the image and the flash tool, and it is the whole of the contract: nothing else about the entry is this specification's.
+- **It is not an NVS partition and MUST NOT be declared as one.** A leaf's store is `host-core`'s `StateStore` (§5), not a second key-value library, and an `nvs` subtype invites another stack's tooling to write into a region it does not own.
+- **Its size is a build input, with a floor of 16 KB.** Erase granularity is one 4 KB sector, so a store that must not lose what it already holds needs somewhere to write a replacement before erasing the original: three sectors is the smallest arrangement in which that is possible at all, and a fourth gives a compaction somewhere to go. ESP-IDF's own NVS puts its minimum at 12 KB for the same arithmetic ([NVS](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/storage/nvs_flash.html)) — corroboration, not the rule.
+- **A leaf build supplies its own partition table.** `espflash`'s default one is `nvs` at `0x9000`, `phy_init` at `0xf000`, and a `factory` app partition from `0x10000` filling the flash to the end — so accepting it leaves no room for a state region at all, and its `nvs` is a partition nothing on a leaf uses. The table is a build output like the image, and a leaf's declares `eio_state` and need declare no `nvs`.
+
+**What the region's *contents* look like is deliberately not settled here** — the record format, how a write survives a power cut, how erases are spread across sectors. That is an implementation (eieio-x7g.2.14) under a policy that is **OPEN** (SCOPE §3.7's wear budget). This section fixes where the region is, how it is found, how small it may not be, and what may not be in it.
+
+**All of this is read from vendor documentation and no board has run it.** §6.2 records that no board is named anywhere in this repository or its tracker; this section inherits that caveat unchanged, and the first image that boots is what turns these figures into measurements.
+
+### 5.3 What a firmware update does to what is already there
+
+Three rules, and they are one rule seen three ways: **a flash replaces the image and nothing else.**
+
+**1. State survives a firmware update.** The state region is not part of the image, and the flash step a build emits (§10) MUST write only the image's own regions. **A deploy MUST NOT be a full-chip erase**, and a build MUST NOT emit one as a step.
+
+§10 calls "a failed build changes nothing on the device" the one operational advantage this tier has over a hot-loading daemon. A *successful* flash that silently wiped a counter would spend that advantage on the deploy path instead of the failure path — and state is the one thing on a node that cannot be rebuilt from a file (DAEMON §10).
+
+**On the v1 target this rule costs nothing, because the ordinary flash already obeys it.** `espflash flash` writes exactly three segments — the bootloader at `0x0`, the partition table at `0x8000`, and the app at the `factory` partition's offset — and the erase it asks for before each is derived from that segment's own length rounded up to a sector, so a partition none of the three covers is not touched. Erasing more than that is a different command with its own name (`erase-flash`, `erase-parts`, `erase-region`), and `flash`'s own `--erase-parts` / `--erase-data-parts` flags are opt-in. **A build MUST NOT emit any of them.** (Read from `espflash`'s source rather than its book: `flash_segments` and `default_partition_table` in `espflash/src/image_format/idf.rs`, `write_segment` in `espflash/src/target/flash_target/esp32.rs`, and the `Commands` enum in `espflash/src/bin/espflash.rs` — [esp-rs/espflash](https://github.com/esp-rs/espflash).)
+
+The exception is the operator's and is named as one: **moving or resizing the state region is a reprovision, not an update.** Its contents do not survive it, nothing on the device can migrate them, and a build that changes either offset or size MUST say so among the steps it emits (§10) rather than let a flash discover it.
+
+**2. A changed graph orphans state, and nothing reclaims it.** A firmware build may change the instance set — an id removed, an id renamed, an instance added — and §6.4.2's numbering is rebuilt from whatever the new service file says. State written under a `(service, instance)` key that the new image's graph has no instance for is **left exactly where it is**. A leaf does not delete it at boot, does not delete it during a flash, and has no way of being asked to.
+
+That is the daemon's rule (DAEMON §10: "nothing removes a namespace as a side effect"), kept for the daemon's reasons and one of the leaf's own:
+
+- **The failure that matters is deleting live state, not retaining dead state.** Renaming an id is an ordinary edit; a leaf that reclaimed on a graph change would discard — silently, once, unrecoverably — state a block is about to want.
+- **A leaf cannot tell "removed" from "not yet".** A daemon can: it compares the store against every service file on the node, which is what makes DAEMON §9's orphan question answerable at all. A leaf knows one graph, the one it was built with, so "no instance claims this key" is exactly as true of a device half way through a rollout as of one whose block was deleted on purpose.
+- **Divergence.** What a deploy does to state is not something the two hosts may answer differently (§9, ABI §13).
+
+**What replaces `DELETE /state/orphans/{namespace}` is the flash tool.** A daemon's reclamation is an operator naming one namespace over an API a leaf does not have (§7). A leaf's is the operator erasing the region — the same act, explicit and named and never a side effect, through the only channel this tier has. It is a coarser instrument, and the cost is stated rather than hidden: **a leaf cannot reclaim one namespace.** It reclaims all of them or none.
+
+**A full region answers `ERR_IO`, and being full is not a licence to reclaim.** A `state_put` with no room left fails with `StateError::Io` — ABI §8's `ERR_IO` — because that is the vocabulary `host-core`'s `StateStore` has, and its two variants are deliberately the whole of it. It MUST NOT be `ERR_THROTTLED`: that code means "retry later" (ABI §8), which is true of a wear budget refusing a burst and false of a region with nothing left. And **a leaf MUST NOT free space by evicting a namespace**, orphaned or otherwise — that is the reclamation this rule refuses, arrived at through pressure instead of through a decision.
+
+**3. An instance that survives keeps its state — through a changed block and through changed properties.** Neither the block nor its properties is a key component, on either host.
+
+- **A new version of a block, or a different block entirely, under the same id inherits the namespace.** That is what makes ABI §13.2's stateful counter survive a firmware update at all; a host that keyed by block would reset every counter on a version bump, which is the opposite of what a durable store is for. The obligation therefore lands on the block author, and ABI §7.2 already gives it: values are opaque bytes to the host, nothing in the platform versions their encoding, and **a block that changes how it encodes its state is responsible for reading what its predecessor wrote** — or for changing its keys. A build host cannot check this and MUST NOT try: mangling a key so the mismatch became impossible would have to be the daemon's behaviour too, and it would trade a rare visible bug for a permanent one.
+- **An id reused for an unrelated block is the one case where the safe default is surprising**, and it stays the default. Reusing an id is the author saying these are the same instance; a service file has no other way to say otherwise, and giving it one is SERVICE-SPEC's decision and not this document's.
+- **A property change does nothing at all.** Properties are configuration, evaluated per signal (ABI §11), and live in the image. On this tier a one-line property edit reflashes the whole image (§6.3) — and it costs nothing in state, which is worth stating precisely because that reflash is the most alarming-looking thing this tier does.
+
+**The observable contract, in one sentence.** Flash an image built from a changed service file, and every instance whose id survived finds the state it left, every instance whose id did not is gone with its keys still on the device, and nothing is removed that an operator did not explicitly erase.
+
+Whether a leaf *says* any of this — how much of the region is spent, how many namespaces no instance claims — is §11's observability item (§7), which is where everything a leaf reports about itself is decided.
 
 ## 6. What is baked, and what a build produces
 
@@ -120,7 +205,7 @@ A daemon reads `node.toml` (DAEMON §2.1) and a service file (SERVICE-SPEC) at b
 - **The node's identity and limits**: what `node.toml` would have carried.
 - **The transport configuration** (§8): what `pubsub.toml` would have carried.
 
-**Those three are *what* is baked; §6.4 is the form they take.** §6.3 settles the question underneath both — a block's compiled artifact is part of the firmware image rather than something a leaf reads out of flash — because that choice decides the shape of the baked graph, the flash layout (§11) and what the pipeline produces.
+**Those three are *what* is baked; §6.4 is the form they take.** §6.3 settles the question underneath both — a block's compiled artifact is part of the firmware image rather than something a leaf reads out of flash — because that choice decides the shape of the baked graph, the flash layout (§5.2) and what the pipeline produces.
 
 **The service file is still the source, and stays the portable artifact.** The same file deploys to a daemon; SERVICE-SPEC parses it; the firmware build is one more consumer. It is not parsed *on* the leaf — `eio-service` is a `std` crate and deliberately so (CLAUDE.md: nothing parses a service file on a leaf tier) — it is parsed by the build host, which then emits Rust.
 
@@ -190,7 +275,7 @@ Adding one is a checklist, not an argument. A family joins the list when all fiv
 
 ### 6.3 A block's code is linked into the image, not loaded from flash
 
-Three sections said this three ways: §1's table said a leaf's blocks are "AOT-compiled and linked in", §6.1 said the section ratifies when a leaf "loads an artifact this pipeline built", and §11's flash-layout item asked where AOT artifacts "sit". Those are not three spellings of one design. They are two designs — artifacts *in* the firmware image, versus artifacts in a flash region the runtime reads at boot — and the difference decides the shape of the baked graph (§6.4), the flash layout (§11) and what the pipeline produces.
+Three sections said this three ways: §1's table said a leaf's blocks are "AOT-compiled and linked in", §6.1 said the section ratifies when a leaf "loads an artifact this pipeline built", and §11's flash-layout item asked where AOT artifacts "sit". Those are not three spellings of one design. They are two designs — artifacts *in* the firmware image, versus artifacts in a flash region the runtime reads at boot — and the difference decides the shape of the baked graph (§6.4), the flash layout (§5.2) and what the pipeline produces.
 
 **The answer is §1's.** Every block's compiled artifact is part of the firmware image, reached from the baked graph as a `&'static [u8]`, and **a leaf never reads a block's code out of a flash region it did not link**. §6.1 and §11 are amended to agree.
 
@@ -210,7 +295,7 @@ Why, in the order the reasons bind:
 
 **This is engine-independent, and that is what makes §6.4 buildable now.** A bring-up leaf (§3) links the portable `wasm32-unknown-unknown` module through the same include; an AOT leaf links a `.aot` for §6.2's triple. Nothing else in the baked graph differs between the two, so the generator and the representation it emits can be written and tested against the interpreter today, with no `wamrc` — which is otherwise what §6.1's PROPOSED status blocks. **This section does not ratify §6.1**: no pipeline has produced an artifact, and none has been linked.
 
-**What it settles for §11's flash-layout item.** A leaf's flash holds exactly two regions with distinct lifecycles: the **image** — runtime, baked graph and every block artifact, replaced wholesale by a flash — and the **state region** (§5's `StateStore`), which is not part of the image and which the image must be able to find. What is left to settle is where that region sits, how the image finds it, and what an update does to what is in it. An artifact partition, an on-device artifact index and a cross-region version pairing are no longer among the questions.
+**What it settled for the flash layout.** A leaf's flash holds exactly two regions with distinct lifecycles: the **image** — runtime, baked graph and every block artifact, replaced wholesale by a flash — and the **state region** (§5's `StateStore`), which is not part of the image and which the image must be able to find. An artifact partition, an on-device artifact index and a cross-region version pairing were removed from the question here; where the region sits, how the image finds it and what an update does to what is in it are answered in §5.2 and §5.3.
 
 **And for §6.2.1's open note:** the artifact-name comparison is the *build host's*, always. The generator selects, for each instance's block, the artifact whose `aot` entry equals the Rust triple the image is being built for — string equality against a value the build already holds — and the image carries no target string and performs no lookup. §6.2.1 predicted its spelling was robust to this decision, and it is: the name is unchanged, and ABI §11.1's `aot` list stays what it was, a build-host input describing what a registry can supply rather than a runtime key.
 
@@ -243,7 +328,7 @@ pub struct BakedGraph {
 pub struct BakedNode {
     pub id: &'static str,                          // DAEMON §2.1's node id — see §6.4.3
     pub name: Option<&'static str>,                // a label; nothing resolves by it
-    pub service: &'static str,                     // the service's name; §5's key component
+    pub service: &'static str,                     // the service's name; §5.1's key component
     pub limits: Limits,                            // ABI §9.7, per instance
 }
 
@@ -365,6 +450,7 @@ A leaf deploy is a **build**, and the contract is what the build promises the De
 - **Validation happens before the build, not during it.** SERVICE §7's stages and ABI §4.3's load-time check both run on the build host, so a rejection is a message about a service file rather than a compiler error. A block whose manifest requires a capability the target lacks is refused here — the same check DESIGNER §5 surfaces at design time, enforced where it is binding.
 - **It produces a flashable image and the steps to flash it.** Whether the Designer drives the flash tool directly is DESIGNER §7's business, not this document's.
 - **A failed build changes nothing on the device.** The running firmware is untouched until a flash succeeds, which is the one operational advantage this tier has over a hot-loading daemon.
+- **A successful flash changes nothing but the image.** The steps it emits write the image's regions and not the state region (§5.3), so a deploy never costs a block the state it wrote — and the two cases where that is not automatic, a state region being moved or resized and a graph that dropped an instance, are things the steps say rather than things a flash discovers.
 
 The build pipeline's own mechanics — how the toolchain is pinned, where AOT artifacts are cached, how a build is reproduced — are **§11 expansion items**, not settled here.
 
@@ -380,4 +466,4 @@ Needed before implementation, and deliberately not guessed at in this draft:
 - **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on. **A host bring-up cannot stand in for this one**, measured rather than assumed: `wasm3x` 0.1.0 exposes no interruption, abort or termination entry point at all, so nothing outside a running guest call can end it, and the host leaf therefore answers `enforces_budgets = false` and has ABI §13's budget scenario skipped by name — which is §4's honest-binding rule working as intended, not a gap in the leaf. The watchdog becomes implementable at the same moment the target does: a hardware timer and an engine that can be told to stop.
 - **Observability without an API** (§7): what a leaf publishes about itself, and on which topic.
 - ~~**A class-aware CLI**~~ — **resolved** (eieio-x7g.5): it learns the class. A node entry in `nodes.toml` carries an optional `class`, `"daemon"` or `"leaf"`, absent meaning `"daemon"`, and `eio` refuses a leaf by naming the class rather than reporting a failed request. SCOPE §3.7 records the decision and why the two alternatives — requiring the key, or inferring the class from a refused connection — are each worse.
-- **Flash layout**: where the state region sits, how the image finds it, and how a firmware update treats what is in it — including state left under a `(service, instance)` key that the new image's graph has no instance for (§5, §6.4.2: a build may change the instance set). **AOT artifacts and configuration are no longer part of this question** (§6.3): both are in the image, which a flash replaces wholesale, so a leaf's flash has two regions with distinct lifecycles rather than four.
+- ~~**Flash layout**~~ — **resolved** (eieio-x7g.2.9): §5.2 gives the two regions and how the image finds the second. The state region is one `data` partition named `eio_state`, located **by name** through the target's own partition table and never by an offset compiled into the image, at least 16 KB, holding `eio:state`'s keys and nothing else; identity and configuration are in the image (§6, §6.4.3), so there is no third region and nothing writable holds anything a build decided. §5.3 answers what an update does: a flash replaces the image and nothing else, so state survives one; state under a `(service, instance)` key the new graph has no instance for is left exactly where it is, and only an explicit erase removes it — the flash tool standing in for the `DELETE /state/orphans/{namespace}` a leaf has no API to offer, coarser by one namespace and stated as a cost; and an instance that survives keeps its namespace through a changed block and through changed properties, with the encoding-migration obligation landing on the block author where ABI §7.2 already put it. §5.1 names the constant service component — the service file's `name` — which is what makes the daemon key-layout parity §5 claims checkable rather than merely shaped. Deliberately still not settled: the **wear budget policy** behind a refusal, which stays **OPEN** in SCOPE §3.7, and the region's own record format, which is eieio-x7g.2.14's to write under it.
