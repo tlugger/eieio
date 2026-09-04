@@ -45,7 +45,7 @@ use eio_host_core::{
     Arg, Engine, EngineError, HostCall, HostFn, Memory as GuestMemory, Ret, Trap, TrapKind,
     memory_range,
 };
-use eio_manifest::{Capability, MEMORY_EXPORT};
+use eio_manifest::{CORE_IMPORTS, CORE_NAMESPACE, Capability, ImportSpec, MEMORY_EXPORT};
 use wasm3x::{
     Caller, CompilationMode, Config, FuncType, Instance, Linker, Module, Store, Val, ValType,
 };
@@ -275,37 +275,32 @@ fn dispatch(
     ret
 }
 
-/// Every ABI §7 function's signature, as `(params, results)`.
+/// One of `eio-manifest`'s published parameter/result types, as wasm3 spells it.
 ///
-/// Stated here rather than derived, because `wasm3x::func_new` wants a `FuncType` — and this
-/// second statement of §7's table is exactly the duplication eieio-7d8.18 is filed about.
-fn signature(name: &str) -> (Vec<ValType>, Vec<ValType>) {
-    use ValType::{I32, I64};
-    let i32s = |n: usize| vec![I32; n];
-    match name {
-        "log" | "error" => (i32s(3), vec![]),
-        "emit" => (i32s(3), vec![I32]),
-        "prop" => (i32s(4), vec![I32]),
-        "time_unix_ms" | "time_mono_ms" => (vec![], vec![I64]),
-        "rand" => (i32s(2), vec![I32]),
-        "state_get" | "state_put" => (i32s(4), vec![I32]),
-        "state_del" => (i32s(2), vec![I32]),
-        "timer_set" => (vec![I64, I32], vec![I32]),
-        "timer_cancel" | "gpio_read" | "gpio_unwatch" => (i32s(1), vec![I32]),
-        "gpio_mode" | "gpio_write" | "gpio_watch" | "http_request" => (i32s(2), vec![I32]),
-        "i2c_write" | "i2c_read" => (i32s(4), vec![I32]),
-        "i2c_write_read" => (i32s(6), vec![I32]),
-        other => panic!("{other} is not an ABI §7 function"),
+/// ABI §7 uses exactly two of core WASM's four; a signature in any other type is unreachable,
+/// and defining one under the wrong type would mean a link failure the caller cannot read.
+fn val_type(val_type: eio_manifest::ValType) -> ValType {
+    match val_type {
+        eio_manifest::ValType::I32 => ValType::I32,
+        eio_manifest::ValType::I64 => ValType::I64,
+        other => panic!("ABI §7 has no {} parameter or result", other.as_str()),
     }
 }
 
-/// Defines every ABI §7 function on `linker`.
+/// Defines every ABI §7 function on `linker`, with `eio-manifest`'s signatures.
+///
+/// **The signatures are the published table's, not this file's** (eieio-7d8.35). `ImportSpec`
+/// exists so that a host binding building its linker reads §7's table rather than restating it
+/// (eieio-7d8.18, and that type's own docs say so), and a *conformance* host restating it was
+/// the worst placement of all: this file's job is to catch two hosts disagreeing about ABI §7,
+/// which it cannot do from its own second copy of the answer.
 fn link(linker: &mut Linker<State>) -> wasm3x::Result<()> {
-    use eio_host_core::exports::{core_fn, namespace as ns};
-
-    let mut define = |namespace: &'static str, name: &'static str| -> wasm3x::Result<()> {
-        let (params, results) = signature(name);
-        let ty = FuncType::new(params, results);
+    let mut define = |namespace: &'static str, spec: ImportSpec| -> wasm3x::Result<()> {
+        let name = spec.name;
+        let ty = FuncType::new(
+            spec.signature.params.iter().copied().map(val_type),
+            spec.signature.results.iter().copied().map(val_type),
+        );
         linker.func_new(
             namespace,
             name,
@@ -333,12 +328,12 @@ fn link(linker: &mut Linker<State>) -> wasm3x::Result<()> {
         Ok(())
     };
 
-    for name in core_fn::ALL {
-        define(ns::CORE, name)?;
+    for spec in CORE_IMPORTS {
+        define(CORE_NAMESPACE, spec)?;
     }
     for capability in Capability::ALL {
-        for name in capability.functions().iter().copied() {
-            define(capability.namespace(), name)?;
+        for spec in capability.imports().iter().copied() {
+            define(capability.namespace(), spec)?;
         }
     }
     Ok(())

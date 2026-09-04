@@ -171,8 +171,13 @@ pub const CORE_FUNCTIONS: [&str; 7] = [
 ///
 /// This is the table a host binding reads to build one linker entry — wasmtime needs
 /// a closure typed to the right parameter count, a leaf runtime's dispatch table
-/// needs the same shape. It exists so that three host bindings restating "`rand` is
-/// `(i32, i32) -> i32`" by hand can instead read one row here.
+/// needs the same shape. It exists so that a host binding restating "`rand` is
+/// `(i32, i32) -> i32`" by hand can instead read one row here. Five do:
+/// `conformance/src/reference.rs`, `conformance/tests/wasm3.rs`,
+/// `conformance/tests/wamr.rs` and both of `crates/leaf`'s engine bindings — the
+/// conformance hosts included, because a suite whose job is to catch two hosts
+/// disagreeing about §7 cannot do it from its own second copy of the answer
+/// (eieio-7d8.35).
 ///
 /// **This is a table, not a check.** ABI §4.3 puts import signature checking on the
 /// engine at link time, deliberately, because that is where the same information

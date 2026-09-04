@@ -86,7 +86,7 @@ use eio_host_core::{
     Arg, Engine, EngineError, HostCall, HostFn, Memory as GuestMemory, Ret, Trap, TrapKind,
     memory_range,
 };
-use eio_manifest::{Capability, MEMORY_EXPORT};
+use eio_manifest::{CORE_IMPORTS, CORE_NAMESPACE, Capability, ImportSpec, MEMORY_EXPORT, ValType};
 use wamrx_sys as sys;
 
 /// The most arguments any ABI §4 export takes: `eio_on_http(req_id, status, ptr, len)`.
@@ -148,42 +148,48 @@ impl Kind {
             Kind::I64 => b'I',
         }
     }
-}
 
-/// Every ABI §7 function's signature, as `(params, results)`.
-///
-/// Restated here for the reason `tests/wasm3.rs`'s identical table is: `wamrx_sys`'s raw
-/// registration wants a signature string, and this second statement of §7's table is exactly
-/// the duplication eieio-7d8.18 is filed about.
-fn signature(name: &str) -> (Vec<Kind>, Vec<Kind>) {
-    use Kind::{I32, I64};
-    let i32s = |n: usize| vec![I32; n];
-    match name {
-        "log" | "error" => (i32s(3), vec![]),
-        "emit" => (i32s(3), vec![I32]),
-        "prop" => (i32s(4), vec![I32]),
-        "time_unix_ms" | "time_mono_ms" => (vec![], vec![I64]),
-        "rand" => (i32s(2), vec![I32]),
-        "state_get" | "state_put" => (i32s(4), vec![I32]),
-        "state_del" => (i32s(2), vec![I32]),
-        "timer_set" => (vec![I64, I32], vec![I32]),
-        "timer_cancel" | "gpio_read" | "gpio_unwatch" => (i32s(1), vec![I32]),
-        "gpio_mode" | "gpio_write" | "gpio_watch" | "http_request" => (i32s(2), vec![I32]),
-        "i2c_write" | "i2c_read" => (i32s(4), vec![I32]),
-        "i2c_write_read" => (i32s(6), vec![I32]),
-        other => panic!("{other} is not an ABI §7 function"),
+    /// The WAMR kind for one of `eio-manifest`'s published parameter/result types.
+    ///
+    /// ABI §7 uses exactly two of core WASM's four, so the other three are unreachable in a
+    /// signature this file reads — and if one ever appeared, registering it under a wrong
+    /// kind would silently misread every argument, which is worse than not starting.
+    fn from_val_type(val_type: ValType) -> Kind {
+        match val_type {
+            ValType::I32 => Kind::I32,
+            ValType::I64 => Kind::I64,
+            other => panic!("ABI §7 has no {} parameter or result", other.as_str()),
+        }
+    }
+
+    /// One signature's worth of them, in order.
+    fn from_val_types(val_types: &[ValType]) -> Vec<Kind> {
+        val_types.iter().copied().map(Kind::from_val_type).collect()
     }
 }
 
-/// Every `(namespace, name)` pair ABI §7 defines, core plus all five capabilities.
-fn every_abi_7_function() -> Vec<(&'static str, &'static str)> {
-    use eio_host_core::exports::{core_fn, namespace as ns};
-
-    let mut all: Vec<(&'static str, &'static str)> =
-        core_fn::ALL.iter().map(|name| (ns::CORE, *name)).collect();
+/// Every ABI §7 import, as `(namespace, spec)` — core plus all five capabilities.
+///
+/// **The signatures are `eio-manifest`'s, not this file's** (eieio-7d8.35). `ImportSpec`
+/// exists precisely so that a host binding building its linker reads §7's table instead of
+/// restating it (eieio-7d8.18, and that type's own docs say so), and this binding needs both
+/// the arity and the types: WAMR wants a native signature *string*, and getting `timer_set`'s
+/// `i64` wrong there would misread the argument rather than fail to link. A *conformance*
+/// host restating the table was the worst placement of all — this file's job is to catch two
+/// hosts disagreeing about ABI §7, which it cannot do from its own second copy of the answer.
+///
+/// It is *not* a second copy of ABI §4.3's link-time check, which stays on the engine — this
+/// table only decides what to register, and WAMR still refuses a module whose import does not
+/// match what was registered.
+fn every_abi_7_import() -> Vec<(&'static str, ImportSpec)> {
+    let mut all: Vec<(&'static str, ImportSpec)> = CORE_IMPORTS
+        .iter()
+        .copied()
+        .map(|spec| (CORE_NAMESPACE, spec))
+        .collect();
     for capability in Capability::ALL {
-        for name in capability.functions().iter().copied() {
-            all.push((capability.namespace(), name));
+        for spec in capability.imports().iter().copied() {
+            all.push((capability.namespace(), spec));
         }
     }
     all
@@ -252,8 +258,10 @@ fn signature_cstring(params: &[Kind], results: &[Kind]) -> CString {
 
 /// Registers `namespace`.`name` with WAMR's global native registry, dispatching every call
 /// through [`raw_trampoline`].
-fn register_one(namespace: &'static str, name: &'static str) {
-    let (params, results) = signature(name);
+fn register_one(namespace: &'static str, spec: ImportSpec) {
+    let name = spec.name;
+    let params = Kind::from_val_types(spec.signature.params);
+    let results = Kind::from_val_types(spec.signature.results);
     let sig = signature_cstring(&params, &results);
     let ctx = Box::new(HostCtx {
         namespace,
@@ -320,8 +328,8 @@ fn ensure_runtime() {
         // most once for the process's life (`Once`).
         let ok = unsafe { sys::wasm_runtime_full_init(&mut args) };
         assert!(ok, "the WAMR runtime failed to initialize");
-        for (namespace, name) in every_abi_7_function() {
-            register_one(namespace, name);
+        for (namespace, spec) in every_abi_7_import() {
+            register_one(namespace, spec);
         }
     });
 }
