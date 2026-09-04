@@ -229,18 +229,59 @@ fn names(ports: &'static [&'static str]) -> Vec<String> {
     ports.iter().map(|name| name.to_string()).collect()
 }
 
-/// A block artifact, linked into the image and **over-aligned** (LEAF §6.4.2, §6.3).
+/// What a module buffer's **base address** must be a multiple of, for the engines LEAF §3
+/// names (`eieio-x7g.2.20`).
 ///
-/// `include_bytes!` alone is not enough: it yields an align-1 array, and both engines read
-/// multi-byte fields directly out of the buffer they are handed, while §6.2's target gives no
-/// unaligned-access guarantee. A generator MUST emit this rather than a bare `include_bytes!`.
+/// **Four, measured from the engines' own source rather than their documentation**, in
+/// `wamrx-sys` 0.3.0's vendored WAMR 2.4.3 and `wasm3x-sys` 0.1.0's vendored wasm3. The three
+/// loaders a leaf can reach, and what each does with the buffer it is handed:
 ///
-/// The alignment is 16 bytes — [`u128`]'s — chosen as a superset of any field either engine
-/// reads out of a module or an AOT artifact. **That requirement is read from the engines'
-/// documentation and has not been measured on hardware** (LEAF §6.4.2's caveat, and the
-/// reason `eieio-x7g.2.20` exists): it is §6.1's uncertainty in the one place where being
-/// wrong about it is a fault at boot rather than a build error, so the conservative value is
-/// the one taken.
+/// - **WAMR, `.aot`: 4.** Normative in WAMR's own public header —
+///   `core/iwasm/include/wasm_export.h` on `wasm_runtime_load`: *"If it is AOT binary data, it
+///   must be 4-byte aligned."* `core/iwasm/aot/aot_loader.c` agrees and bounds it: every read
+///   goes through `TEMPLATE_READ`, which advances the cursor with `align_ptr(p, sizeof(type))`
+///   and then loads through a bare `*(type *)p` cast, and no call site in the file aligns to
+///   more than 4. The one type that would need 8 is read as two 4-byte loads on purpose —
+///   `GET_U64_FROM_ADDR` copies `addr[0]` and `addr[1]` into a union — so **8 is deliberately
+///   never required.**
+/// - **WAMR, `.wasm`: 4.** `core/iwasm/interpreter/wasm_loader.c` parses the body bytewise
+///   through LEB decoders, but its `read_uint32` is `TEMPLATE_READ_VALUE`, a bare
+///   `*(uint32 *)` cast with *no* `align_ptr` at all. It is used exactly twice — on the magic
+///   number and the version word, at buffer offsets 0 and 4 — so both loads inherit the base's
+///   alignment directly.
+/// - **wasm3, `.wasm`: 1.** `source/m3_core.c`'s `Read_u32`/`Read_u64`/`Read_f64` each go
+///   through `memcpy`, so wasm3 reads no multi-byte field out of the buffer with a cast and
+///   imposes no requirement.
+///
+/// So the requirement is WAMR's, it is the same 4 for both artifact kinds, and it is on the
+/// **base**: the AOT loader's `align_ptr` works on the absolute address, so a misaligned base
+/// does not merely misalign a load — it advances the cursor to a *different file offset* than
+/// `wamrc` wrote, and the parse desynchronises.
+///
+/// **Which is why the guard has to be structural.** On this repository's dev host every one of
+/// those loads succeeds unaligned — x86-64 and aarch64 both permit it — so no host test can
+/// fail on an under-aligned buffer. The tier where it bites is §6.2's, and there it is a fault
+/// at boot on a flashed image. [`include_module!`] is therefore checked at compile time
+/// against this constant rather than at run time against a device.
+///
+/// **16 was the previous value and is not wrong, only unmeasured**: it was chosen as "a
+/// superset of any field either engine plausibly reads". The measurement above replaces the
+/// plausibility with a number. Over-aligning further stays legal and buys nothing — the cost
+/// of the old value was at most fifteen bytes of `.rodata` per artifact, which is why it was
+/// never a bug.
+pub const MODULE_ALIGN: usize = 4;
+
+/// A block artifact, linked into the image and **aligned** (LEAF §6.4.2, §6.3).
+///
+/// `include_bytes!` alone is not enough: it yields an align-1 array, and WAMR reads a module's
+/// magic number, its version word and every field of an AOT header through direct casts, while
+/// §6.2's target gives no unaligned-access guarantee. A generator MUST emit this rather than a
+/// bare `include_bytes!`.
+///
+/// The alignment is [`MODULE_ALIGN`] — **4, measured from both engines' loaders**, not read
+/// off their documentation. That constant carries the measurement and its provenance; this
+/// macro only has to satisfy it, and a `const` assertion below makes an edit that stopped
+/// satisfying it a compile error rather than §6.1's fault at boot.
 ///
 /// The path is a string literal and MUST be absolute: the generated file is a build artifact
 /// written into the build directory and `include!`d from there, so a relative path would
@@ -252,20 +293,27 @@ fn names(ports: &'static [&'static str]) -> Vec<String> {
 ///     env!("CARGO_MANIFEST_DIR"),
 ///     "/tests/fixtures/aligned.bin"
 /// ));
-/// assert_eq!(MODULE.as_ptr() as usize % 16, 0);
+/// assert_eq!(MODULE.as_ptr() as usize % eio_leaf::graph::MODULE_ALIGN, 0);
 /// assert_eq!(MODULE, b"eieio\n");
 /// ```
 #[macro_export]
 macro_rules! include_module {
     ($path:expr) => {{
-        /// The over-aligning wrapper. `_align` is a zero-length array of the alignment type,
+        /// The aligning wrapper. `_align` is a zero-length array of the alignment type,
         /// which contributes the alignment and no bytes; `bytes` is unsized so the `&`
         /// below coerces `[u8; N]` to `[u8]` and the length stops being part of the type.
         #[repr(C)]
         struct Aligned<Bytes: ?Sized> {
-            _align: [u128; 0],
+            _align: [u32; 0],
             bytes: Bytes,
         }
+        // The measurement, enforced. `_align`'s type is what supplies the alignment, so a
+        // future edit that narrowed it — or a platform where it aligned to less than
+        // `MODULE_ALIGN` — fails the build here instead of faulting on a flashed image.
+        const _: () = assert!(
+            ::core::mem::align_of::<Aligned<[u8; 0]>>() >= $crate::graph::MODULE_ALIGN,
+            "include_module! must align a module buffer to at least MODULE_ALIGN (LEAF §6.4.2)"
+        );
         static ALIGNED: &Aligned<[u8]> = &Aligned {
             _align: [],
             bytes: *include_bytes!($path),
