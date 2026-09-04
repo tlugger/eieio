@@ -59,21 +59,17 @@
 //! That bug was two vitest suites, each shelling out to `cargo test` in their own `beforeAll`,
 //! running as separate worker processes that could both be holding (or waiting on) the
 //! workspace target-directory lock at once, while a third, much longer `cargo test --workspace`
-//! job (the `test` stage) held it too — the wait exceeded the hook's own timeout on CI. This
-//! file's generator is invoked from exactly **one** place on either path that matters:
+//! job (the `test` stage) held it too — the wait exceeded the hook's own timeout on CI.
 //!
-//! - `just shapes` (the `justfile` recipe `just ci` depends on before its parallel stages start)
-//!   now runs this crate's `cargo test` right after the daemon's, in the same recipe body — one
-//!   shell script, two commands, strictly sequential, finished before `EIO_SHAPES_PREGENERATED=1`
-//!   is exported and the parallel stages (including `test-designer`) begin.
-//! - `designer/src/lib/api/schema-parity.test.ts`'s own `beforeAll` — the sole vitest consumer of
-//!   this file's output — shells out to this crate's `cargo test` right after the daemon's, in
-//!   the same synchronous `beforeAll`, not from a second `describe` block or a second file. A
-//!   second cargo invocation was added to an *existing* sequential pair rather than a new
-//!   concurrent one.
-//!
-//! Nothing new shells out to `cargo test -p eio-designer --test response_shapes` from any other
-//! vitest file (`mock-parity.test.ts` reads only the daemon's generated file and is untouched).
+//! It cannot recur, because no vitest file invokes cargo at all any more (eieio-m9s.42). This
+//! file's generator is invoked from exactly **one** place: the `just shapes` recipe, which runs
+//! this crate's `cargo test` right after the daemon's — one shell script, two commands,
+//! strictly sequential. Every recipe that runs the SPA's suite depends on it (`just ci` before
+//! its parallel stages start, `just test-designer` on its own), and `EIO_SHAPES_PREGENERATED`
+//! makes the recipe a no-op for the second of those when `ci` has already run the first, so
+//! there is never a second cargo on the lock. The vitest side reads the two generated files and
+//! fails loudly when either is missing or stale — see
+//! `designer/src/lib/api/generated-shapes.ts`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
