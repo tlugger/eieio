@@ -103,13 +103,54 @@ const MAX_ARITY: usize = 4;
 /// which is `pub(crate)` and so not reachable from here).
 const ERR_BUF_SIZE: usize = 256;
 
-/// `wamrx::InstanceConfig`'s defaults, restated because that type's fields are `pub(crate)`.
-///
-/// The heap is zero because ABI §9 gives allocation to the *guest*: `eio_alloc`/`eio_free`
+/// WAMR's app heap, zero because ABI §9 gives allocation to the *guest*: `eio_alloc`/`eio_free`
 /// are the block's own exports, so WAMR's app heap would be memory nothing ever asks for.
-const AUX_STACK_SIZE: u32 = 64 * 1024;
+///
+/// This one really is `wamrx::InstanceConfig`'s default restated, and it is the only one of the
+/// three constants here that ever should have been: `EXEC_STACK_SIZE` is now LEAF §4.2's, and
+/// `AUX_STACK_SIZE` is gone — see [`EXEC_STACK_SIZE`] and [`instantiate_with_stack`].
 const HEAP_SIZE: u32 = 0;
-const EXEC_STACK_SIZE: u32 = 8 * 1024 * 1024;
+
+/// The engine execution stack **every** instance is created with — LEAF §4.2's per-instance
+/// reserve, measured, and not `wamrx::InstanceConfig`'s desktop default (eieio-x7g.2.24).
+///
+/// # What this number is against
+///
+/// LEAF §4.2 budgets the v1 target's 192 KiB heap floor as 2 × (64 KiB linear memory + **8 KiB
+/// engine execution stack**) + a 48 KiB shared working set, and names "the engine execution
+/// stack a golden block actually needs, against the 8 KiB assumed" as something the MCU
+/// bring-up must report back. This constant is what that reserve buys, so restating a
+/// desktop wrapper's 8 MiB here was 8 388 608 bytes — 42× the whole heap floor — per
+/// instance: `wasm_runtime_create_exec_env` does one `wasm_runtime_malloc` of
+/// `offsetof(WASMExecEnv, wasm_stack_u.bottom) + stack_size` and `memset`s all of it
+/// (`core/iwasm/common/wasm_exec_env.c`), and [`Guest`] holds it for its whole life. It is
+/// the same defect eieio-x7g.2.21 fixed one layer up in the golden blocks' 17-page shadow
+/// stack: a host default inherited into the crate whose entire purpose is the MCU budget.
+///
+/// # The measurement
+///
+/// `tests/exec_stack.rs` is the measurement, and it re-runs on every `just ci` rather than
+/// being a number quoted here once. It bisects this value over every ABI §13 scenario WAMR's
+/// interpreter reaches — all five golden blocks, the four hostile blocks and the hand-written
+/// fixtures — and prints the smallest stack each one still passes on. The worst is
+/// `03_property_failure`, `transform`'s configure-time property evaluation down its failure
+/// path, at **3 252 bytes**; no other golden block exceeds 3 000. What it measures is bytes
+/// rather than frames, and that file says why.
+///
+/// **§4.2's 8 KiB held, at 2.5× the worst block**, and this is set to §4.2's number rather
+/// than to the measured minimum: §4.2 is the document that owns the per-instance reserve, so
+/// a binding answering to a *smaller* number would be the binding quietly re-deciding the
+/// budget. The margin is the point — the golden blocks are small by construction, a field
+/// block need not be, and the number a leaf ships is a budget line and not a high-water mark.
+///
+/// For scale in the other direction: WAMR's own `DEFAULT_WASM_STACK_SIZE` (`core/config.h`)
+/// is 12–16 KiB depending on target, so §4.2's 8 KiB is already below what upstream picks for
+/// a general-purpose host, and the measurement is what makes that defensible rather than bold.
+///
+/// Public because a firmware build's heap-floor arithmetic is §4.2's table and this is one of
+/// its rows: the number a leaf reserves per instance has to be readable by the thing that adds
+/// it up, and by `tests/exec_stack.rs`, rather than restated in either.
+pub const EXEC_STACK_SIZE: u32 = 8 * 1024;
 
 /// Serializes every operation that touches WAMR's process-global runtime.
 ///
@@ -528,6 +569,30 @@ pub struct Guest {
 /// The runtime is initialized and ABI §7's natives registered on the first call, once for the
 /// process (see [`ensure_runtime`]); every later call reuses both.
 pub fn instantiate(wasm: &[u8]) -> Result<Guest, String> {
+    instantiate_with_stack(wasm, EXEC_STACK_SIZE)
+}
+
+/// [`instantiate`], with the engine execution stack given rather than taken from
+/// [`EXEC_STACK_SIZE`] — **the measurement seam, and nothing a leaf calls.**
+///
+/// LEAF §4.2's per-instance engine-stack reserve is a budget line, and a budget line nobody
+/// measures is a guess. `tests/exec_stack.rs` bisects this argument over LEAF §9's suite 1 to
+/// find the smallest stack the leaf's whole WAMR surface still passes on, which is what makes
+/// [`EXEC_STACK_SIZE`]'s margin a number rather than a hope. It exists for that test and for
+/// the MCU bring-up (eieio-x7g.2.11), which §4.2 asks to report this measurement back from
+/// real hardware; a graph takes [`instantiate`], whose stack is the spec's.
+///
+/// `stack_size` is passed to WAMR verbatim. Zero is not "no stack": WAMR substitutes
+/// `DEFAULT_WASM_STACK_SIZE` for it, which is the opposite of what a caller passing zero would
+/// mean, so this refuses it rather than silently allocating 12–16 KiB.
+pub fn instantiate_with_stack(wasm: &[u8], stack_size: u32) -> Result<Guest, String> {
+    if stack_size == 0 {
+        return Err(
+            "an execution stack of 0 bytes is WAMR's own default, not an absence — pass the \
+             size you mean"
+                .to_string(),
+        );
+    }
     ensure_runtime();
     ensure_thread_env();
     with_wamr(|| {
@@ -550,11 +615,28 @@ pub fn instantiate(wasm: &[u8]) -> Result<Guest, String> {
         }
 
         let mut err_buf2 = [0 as c_char; ERR_BUF_SIZE];
+        // `stack_size` again, and this argument is *not* the guest's aux (shadow) stack
+        // despite the name `wamrx::InstanceConfig` gives it — WAMR reads the shadow stack from
+        // the module's own `__stack_pointer` global, which SDK §5.2's link default sizes.
+        // What this is is `WASMModuleInstance::default_wasm_stack_size`, and this build reaches
+        // exactly one reader of it: `execute_post_instantiate_functions`
+        // (`core/iwasm/interpreter/wasm_runtime.c`) creates a *temporary* `exec_env` of this
+        // size to run a module's start section or its `__post_instantiate`/`__wasm_call_ctors`
+        // export, and destroys it again. Every other reader — `wasm_runtime_module_malloc`,
+        // the thread manager, `lib-pthread`, `lib-wasi-threads` — is either unused here or
+        // compiled out of LEAF §3.1's feature set, and `Engine::call` always hands
+        // `wasm_runtime_call_wasm_a` the `exec_env` created below, so WAMR never falls back to
+        // one of its own. It carried `wamrx`'s 64 KiB default until eieio-x7g.2.24 — a smaller
+        // number than the 8 MiB `create_exec_env` was being handed below, but the same mistake,
+        // and it would have left a module with a start section eight times more engine stack at
+        // instantiate time than at callback time. Passing `stack_size` makes LEAF §4.2's
+        // reserve true on both paths. Zero is refused above rather than passed here, because
+        // WAMR reads zero as `DEFAULT_WASM_STACK_SIZE`.
         // SAFETY: `module` is the handle just returned by a successful `wasm_runtime_load`.
         let module_inst = unsafe {
             sys::wasm_runtime_instantiate(
                 module,
-                AUX_STACK_SIZE,
+                stack_size,
                 HEAP_SIZE,
                 err_buf2.as_mut_ptr(),
                 err_buf2.len() as u32,
@@ -581,7 +663,7 @@ pub fn instantiate(wasm: &[u8]) -> Result<Guest, String> {
         }
 
         // SAFETY: `module_inst` is a live instance handle.
-        let exec_env = unsafe { sys::wasm_runtime_create_exec_env(module_inst, EXEC_STACK_SIZE) };
+        let exec_env = unsafe { sys::wasm_runtime_create_exec_env(module_inst, stack_size) };
         if exec_env.is_null() {
             // SAFETY: as above.
             unsafe {
