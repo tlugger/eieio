@@ -142,6 +142,14 @@ The operations are `Document`'s own (SERVICE §9): `add_block`, `remove_block`, 
 
 **Conflict detection is the daemon's, not this endpoint's** (§4, DAEMON §9.3): the browser carries the `ETag` its `GET` returned and the node refuses a stale `PUT`. This endpoint never sees a node and cannot know what is on one.
 
+
+**Reading one is the same transform, in the other direction** (eieio-m9s.37). `GET /services/{s}` answers the file's **text**, verbatim — DAEMON §9 is deliberate about that, because SERVICE §2 makes the daemon a reader and "a definition that came back reformatted would make every round trip through this API a diff". So a canvas needs the file *parsed*, and nothing in the browser parses TOML.
+
+**The parse belongs where the edit already is.** `POST /api/service-edit` takes text plus operations and returns text; its read counterpart takes text and returns the structure a canvas draws. Both are stateless, hold no service identity, and reach no node — §3.3's rule that the backend reaches a node only through the catch-all is untouched, because neither endpoint reaches one at all.
+
+This is not the Designer becoming a second reader of the service file format. It already links `eio-service` and drives `Document` for every edit, and §3.2's own reason applies unchanged: `eio-service` is this repository's one implementation of the format, and a second one — in Rust or in TypeScript — is what SERVICE §9's one-editor rule exists to prevent. **Compiling `eio-service` to wasm for the browser would honour that rule too**, since it is the same crate, and it was considered: it is rejected here for cost rather than correctness, because it adds a second wasm artifact to the bundle and a second build-pipeline step to do what one endpoint already can.
+
+**What the parsed view MUST NOT become is a second source of truth.** It is derived from the text on every request and never stored; the text remains what a `PUT` sends back, and the `[ui]` preservation rule of §4.1 applies to that text, not to any structure derived from it.
 ## 4. Service editing model
 
 - **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer. Not by the WASM route §1 uses for `expr`: `eio-service` is a `std` crate and the backend is Rust, so it is an ordinary dependency. `expr` is compiled to WASM because the *browser* needs it on every keystroke, which is a different requirement with a different answer. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.

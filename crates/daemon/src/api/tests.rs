@@ -445,6 +445,11 @@ async fn a_node_reports_what_a_service_can_be_built_against() {
     let harness = Harness::start("api-node").await;
     let node = harness.get("/node").await.json();
     assert_eq!(node["id"], "test");
+    assert!(
+        !node.as_object().expect("an object").contains_key("name"),
+        "the harness's node.toml sets no name, so `GET /node` must omit the key rather than \
+         send `name: null` (DAEMON §9.6's absent-not-null rule, eieio-p0k.10): {node}"
+    );
     assert_eq!(node["limits"]["max_batch"], 1024);
     assert_eq!(node["require_signed"], false);
     assert_eq!(
@@ -904,6 +909,42 @@ async fn an_errored_service_reports_why_structurally() {
     assert_eq!(errors["error"], "unresolvable");
     assert_eq!(errors["detail"]["instance"], "t1");
     assert_eq!(errors["detail"]["block"], "absent:9.9.9");
+}
+
+/// The other half of the shape `an_errored_service_reports_why_structurally` checks: a service
+/// that is not `errored` must omit `error` from `ServiceSummary` (`GET /services`) and
+/// `ServiceDetail` (`GET /services/{s}`) rather than sending `error: null` (DAEMON §9.6's
+/// absent-not-null rule, eieio-p0k.10). Nothing checked this before — removing
+/// `ServiceSummary`'s and `ServiceDetail`'s pre-existing `skip_serializing_if` left the whole
+/// 265-test suite green, which is the finding that motivated writing this one.
+#[tokio::test]
+async fn a_running_services_summary_and_detail_omit_error() {
+    let harness = Harness::start("api-no-error-key").await;
+    harness
+        .put_definition("/services/kitchen", &definition("kitchen"))
+        .await;
+    harness.post("/services/kitchen/start").await;
+
+    let listed = harness.get("/services").await.json();
+    let summary = listed
+        .as_array()
+        .expect("a list")
+        .iter()
+        .find(|entry| entry["name"] == "kitchen")
+        .expect("kitchen is listed");
+    assert!(
+        !summary
+            .as_object()
+            .expect("an object")
+            .contains_key("error"),
+        "a running service's summary must omit `error`, not report it as null: {summary}"
+    );
+
+    let detail = harness.get("/services/kitchen").await.json();
+    assert!(
+        !detail.as_object().expect("an object").contains_key("error"),
+        "a running service's detail must omit `error`, not report it as null: {detail}"
+    );
 }
 
 #[tokio::test]

@@ -16,6 +16,13 @@ pub struct NodeInfo {
     /// The node's opaque, stable identity (DAEMON §2.1). Nothing may parse meaning out of it.
     pub id: String,
     /// A label for people, if the operator set one. Nothing resolves by it.
+    ///
+    /// Absent, not null, when the operator has not set one (DAEMON §9.6's absent-not-null
+    /// rule): a node with no `name` in `node.toml` has not chosen "nothing" as its label, it
+    /// has simply not chosen one yet, and a client that treated a missing name as the string
+    /// `"null"` or fell back to `id` on its own would be inventing a fact §9.6 already
+    /// forbids for exactly this shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The daemon's version.
     pub version: String,
@@ -93,4 +100,54 @@ pub async fn get_node(State(shared): State<crate::api::State>) -> Json<NodeInfo>
         },
         require_signed: node.signing.require_signed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NodeBudgets, NodeInfo, NodeLimits};
+
+    fn info(name: Option<&str>) -> NodeInfo {
+        NodeInfo {
+            id: String::from("test"),
+            name: name.map(String::from),
+            version: String::from("0.0.0"),
+            abi: String::from("1.0"),
+            capabilities: vec![String::from("state")],
+            limits: NodeLimits {
+                max_payload: 1,
+                max_batch: 1,
+            },
+            budgets: NodeBudgets {
+                fuel: 1,
+                deadline_ms: 1,
+                expr_max_fuel: 1,
+            },
+            require_signed: false,
+        }
+    }
+
+    /// DAEMON §9.6's absent-not-null rule, for the field this bead (eieio-p0k.10) exists to
+    /// fix: `crates/designer/src/api/nodes.rs`'s
+    /// `an_unprobed_node_omits_capabilities_and_limits_rather_than_sending_null` is the model
+    /// — assert on the serialized JSON object's *keys*, never on a value being `null`, because
+    /// a key present with a `null` value is exactly the bug and would pass an `is_none()`-style
+    /// check on the value alone.
+    #[test]
+    fn an_unnamed_node_omits_name_rather_than_sending_null() {
+        let unnamed = info(None);
+        let json = serde_json::to_value(&unnamed).expect("NodeInfo serializes");
+        let object = json.as_object().expect("an object");
+        assert!(
+            !object.contains_key("name"),
+            "a node with no operator-chosen name must omit `name`, not report it as null: {json}"
+        );
+    }
+
+    /// The other half: a node that *does* have a name still reports it, as a string.
+    #[test]
+    fn a_named_node_reports_its_name() {
+        let named = info(Some("kitchen-pi"));
+        let json = serde_json::to_value(&named).expect("NodeInfo serializes");
+        assert_eq!(json["name"], "kitchen-pi");
+    }
 }
