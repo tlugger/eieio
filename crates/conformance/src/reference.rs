@@ -263,7 +263,7 @@ impl Engine for Guest {
     }
 
     fn register(&mut self, namespace: &str, name: &str, f: HostFn) -> Result<(), EngineError> {
-        let Some(slot) = crate::record::abi_name(namespace, name) else {
+        let Some(slot) = eio_host_core::exports::abi_name(namespace, name) else {
             return Err(EngineError::Engine(format!(
                 "{namespace} has no function named {name:?} (ABI §7)"
             )));
@@ -551,7 +551,8 @@ mod tests {
 
         for name in eio_host_core::exports::core_fn::ALL {
             assert!(
-                crate::record::abi_name(eio_host_core::exports::namespace::CORE, name).is_some(),
+                eio_host_core::exports::abi_name(eio_host_core::exports::namespace::CORE, name)
+                    .is_some(),
                 "eio:core {name} is not registrable"
             );
             assert!(
@@ -562,7 +563,7 @@ mod tests {
         for capability in Capability::ALL {
             for name in capability.functions() {
                 assert!(
-                    crate::record::abi_name(capability.namespace(), name).is_some(),
+                    eio_host_core::exports::abi_name(capability.namespace(), name).is_some(),
                     "{} {name} is not registrable",
                     capability.namespace()
                 );
@@ -573,8 +574,8 @@ mod tests {
                 );
             }
         }
-        assert!(crate::record::abi_name("eio:core", "frobnicate").is_none());
-        assert!(crate::record::abi_name("eio:nonsense", "state_get").is_none());
+        assert!(eio_host_core::exports::abi_name("eio:core", "frobnicate").is_none());
+        assert!(eio_host_core::exports::abi_name("eio:nonsense", "state_get").is_none());
     }
 
     // A module outside ABI §4.3's accepted set, refused with the proposal named, is asserted

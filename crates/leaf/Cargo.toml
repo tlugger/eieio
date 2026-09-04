@@ -47,7 +47,7 @@ required-features = ["wasm3"]
 # crosses the `no_std` boundary today, which is why an engine binding for a bare-metal target
 # is settled by LEAF §11's MCU cross-compile and not here.
 [features]
-default = ["std", "wasm3", "wamr"]
+default = ["wasm3", "wamr"]
 std = []
 wasm3 = ["std", "dep:wasm3x"]
 wamr = ["std", "dep:wamrx-sys"]

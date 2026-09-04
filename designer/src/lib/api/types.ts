@@ -657,38 +657,12 @@ export interface LogFilter {
   level?: string;
 }
 
-/** The state of a stream connection, surfaced rather than swallowed
- * (DAEMON §9.6: "reconnection... is in the protocol"; the sub-plan: "a
- * panel that silently stops updating when a node restarts is worse than
- * one that says so"). `'connecting'` is the very first attempt;
- * `'reconnecting'` is every attempt after a disconnect, so a client can
- * tell "still arriving" from "was arriving, now is not" at a glance. */
-export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
-
-export interface StreamStatusDetail {
-  /** Why the connection ended: the disconnect being reported on a
-   * `'reconnecting'`, or — set once — the failure that ended the stream for
-   * good on a `'closed'`. Absent on a `'closed'` caused by an explicit
-   * release. */
-  error?: string;
-  /** The HTTP status of a response that ended the stream permanently
-   * (`'closed'` only, and only when a *response* ended it — never on a
-   * disconnect, a transport failure, or an explicit release). A stream that
-   * is merely offline reconnects; one that was refused stops, and this is
-   * what tells the two apart. `sse.ts`'s own module doc holds the rule for
-   * which statuses are permanent and why; `client.ts` routes a `401` here to
-   * the login gate. */
-  status?: number;
-}
-
-/** What `streamTap`/`streamLogs` hand back: the one thing a caller can do
- * is stop listening. Releasing DAEMON §9.6's tap (`DELETE /taps/{id}`) is
- * a separate, explicit call — this handle only tears down the client side
- * of the stream, the same asymmetry §9.6 itself draws ("teardown is either
- * explicit or a disconnect"). */
-export interface StreamHandle {
-  close(): void;
-}
+// A stream's status, the detail beside it and the handle that stops it are
+// declared by the transport (`./sse`) and re-exported here, so the API
+// surface and the transport are one declaration rather than two structurally
+// identical ones that a new optional field can silently split.
+export type { StreamStatus, StreamStatusDetail, StreamHandle } from './sse';
+import type { StreamStatus, StreamStatusDetail } from './sse';
 
 export interface TapStreamHandlers {
   onEvent: (event: TapStreamEvent) => void;

@@ -134,10 +134,14 @@ export class IncrementalSseParser {
  * distinctly rather than collapsing both into one spinner. */
 export type StreamStatus = 'connecting' | 'open' | 'reconnecting' | 'closed';
 
-/** What accompanies a status transition. Mirrors `types.ts`'s own
- * `StreamStatusDetail` — this module is the transport and does not import
- * the API surface's types, so the two are kept structurally identical
- * rather than shared. */
+/** What accompanies a status transition.
+ *
+ * Defined here rather than in `types.ts` because this module is the
+ * transport and imports nothing from the API surface; `types.ts` re-exports
+ * it, so the API surface and the transport cannot drift apart. They were two
+ * structurally-identical declarations until the `status` field was added to
+ * both by hand — which is exactly the drift a second copy invites, since
+ * structural typing keeps a field added to only one side compiling. */
 export interface StreamStatusDetail {
   /** Why the connection ended: the disconnect being reported on a
    * `'reconnecting'`, or the failure that ended the stream for good on a
@@ -171,6 +175,11 @@ export interface ConnectSseOptions {
   headers?: Record<string, string>;
 }
 
+/** What `streamTap`/`streamLogs` hand back: the one thing a caller can do
+ * is stop listening. Releasing DAEMON §9.6's tap (`DELETE /taps/{id}`) is a
+ * separate, explicit call — this handle only tears down the client side of
+ * the stream, the same asymmetry §9.6 itself draws ("teardown is either
+ * explicit or a disconnect"). */
 export interface StreamHandle {
   close(): void;
 }

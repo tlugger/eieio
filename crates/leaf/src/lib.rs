@@ -205,7 +205,9 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// of whether a floor should exist OPEN. This function is not an answer to that question: it
 /// is one host supplying its two values, which is what ABI §9.7 says a host does.
 ///
-/// `max_payload` is 4 096 because that is EXPR §9's `MAX_VALUE_BYTES` **floor**, the size of
+/// `max_payload` is [`eio_expr::MIN_VALUE_BYTES`] because that is EXPR §9's `MAX_VALUE_BYTES`
+/// **floor** — read from the crate that defines it rather than restated, so amending the floor
+/// moves this with it. It is the size of
 /// value a conforming expression may build. A leaf below it would make a value the language
 /// guarantees can be built impossible to emit — the same shape of divergence
 /// [`leaf_budgets`] declines to buy for the decode bound. `max_batch` is 8 because LEAF §4.4
@@ -217,7 +219,7 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// the same argument LEAF §9 makes for running `expr-tests/` at `EvalLimits::FLOORS`: a limit
 /// that only holds on a generous host has not been tested.
 pub const fn leaf_limits() -> Limits {
-    Limits::new(4096, 8)
+    Limits::new(eio_expr::MIN_VALUE_BYTES, 8)
 }
 
 /// Loads, configures and starts one instance from a compiled block module.

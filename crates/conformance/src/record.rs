@@ -219,7 +219,7 @@ impl<E: Engine> Engine for Recording<E> {
         // The recorded call carries `&'static str`s so a `Call` can outlive this
         // registration. A name outside ABI §7 is passed straight through to the inner engine,
         // which is the one that gets to refuse it — the recorder does not adjudicate.
-        let Some((namespace, name)) = abi_name(namespace, name) else {
+        let Some((namespace, name)) = eio_host_core::exports::abi_name(namespace, name) else {
             return self.inner.register(namespace, name, f);
         };
         let ledger = self.ledger.clone();
@@ -240,30 +240,6 @@ impl<E: Engine> Engine for Recording<E> {
             }),
         )
     }
-}
-
-/// The `&'static str` pair for an ABI §7 function, or `None` if it is not one.
-///
-/// A lookup rather than a leak: the set is closed by the specification, so a harness that
-/// leaked a `String` per registration would grow by a little on every scenario in a suite of
-/// hundreds. Shared with the reference host, which needs the same interning to key its
-/// dispatch table — two tables of the same closed set would be one table too many.
-pub(crate) fn abi_name(namespace: &str, name: &str) -> Option<(&'static str, &'static str)> {
-    use eio_host_core::exports::{core_fn, namespace as ns};
-    use eio_manifest::Capability;
-
-    if namespace == ns::CORE {
-        return core_fn::ALL
-            .into_iter()
-            .find(|known| *known == name)
-            .map(|known| (ns::CORE, known));
-    }
-    let capability = Capability::from_namespace(namespace)?;
-    capability
-        .functions()
-        .iter()
-        .find(|known| **known == name)
-        .map(|known| (capability.namespace(), *known))
 }
 
 #[cfg(test)]

@@ -130,6 +130,31 @@ pub mod timer_fn {
 /// The custom section a self-describing module carries its manifest in (ABI §4.4).
 pub const MANIFEST_SECTION: &str = "eio:manifest";
 
+/// The `&'static str` pair for an ABI §7 import, or [`None`] if it is not one.
+///
+/// A lookup rather than a leak: the set is closed by the specification, so a binding that
+/// leaked a `String` per registration would grow by a little on every instance it created.
+/// Every engine binding needs exactly this interning to key its dispatch table off names it
+/// can hold for the process's life, which is why it lives here beside the tables it reads
+/// rather than once per binding — this module is "the export and import names of ABI §4 and
+/// §7, in one place", and five private copies of the lookup over them was four too many.
+pub fn abi_name(namespace: &str, name: &str) -> Option<(&'static str, &'static str)> {
+    use eio_manifest::Capability;
+
+    if namespace == self::namespace::CORE {
+        return core_fn::ALL
+            .into_iter()
+            .find(|known| *known == name)
+            .map(|known| (self::namespace::CORE, known));
+    }
+    let capability = Capability::from_namespace(namespace)?;
+    capability
+        .functions()
+        .iter()
+        .find(|known| **known == name)
+        .map(|known| (capability.namespace(), *known))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -147,7 +147,7 @@ impl Engine for Guest {
     }
 
     fn register(&mut self, namespace: &str, name: &str, f: HostFn) -> Result<(), EngineError> {
-        let Some(slot) = abi_name(namespace, name) else {
+        let Some(slot) = eio_host_core::exports::abi_name(namespace, name) else {
             return Err(EngineError::Engine(format!(
                 "{namespace} has no function named {name:?} (ABI §7)"
             )));
@@ -223,24 +223,6 @@ fn dispatch(
     };
     caller.data_mut().funcs.insert((ns, name), handler);
     ret
-}
-
-/// The `(namespace, name)` pair for an ABI §7 function, or `None` if it is not one.
-fn abi_name(namespace: &str, name: &str) -> Option<(&'static str, &'static str)> {
-    use eio_host_core::exports::{core_fn, namespace as ns};
-
-    if namespace == ns::CORE {
-        return core_fn::ALL
-            .into_iter()
-            .find(|known| *known == name)
-            .map(|known| (ns::CORE, known));
-    }
-    let capability = Capability::from_namespace(namespace)?;
-    capability
-        .functions()
-        .iter()
-        .find(|known| **known == name)
-        .map(|known| (capability.namespace(), *known))
 }
 
 /// One of `eio-manifest`'s published parameter/result types, as wasm3 spells it.

@@ -31,7 +31,7 @@
 //! place of the `Vec` `Scheduled` holds, since a leaf's own memory is not something to allocate
 //! against at runtime. The scheduling algorithm itself (the sorted-by-due-time scan, the
 //! re-arm-relative-to-now policy) is small enough that a real leaf could keep this one.
-
+//!
 //! # This module crosses the `no_std` boundary whole
 //!
 //! Nothing here touches a platform: the algorithm, the handle and [`pump`] are generic over
