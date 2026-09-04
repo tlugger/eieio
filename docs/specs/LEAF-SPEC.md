@@ -42,7 +42,7 @@ What the leaf adds on top, and what it MUST NOT:
 - **Adds:** an engine binding (§3), a `StateStore` against flash (§5), a `Timers` implementation against a hardware timer, a transport client (§8), and a generated `main` that constructs the baked graph (§6).
 - **MUST NOT add:** a second lifecycle driver, a second property-resolution rule, a second router, a second expression interpreter, a second CBOR encoder, or **a second implementation of `eio:core`'s host functions** (DAEMON §1.1 — a leaf supplies a clock and an entropy source and shares the rest). Every one of those exists in a ★ crate precisely so that two hosts cannot disagree, and reimplementing one for size or speed is the divergence ABI §13 calls a conformance bug by definition.
 
-**No allocator is not an option.** The ★ crates permit `alloc`, and ABI §6.3's batches are dynamically sized. A leaf therefore ships a global allocator over a fixed heap. Which allocator, and the heap's size, are per-target build configuration.
+**No allocator is not an option.** The ★ crates permit `alloc`, and ABI §6.3's batches are dynamically sized. A leaf therefore ships a global allocator over a fixed heap. **§4.2 says which allocator and how the heap is sized**; it is `embedded-alloc`'s TLSF heap, shared with the engine rather than beside it, given the linker's remainder against a per-target floor.
 
 ### 2.1 The `no_std` boundary through `crates/leaf`
 
@@ -98,6 +98,102 @@ So a leaf's budget is a **watchdog**, not fuel: a hardware timer armed before en
 A CBOR decoder needs a nesting bound or a hostile batch is a stack overflow, and a stack overflow on an MCU is not a caught error. **That bound MUST be at least the configured `MAX_DEPTH`.** Setting it lower makes a value the expression language is required to handle undecodable, which turns an EXPR §9 budget into a decode failure with a different error code, on one host only — the shape of divergence ABI §13 exists to prevent.
 
 **The MUST is a floor, and a leaf should not sit on it** (eieio-x7g.7). A leaf's *evaluation* budgets belong at EXPR §9's floors, but its decode bound is not the same kind of number: it decides which values a leaf can receive at all, so lowering it toward `MAX_DEPTH` makes a batch that a daemon routes without complaint undecodable on a leaf — divergence again, in the other direction, bought for stack headroom. **A leaf therefore matches the daemon's decode bound rather than its own floors**, and both pass `eio-signal`'s `MAX_DEPTH` today. That may be the wrong trade on a real target, where 128 levels of recursive decode is exactly the overflow this section exists to bound; but it is a decision about interoperability as well as safety, and it needs a measured stack, so it is §11's memory-budget item and not a knob to turn early.
+
+**Now measured, and the bound stays at 128** (eieio-x7g.2.7). The stack this paragraph was waiting for was read off the v1 target's own object code rather than estimated. `eio-signal` built for `riscv32imc-unknown-none-elf` at the workspace release profile gives `Value::decode_at` — the directly self-recursive function, one frame per level of nesting — a **160-byte** frame (`addi sp, sp, -0xa0`), with `Batch::decode_from` at 208 bytes and `Signal::decode_from` at 80 bytes once each above it. The price of the bound is therefore linear and known:
+
+|Decode bound|Worst-case decode stack|Of the v1 target's 313 KiB of SRAM (§4.2)|
+|---|---|---|
+|`MIN_DEPTH`, 32|≈ 5 KiB|1.6 %|
+|`MAX_DEPTH`, 128|≈ 20 KiB|6.5 %|
+
+**Host parity costs 15 KiB of stack, and 15 KiB is worth paying.** EXPR §9 names "the 16 KiB-of-stack tier" as the one that dies first, and the honest reading of the measurement is that the v1 target is *not* that tier: a part with 313 KiB of SRAM can afford a 32 KiB stack outright, and buying interoperability with 5 % of RAM is a better trade than buying 5 % of RAM with a value a daemon routes and a leaf cannot read.
+
+So the bound is a **constant, not a per-target one**: `eio_signal::MAX_DEPTH`, the same number the daemon passes, on every leaf target. What varies per target is the *stack reserved for it*. That is the point of the resolution — it moves the variation to the side of the trade where it costs a linker number instead of an interoperability guarantee, and it keeps `leaf_budgets()` free of a target `cfg`.
+
+**The stack rule, stated as the MUST that makes the bound safe:** a leaf MUST reserve at least **`decode_bound × 192` bytes** of native stack for the context that runs the graph. 192 is the measured 160 plus the `Batch`/`Signal`/minicbor frames above it and margin for the engine's own host-call frames beneath. At 128 that is 24 KiB, which §4.2 rounds up to a 32 KiB reserve.
+
+**Evaluation is not the term that sizes the stack, and that was measured too.** On the same target `Evaluator::eval`, `eval_operand` and `apply` are 112, 144 and 80 bytes, and one level of evaluation is a chain through all three — but a leaf's `EvalLimits::FLOORS` bounds that recursion at 32, so evaluation costs ≈ 10.5 KiB. `Parser::parse_expr` is 224 bytes, bounded at 32 by `ParseLimits::FLOORS`, so parsing costs ≈ 7 KiB, and it happens once at configure time (ABI §7.1) rather than per signal. Neither nests inside a decode. Decode at 128 is the deepest walk in the system and it is what the reserve is sized against.
+
+**What §11's bring-up must report back, and what would reopen this.** The 160-byte frame is a *static* measurement of one crate compiled alone: link-time optimisation may inline `decode_at`'s callees into it and grow the frame, and the recursive `Drop` of a 128-deep `Value` — the walk EXPR §9 names explicitly, and the only one with no budget check in it, because dropping cannot fail — has not been measured at all. eieio-x7g.2.11 paints the stack at boot and reports the high-water mark after decoding the deepest vector in `expr-tests/cbor/`. **If the measured high-water mark exceeds half the reserve, grow the reserve**; this section reopens only if the grown reserve will not fit, and reopening means an explicitly per-target bound with the interoperability cost stated in the same breath — never a quiet 32.
+
+### 4.2 The memory budget
+
+`no_std`, one heap, and a size the linker computes against a floor this section fixes.
+
+**The v1 target's real number is 313 KiB, not 400 KiB.** The ESP32-C3 datasheet gives 400 KB of on-chip SRAM, of which 16 KB is configured as cache, and 384 KB of ROM that is not usable memory at all. What a bare-metal image actually gets is smaller again: `esp-hal`'s ESP32-C3 linker script gives `DRAM` `ORIGIN = 0x3FC80000, LENGTH = 313K`, with a further ~66 KiB in `dram2_seg` that is only free once the second-stage bootloader has finished. **313 KiB is the number this section budgets against**, because it is the one that holds for the whole life of the image. The instruction window over the same SRAM (`IRAM`) is an alias, so anything a leaf places in RAM to execute comes out of the same 313 KiB; a leaf executes from flash through the cache and places nothing there by choice.
+
+**The allocator is `embedded-alloc`'s TLSF heap.** Three properties decide it, and only the third is about this platform:
+
+- **O(1) worst-case allocation and free.** §4.4's watchdog bounds a callback in wall-clock time, and a first-fit free list has an unbounded search on a fragmented heap — the variance is what breaks a deadline, not the mean. An allocator whose worst case is a constant is the one that makes a wall-clock budget arguable.
+- **Bounded fragmentation**, which is a published property of TLSF rather than a hope. A leaf runs for months without a reboot and the ★ crates allocate a `Batch` per signal, so the steady-state allocation pattern is exactly the churn that defeats a naive free list.
+- **It reports its free and used bytes**, which §4.3's reservation rule requires. An allocator that cannot answer "how much is left" makes the difference between a refusal and a reset unimplementable.
+
+**Not `esp-alloc`, and the reason is not a criticism of it.** §6.2 buys a vendor for the *peripherals* — a flash driver, a timer, a network stack — because those are the target. Nothing about a heap is. Keeping the allocator vendor-neutral means the same allocator can be run on the host under the same workload, which is how the numbers below get checked without a board. `critical-section` is a dependency either way and arrives with the target.
+
+**There is exactly one heap, and the engine allocates from it.** WAMR is configured with the global allocator rather than its own pool. Two pools means two ways to run out and a fixed split that is wrong for every graph, and the split would have to be chosen by a build that cannot know which of the two a given service leans on.
+
+**The heap is the linker's remainder, checked against a floor.** A leaf does not carve a `static mut HEAP: [u8; N]`: it gives the allocator everything between the end of `.bss` and the top of `DRAM`, and the build **fails** if that remainder is below the floor. Sizing it as a constant would mean choosing between wasting RAM on a small graph and failing to link a large one; sizing it as the remainder means the graph that does not fit is refused at build time, which is §10's posture already ("validation happens before the build, not during it").
+
+**The floor for the v1 target is 192 KiB**, and it is derived rather than picked:
+
+|Reserve|Size|Why|
+|---|---|---|
+|Guest linear memory|2 × 64 KiB|One WASM page is 64 KiB and a module cannot declare less. This is the dominant per-instance cost and there is no lever on it below one page.|
+|Engine execution stack|2 × 8 KiB|The stack WAMR is instantiated with, per instance. 8 KiB is the engine's own configuration and the figure §11's binding confirms.|
+|Signal working set|48 KiB|One decoded batch in flight, the bounded emission queue, and one mailbox slot per connection (DAEMON §6.2). **Shared, not per-instance**: a leaf runs one callback at a time, so only the running instance's batch is live.|
+|**Total**|**192 KiB**||
+
+Outside the heap and additional to it: §4.1's **32 KiB native stack reserve**, and whatever `.data`/`.bss` the image and WAMR's runtime globals need, which is measured from the linked image rather than chosen. 192 + 32 = 224 KiB of 313 KiB, leaving ≈ 89 KiB for statics and the loaded modules.
+
+**So a v1 leaf image sizes for two block instances, and that is the headline rather than a footnote.** Three fit only if the linked image leaves the heap more than the floor, which the build can compute and this document cannot. The lever, if two is not enough, is the 64 KiB page — not the working set.
+
+**The measurement that should worry an implementer most: every golden block declares 17 pages.** Built as `examples/blocks/` builds today, all five of ABI §13.2's golden blocks declare a minimum linear memory of **17 pages, 1088 KiB** — three and a half times the whole chip. The cause is not the blocks: `wasm-ld` defaults the shadow stack to 1 MiB, and `RUSTFLAGS="-C link-arg=-zstack-size=16384"` brings all five to **1 page, 64 KiB** with no source change and no measurable size difference. Two consequences:
+
+- **A leaf MUST refuse, at firmware build time, a module whose declared minimum linear memory exceeds its per-instance page budget** — one page for v1. This is the same class of check as ABI §4.3's load-time cross-check and belongs in the same place, where a refusal costs a build rather than a field failure.
+- **Making the golden blocks pass that check is a change to how `cargo eio build` links, not to any block.** SDK §5.2 owns the default; it is filed rather than made here, because a link flag that changes every published module is a decision that belongs to the SDK's spec and not to a memory budget.
+
+**`max_payload` is 4096 and `max_batch` is 8** for the v1 target. ABI §9.7 makes both host configuration with no floor and SCOPE §3 keeps the *question of a floor* OPEN; supplying values is what §4 already said a leaf does, and this is that.
+
+- **4096 is EXPR §9's `MAX_VALUE_BYTES` floor**, and choosing it there is the whole argument: a conforming expression may build a value whose canonical encoding is 4 096 bytes, and a leaf whose `max_payload` were smaller would make a value the language guarantees can be *built* impossible to *emit* — the §4.1 shape of divergence, in a third place. Framing means a batch of exactly one maximal value does not fit, which is the honest cost of not sizing above the floor.
+- **8 delivered signals** is a delivery bound only (ABI §9.7 rule 8): a leaf block may still emit a larger batch and the leaf routes it. It is deliberately small because §4.4's deadline is derived from it — `max_batch` is the one number that appears in both budgets, and a leaf that raises it pays in wall-clock time as well as in RAM.
+
+**What §11's bring-up must report back:** the linked image's `.data`/`.bss` and WAMR's runtime globals, which decide whether 89 KiB of headroom is real; the engine execution stack a golden block actually needs, against the 8 KiB assumed; and the expansion factor §4.3 defines, which is measured there on a 64-bit host and is the least certain number in either section.
+
+### 4.3 When a batch will not fit
+
+**`max_payload` does not bound host memory, and that measurement is the centre of this section.** A batch's decoded footprint is not a bounded multiple of its CBOR length, because canonical CBOR is dense for small scalars and `BTreeMap<String, Value>` is not. Measured with a counting allocator over `eio_signal::Batch::from_cbor`:
+
+|Batch shape|CBOR|Decoded|Expansion|
+|---|---|---|---|
+|One 4 000-byte string value|4 007 B|4 761 B|**1.19×**|
+|1 636 three-character keys with small integer values|8 184 B|180 588 B|**22.1×**|
+
+Both are legal, canonical batches. So a host that has checked `len` against `max_payload` has learned nothing about how much memory decoding will take, and a leaf that decodes on the strength of that check alone is one hostile batch away from `handle_alloc_error` — which on `no_std` is a panic, and on a leaf a panic is a reset (§4.6). ABI §9.5 already says what should happen instead: a host that cannot allocate for a delivery **MUST NOT** kill the instance, the delivery fails and is counted. This section makes that implementable.
+
+**The rule: a leaf reserves before it decodes.** Before decoding any batch — inbound from the router or outbound from `emit` — a leaf computes `len × expansion_factor` and refuses if the allocator's free bytes will not cover it. The check is arithmetic on a length the host already holds against a number the allocator already knows, so it costs nothing and, decisively, it happens **before** the allocation it is protecting against. That is ABI §6.2's own principle — refuse on a length you have not read — applied one layer in.
+
+`expansion_factor` is a per-target build constant. **v1 builds with 16**, from the 22.1× measured above scaled down for the target's 32-bit pointers (`Value` is 32 bytes on the host and the shrink is in its pointer-sized halves). It is the least certain number in §4, it is deliberately a build constant rather than a literal so that eieio-x7g.2.11 can correct it from a real measurement, and it is a *reservation*, not a limit: a batch that reserves 16× and uses 1.19× returns the difference immediately.
+
+**What a leaf does, in ABI §8's vocabulary and no other.** Nothing here is new; the value of the table is that it is complete.
+
+|What will not fit|What the leaf does|Whose vocabulary|
+|---|---|---|
+|An inbound batch longer than `max_payload`, or carrying more than `max_batch` signals|Refused **at the router, before the guest is called**. The batch is dropped and counted. No status code reaches anyone: the emitter already got `0`.|ABI §9.7 ("never delivers batches beyond it"), §13.1's table ("refused, guest never called")|
+|An inbound batch whose reservation the heap cannot meet|The same: dropped at the router, counted, guest not called.|ABI §9.5's rule, moved one step earlier so no allocation is attempted|
+|An inbound batch that will not decode — deeper than §4.1's bound, or not canonical|The same: dropped at the router, counted.|ABI §6.3.1|
+|`eio_alloc` returning 0 for an inbound payload, because the *guest* is out of memory|Delivery fails, reported `ERR_LIMIT`, counted as a block-level error. The instance lives.|ABI §9.5, verbatim — "a guest that is briefly out of memory has told the truth about itself"|
+|`emit` with `len` beyond `max_payload`|`ERR_LIMIT` to the emitter, payload never read.|ABI §6.2, row 3|
+|`emit` whose reservation the heap cannot meet, or which would exceed the callback's emission budget|`ERR_LIMIT` to the emitter.|ABI §6.2's "queue full … is a status code to the emitter, policy is host-defined"; the policy is here|
+|`emit` of bytes that are not a canonical batch, or on an undeclared port|`ERR_INVALID_ARG`.|ABI §6.2, rows 1–2|
+|A guest pointer that is misaligned, zero-but-nonzero-length, or outside linear memory|The instance is discarded. Not a memory-pressure case at all: the guest has said something untrue about itself.|ABI §9.6|
+
+**So: refuse outbound, drop inbound, never truncate, and never die.** Truncation is the one of the four that is rejected on principle rather than on arithmetic. A Signal is a *batch* (SCOPE §5.1), and half a batch is a value nobody wrote: a block that emitted eight readings and had five delivered has been told a lie about its own output, in a platform whose entire conformance argument is that two hosts do the same thing. Dying is rejected because ABI §8 reserves death for traps, fuel and deadlines, and running out of room to hold a signal is none of the three.
+
+**The emission budget, because `emit` enqueues.** ABI §6.2 routes after the callback returns, so every batch a callback emits is held — `host-core` holds it *decoded*, as `Emission { port, batch }` — until the callback is over. On a daemon that queue is a `Vec` and grows; on a leaf an unbounded `Vec` inside one callback is the leak this section exists to close. **A leaf bounds the bytes it accepts from `emit` within one callback at `max_payload`**, 4 096 for v1: one payload's worth out for one payload's worth in. Past it, `emit` answers `ERR_LIMIT`, which is a status code and therefore life (ABI §8) — the block sees the refusal, and ABI §10's own advice for a block with more to say is already "long work is chunked via timers".
+
+**Reaching `handle_alloc_error` is a leaf defect, not a policy.** The reservation is what makes it unreachable; if it is reached, the `#[panic_handler]` resets the node, and §4.6 says what that costs and why it is nonetheless the honest last resort. It is not a design answer to "the batch did not fit" — that answer is the table above.
+
+**What is not decided here.** What a leaf does with an instance that has been *killed* — restart it, leave it dead, tear down the graph — is SCOPE §3's block-failure-policy **OPEN** item, and this section neither answers it nor needs to: every row above leaves the instance running.
 
 ## 5. State on flash
 
@@ -250,7 +346,7 @@ Needed before implementation, and deliberately not guessed at in this draft:
 - ~~**The target list.**~~ — **resolved** (eieio-x7g.2.2): §6.2 names it. v1 is one target, `riscv32imc-unknown-none-elf` (ESP32-C3 class); `thumbv7em-none-eabihf` stays a `check-nostd` gate target and is not a leaf target; `riscv32imac-unknown-none-elf` (ESP32-C6/H2) is the named next candidate; Xtensa is deferred for the esp-rs toolchain fork, measured rather than assumed. §6.2.1 fixes how an `aot` entry is spelled and §6.2.2 what adding a target costs.
 - **Firmware build pipeline mechanics** — toolchain pinning, AOT artifact caching, reproducibility, and how `cargo eio aot` is invoked from a Designer deploy.
 - **The generated `main`**: what the baked graph looks like as Rust, and whether it is generated source or a const table.
-- **Memory budget**: heap sizing per target, and what a leaf does when a batch will not fit.
+- ~~**Memory budget**: heap sizing per target, and what a leaf does when a batch will not fit.~~ — **resolved** (eieio-x7g.2.7): §4.2 sizes it and §4.3 answers it. The allocator is `embedded-alloc`'s TLSF heap, one heap shared with the engine; the heap is the linker's remainder against a **192 KiB floor** derived for the v1 target's real 313 KiB of SRAM, which sizes an image for two block instances. `max_payload` is 4 096 (EXPR §9's `MAX_VALUE_BYTES` floor) and `max_batch` is 8. §4.1's decode bound is **resolved as the daemon's constant, defended against a measured stack**: `Value::decode_at` is a 160-byte frame on `riscv32imc-unknown-none-elf`, so host parity costs 15 KiB more stack than the floor would, against a 32 KiB reserve. Two measurements do the work and both are recorded in place: a batch's decoded footprint expands by between 1.19× and **22.1×**, so `max_payload` does not bound host memory and a leaf reserves before it decodes; and every golden block declares **17 pages** of linear memory today, three and a half times the whole chip, which a link flag fixes and which a leaf refuses at firmware build time until it is fixed.
 - **The transport client** (§8), once one has been measured.
 - **Watchdog mechanics** (§4): which timer, what granularity, and how a killed instance is reported when there is no log stream to report it on. **A host bring-up cannot stand in for this one**, measured rather than assumed: `wasm3x` 0.1.0 exposes no interruption, abort or termination entry point at all, so nothing outside a running guest call can end it, and the host leaf therefore answers `enforces_budgets = false` and has ABI §13's budget scenario skipped by name — which is §4's honest-binding rule working as intended, not a gap in the leaf. The watchdog becomes implementable at the same moment the target does: a hardware timer and an engine that can be told to stop.
 - **Observability without an API** (§7): what a leaf publishes about itself, and on which topic.
