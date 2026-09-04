@@ -65,6 +65,14 @@ These follow from SCOPE §3.2–3.5 and are restated here because every rule bel
 |`eio_stop`|`() -> i32`|Transition to stopped|
 |`eio_process_signals`|`(input_port: i32, ptr: i32, len: i32) -> i32`|Deliver a batch on an input port|
 
+**The `memory` export carries a declared minimum, and a host MAY refuse it.** The module's memory declaration fixes the pages an instantiation has to be able to supply before any guest code runs; one WASM page is 64 KiB and a module cannot declare less than one. A host MAY bound that minimum with a **per-instance page ceiling**, which is host configuration and not an ABI constant, and a host whose ceiling a module's declared minimum exceeds **MUST refuse the module at load time**, in the same place and the same sense as §4.3's cross-check. A host that bounds nothing here refuses nothing here, and both answers are conforming — the daemon gives the first (DAEMON §4), a leaf the second at one page (LEAF §4.2). Three things are fixed about the refusal:
+
+- **It is an instantiation refusal and never a trap.** The instance is never created (§5.1 step 1), so there is nothing to kill and nothing for §8's death kinds to classify. A host that admitted the module and killed it afterwards would be reporting a property of the *module* as a fault of the instance.
+- **A host MUST NOT instead grant less than the module declared.** An instance given a smaller memory than it asked for is not a smaller instance, it is a different one: it fails at whatever allocation first crosses a line the guest was never told about, at whatever moment the traffic happens to reach it. Refusing is the only answer that fails where a deployer can see it.
+- **It bounds admission, not growth.** `memory.grow` is core WASM and a module MAY grow past its declared minimum; what bounds that is the module's declared *maximum* and the engine enforcing it. A host that must bound an instance's whole footprint bounds it there, not here.
+
+What a *block* may assume about any host's ceiling is §9.7 rule 10: nothing.
+
 ### 4.2 Optional exports (callbacks)
 
 Present only if the block uses the corresponding capability. The host MUST verify that a module importing `eio:timer` exports `eio_on_timer`, etc., at load time.
@@ -413,6 +421,12 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
     - **A block MUST NOT assume the bound is absent.** A callback that emits 10 KiB succeeds where nothing bounds it and is refused on a leaf publishing 4 096 (LEAF §4.3). The block sees `ERR_LIMIT`, which is exactly the answer §10 already tells it what to do about: long work is chunked via timers.
 
     Pinned by `33_emission_budget`, on every host the suite runs.
+10. **Declared minimum linear memory** (§4.1) is the fourth host-configured number here and the only one a block cannot read. A host's per-instance page ceiling is **not** an instance-descriptor key and MUST NOT be published as one: the three above are numbers a live instance reacts to, and this one is answered before the instance exists — a module past the ceiling never runs, so there is no descriptor to carry it and no `ERR_LIMIT` for anyone to see. A block **MAY** declare more than one page and **MUST** assume nothing about any host's ceiling. Three things follow for a block author:
+    - **The refusal is a deploy-time fact and never a runtime one.** It reaches whoever loads or bakes the block — a load-time rejection on a node, a failed firmware build on a leaf (LEAF §4.2) — which is the whole reason §4.1 puts it at admission rather than leaving it to an allocation failure at 2 a.m.
+    - **The number is usually the linker's, not the block's.** All five of §13.2's golden blocks declared 17 pages before SDK §5.2 fixed the shadow-stack default, and not one of them needed more than one. A block refused for its memory is worth re-linking before it is worth rewriting.
+    - **Two hosts answering differently is licensed here rather than tolerated.** §13's "divergence between the two hosts is a conformance bug" binds them to the same *rule*, and the rule is that the ceiling is configuration — as it already is for the three limits above. A block that must run on both tiers stays inside the smallest ceiling it targets, and has no way to discover at runtime what that was.
+
+    Pinned by `34_memory_ceiling`, whose refusal is the loader's on every host (§13.1).
 
 ---
 
@@ -421,6 +435,13 @@ Callback returns (guest→host): `0` = OK; non-zero = block-level error. The hos
 - Every callback runs under a host-enforced budget: fuel (wasmtime), epoch interruption, or watchdog (WAMR/wasm3). Exhaustion is a trap (→ DEAD).
 - The contract stated plainly: **callbacks MUST return promptly. Blocking is a defect. Long work is chunked via timers.**
 - Budgets are host configuration, not ABI constants; leaf hosts will be tighter. The conformance suite (§13) includes a hostile-block test that spins.
+
+**What a budget mechanism owes, whatever it is.** Fuel, epoch interruption and a hardware watchdog have nothing in common but the job below, and these two obligations are that job. They are requirements on the *host*, identical on every host, and they are stated here rather than in each host's own document because a host that derives them again in its own words has written a second copy of them to drift from.
+
+1. **A terminated call MUST return to the host as a trap, not as a status code.** §8 is explicit in both directions: a budget death kills the instance, and a non-zero callback return does not. A mechanism that unwound a terminated call as an ordinary return would turn a death into life, and the host would have nothing left to tell a killed callback apart from a block reporting an error with a status.
+2. **The gap between the decision to terminate and the return MUST be bounded**, and a mechanism that cannot bound it does not enforce a deadline, it requests one. Where the bound comes from is the mechanism's own: an interpreter bounds it by checking for the request at least once per loop back-edge and once per call, and a host driving the engine's clock from outside bounds it by that clock's resolution (DAEMON §5.1's epoch tick, LEAF §4.4's watchdog stage). Without a bound the host's next move is whatever it does about a call that never came back — on a leaf that is a node reset (LEAF §4.6), which is the divergence this obligation keeps off the normal path.
+
+**A host whose binding cannot meet both does not have a budget, and MUST say so rather than report one.** §13.1 gives the harness a skip class for exactly that: the scenarios expecting a budget death are skipped by name, because the only other thing an unbudgeted host can do with a block that never returns is hang.
 
 ---
 
@@ -549,6 +570,7 @@ One consequence follows from EXPR rather than from anything here: the expression
 - Host policy: reject `major` mismatch; accept `minor` ≤ host's minor (pure-additive guarantee).
 - Additive changes (new host namespaces/functions, new optional exports, new error codes): minor bump. Old blocks never import the new functions, so nothing breaks.
 - An **optional instance-descriptor key whose absence is meaningful** (§5.2's `max_emission_bytes`) is not even that: a host that omits it is saying the thing a host without the key would have meant, and a block that never looks for it reads the same document it always did. So it is additive without a bump, and this document is still **1.0**. A key whose absence had *no* meaning would be a different matter — a block could not tell "not bounded" from "not told" — and would need one.
+- **A host limit written down that hosts already had** is likewise not a change to this document's number. §4.1's page ceiling is the case: a host has always been free to fail an instantiation it could not allocate memory for, and what §4.1 adds is *when* it must say so and what it must not do instead. No export moves, no import appears, and no conforming block becomes non-conforming — a block refused by a ceiling was already a block that host could not run, and the difference is that it is now refused at load rather than discovered later. Still **1.0**.
 - Changes to memory rules, lifecycle, calling conventions, sentinels, or the status convention: major bump.
 - The manifest's `abi` field MUST match the module's exported version; hosts MAY reject on mismatch (the module is authoritative).
 
@@ -568,6 +590,8 @@ Both the daemon and the leaf runtime MUST pass the harness against the golden bl
 The harness drives a **host**; the wasmtime reference implementation is one host and not the subject. A conformant host MUST therefore be drivable by it, which costs exactly two things: a way to instantiate a module, and a way to call its exports and read and write its linear memory. Anything more the harness needed of a host would be a requirement this specification does not make.
 
 A host also states which capability namespaces (§7.2–§7.6) it implements, and the harness asks *before* instantiating. Only `eio:core` is promised unconditionally (§7.0); every other namespace is a question about the device, settled at deploy validation (SCOPE §3.3). A scenario needing one the host does not implement is reported **skipped, with the namespace named** — never passed over, because a suite that counted an unreachable scenario as a pass would claim coverage the platform does not have. Asking beforehand is also what keeps the report legible: a module importing an unimplemented namespace fails to *link*, and a link failure reads as "this module is broken".
+
+A host also states **whether it enforces §10's budget**, and one that does not has the scenarios expecting a budget death reported **skipped, with the death named**. §10 requires a budget of every host, but a budget is built on an engine's ability to stop a call that is already running, and an engine binding may have no such entry point — §10's two obligations name what one costs. This skip is the same kind as the capability skip above it and the unrefused-proposal skip below: not an excuse and not a pass, a divergence made visible, and §13's rule applies to it in full. It exists because the alternative for an unbudgeted host is not a red suite but a hung one — a block that never returns never returns — and a suite that hangs reports nothing at all. LEAF §4.5 is a binding that answers so today, and says what it is missing.
 
 The reference binding is written **independently of any production host's**, deliberately. A harness sharing the daemon's engine binding could only ever report that the binding agrees with itself, and "both hosts MUST pass" would be a statement about one implementation.
 
@@ -589,6 +613,14 @@ A scenario may instead assert that the module is **never loaded at all**. It the
 ```
 
 `proposal` is the feature §4.3 refuses, and is what the report and any skip say. `names` is optional: when present, the rejection MUST contain it, matched case-insensitively as a substring so an engine stays free to rephrase the sentence around it. It is omitted for a proposal no engine names — **extended const** today — because a vector asserting a name nothing produces would fail every conformant host, and the scenario's `note` is where that is recorded.
+
+**A refusal is not always about what a module contains.** Where it is about how much memory the module declares (§4.1), `refuses` carries `memory_pages` — the per-instance page ceiling the scenario configures the host's loader with — in place of `proposal`, and exactly one of the two is present:
+
+```json
+{ "refuses": { "memory_pages": 1, "names": "2 page(s)", "layer": "loader" } }
+```
+
+Such a scenario is always a `loader` refusal and therefore always names its numbers, because no engine has an opinion about a ceiling that is host configuration: the check is the loader's, the same code on every host, and no host has a gap to declare. It is also the only place a scenario configures a host limit that no descriptor publishes, which is §9.7 rule 10 and not an inconsistency — a ceiling a block could read would be a ceiling a module had already got past.
 
 `layer` is which of §4.3's two mandatory layers must do the refusing: `engine` (the default) or `loader`. It is stated rather than inferred from whichever layer answered first, because "either one refused it" is the assertion a creeping second definition of the accepted set would satisfy — a loader that began refusing SIMD would pass the SIMD scenario while §4.3 still said the engine owns that proposal, and nothing would say otherwise. A `loader` scenario therefore also asserts what an `engine` scenario asserts of its fixture: that the *other* layer had no opinion.
 

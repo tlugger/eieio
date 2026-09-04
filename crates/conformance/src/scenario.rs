@@ -81,7 +81,8 @@ pub struct Scenario {
     /// What must hold once every step has run.
     #[serde(default)]
     pub expect: RunExpect,
-    /// This module must be refused at load, for the proposal named (ABI §4.3, §13.1).
+    /// This module must be refused at load, for the reason named — a proposal outside §4.3's
+    /// accepted set, or a declared linear memory above §4.1's ceiling (ABI §13.1).
     ///
     /// A scenario carrying this has no steps and no [`limits`](Scenario::limits): it asserts
     /// that the lifecycle never begins.
@@ -153,12 +154,29 @@ impl fmt::Display for Proposal {
     }
 }
 
-/// A load-time refusal a scenario asserts (ABI §4.3, §13.1).
+/// A load-time refusal a scenario asserts (ABI §4.1, §4.3, §13.1).
+///
+/// Exactly one of [`proposal`](RefusalSpec::proposal) and
+/// [`memory_pages`](RefusalSpec::memory_pages) is present: a refusal is about what the
+/// module contains or about how much memory it declares, and a scenario asserting neither
+/// or both is asserting nothing legible. [`cause`](RefusalSpec::cause) is where that is
+/// settled, rather than in a `Deserialize` impl, so the complaint reaches the report the
+/// way every other malformed scenario's does.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefusalSpec {
     /// The proposal §4.3 refuses, as the report and any skip name it.
-    pub proposal: Proposal,
+    #[serde(default)]
+    pub proposal: Option<Proposal>,
+    /// The per-instance page ceiling the scenario configures the host's loader with, for a
+    /// refusal that is about the module's declared minimum linear memory (§4.1).
+    ///
+    /// The one host limit a scenario supplies that no instance descriptor publishes, and
+    /// §9.7 rule 10 is why: the module never instantiates, so a block could not read it
+    /// even in principle. Always a [`RefusalLayer::Loader`] refusal — the ceiling is host
+    /// configuration and no engine has an opinion about it.
+    #[serde(default)]
+    pub memory_pages: Option<u64>,
     /// What the rejection must contain, matched case-insensitively as a substring.
     ///
     /// Optional because no engine names every proposal — wasmtime does not name extended
@@ -201,6 +219,55 @@ pub enum RefusalLayer {
     /// rather than refuses. A loader refusal is the same on every host, so it is never
     /// skipped, and it MUST name the proposal — the message is the loader's own to write.
     Loader,
+}
+
+/// What ABI §4 refuses a module for — exactly one thing per scenario (§13.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    /// A proposal outside §4.3's accepted set.
+    Proposal(Proposal),
+    /// A declared minimum linear memory above the ceiling the host admits under (§4.1).
+    Memory {
+        /// The ceiling, in 64 KiB pages.
+        max_pages: u64,
+    },
+}
+
+impl fmt::Display for Cause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Cause::Proposal(proposal) => proposal.fmt(f),
+            Cause::Memory { max_pages } => {
+                write!(
+                    f,
+                    "a declared minimum linear memory above {max_pages} page(s)"
+                )
+            }
+        }
+    }
+}
+
+impl RefusalSpec {
+    /// What this scenario says the module is refused for, or why the pair of fields does
+    /// not say anything.
+    ///
+    /// Checked here rather than by `serde`, because a scenario that asserts nothing legible
+    /// has to reach the report as a failure like any other malformed one — a suite that
+    /// refused to *load* it would take the whole file down with it.
+    pub fn cause(&self) -> Result<Cause, &'static str> {
+        match (self.proposal, self.memory_pages) {
+            (Some(proposal), None) => Ok(Cause::Proposal(proposal)),
+            (None, Some(max_pages)) => Ok(Cause::Memory { max_pages }),
+            (Some(_), Some(_)) => Err(
+                "a refusal is about the module's contents or about its declared memory, not \
+                 both: `proposal` and `memory_pages` cannot both be set (ABI §13.1)",
+            ),
+            (None, None) => Err(
+                "a refusal names what ABI §4 refuses the module for: one of `proposal` or \
+                 `memory_pages` (§13.1)",
+            ),
+        }
+    }
 }
 
 /// The limits a scenario publishes to the instance (ABI §5.2, §9.7).

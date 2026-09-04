@@ -61,7 +61,7 @@ pub use reference::{Guest, Reference};
 pub use report::{Outcome, Report, Summary, Violation};
 pub use run::{Loaded, hex, run, unhex};
 pub use scenario::{
-    Action, BudgetSpec, ClockSpec, Code, DeathKind, EmissionExpect, ErrorExpect, Expect,
+    Action, BudgetSpec, Cause, ClockSpec, Code, DeathKind, EmissionExpect, ErrorExpect, Expect,
     LimitsSpec, LogExpect, PropFailureExpect, Proposal, RefusalKind, RefusalLayer, RefusalSpec,
     RunExpect, Scenario, Scripted, Step,
 };

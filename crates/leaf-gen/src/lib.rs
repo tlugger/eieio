@@ -16,7 +16,7 @@
 //!
 //! | What is needed | Who computes it | Who calls it here |
 //! |---|---|---|
-//! | the manifest, cross-checked against the module (ABI §4.3, §11) | `eio_manifest::validate` | [`bake`] |
+//! | the manifest, cross-checked against the module, and its declared memory against LEAF §4.2's ceiling (ABI §4.1, §4.3, §11) | `eio_manifest::validate_against` | [`bake`] |
 //! | the instance descriptor's port and property names, in index order (ABI §5.2) | `eio_host_core::Descriptor::from_manifest` | [`bake`] |
 //! | which expression each property evaluates (ABI §11.1's required/default rule) | `eio_host_core::resolve` | [`bake`] |
 //! | that the wiring resolves at all (DAEMON §6) | `eio_host_core::Routes::resolve` | [`bake`], via [`eio_leaf::graph::BakedGraph::routes`] |
@@ -187,15 +187,15 @@ impl fmt::Debug for Artifact {
 /// 1. SERVICE §7 stage 1 — `eio_service::parse`. TOML, ids, connection syntax, and every
 ///    property expression through `eio_expr`'s real front end.
 /// 2. Every block named has an artifact, and every artifact passes ABI §4.3's load-time
-///    cross-check — `eio_manifest::validate`. LEAF §3.1: **a leaf MUST run it**, here, where
-///    a refusal costs a build rather than a field failure.
-/// 3. LEAF §4.2's per-instance page budget, against the module's declared minimum.
-/// 4. SERVICE §7 stage 2 — `eio_service::validate` against those manifests: unknown ports,
+///    cross-check *and* §4.1's memory admission against LEAF §4.2's per-instance page
+///    ceiling — one `eio_manifest::validate_against`, one walk. LEAF §3.1: **a leaf MUST
+///    run it**, here, where a refusal costs a build rather than a field failure.
+/// 3. SERVICE §7 stage 2 — `eio_service::validate` against those manifests: unknown ports,
 ///    unknown properties.
-/// 5. `Descriptor::from_manifest` and `eio_host_core::resolve` per instance, in ascending
+/// 4. `Descriptor::from_manifest` and `eio_host_core::resolve` per instance, in ascending
 ///    instance-id order, which is what `eio-service`'s `BTreeMap` yields and what fixes the
 ///    `Endpoint::instance` numbering (§6.4.2).
-/// 6. `Routes::resolve` over the result, so a table that would be fatal at boot is a build
+/// 5. `Routes::resolve` over the result, so a table that would be fatal at boot is a build
 ///    failure instead (§6.4.1).
 pub fn bake(inputs: &Inputs<'_>) -> Result<Baked, Error> {
     let parsed = eio_service::parse(inputs.service_text).map_err(Error::Parse)?;
@@ -231,37 +231,38 @@ pub fn bake(inputs: &Inputs<'_>) -> Result<Baked, Error> {
                 })?;
                 let bytes: &'static [u8] = leak::bytes(bytes);
 
-                // ABI §4.3's load-time cross-check, at firmware build time (LEAF §3.1). No
+                // ABI §4.3's load-time cross-check *and* §4.1's memory admission, at
+                // firmware build time (LEAF §3.1, §4.2), in one walk of the module. The
+                // page ceiling is passed rather than compared afterwards, because a build
+                // that fetched the number itself is a build that can do the cross-check and
+                // forget the ceiling — which is the divergence ABI §4.1 exists to close. No
                 // registry manifest is supplied: what accompanies an artifact is the
                 // pipeline's to carry (§6.1's WAMR/LLVM pairing is the other half of that
                 // item), and the embedded `eio:manifest` section is what a build has today.
+                let admission =
+                    eio_manifest::Admission::CURRENT.with_max_pages(inputs.memory_pages);
                 let manifest =
-                    eio_manifest::validate(bytes, None).map_err(|error| Error::Manifest {
-                        id: id.clone(),
-                        block: instance.block.clone(),
-                        path: path.clone(),
-                        error: error.to_string(),
+                    eio_manifest::validate_against(bytes, None, admission).map_err(|error| {
+                        match error {
+                            // LEAF §4.2's refusal names the link flag, which is the thing that
+                            // usually fixes it. The loader states the numbers; this states what
+                            // to do about them.
+                            eio_manifest::ModuleError::MemoryCeiling { declared, ceiling } => {
+                                Error::MemoryBudget {
+                                    id: id.clone(),
+                                    block: instance.block.clone(),
+                                    declared,
+                                    budget: ceiling,
+                                }
+                            }
+                            error => Error::Manifest {
+                                id: id.clone(),
+                                block: instance.block.clone(),
+                                path: path.clone(),
+                                error: error.to_string(),
+                            },
+                        }
                     })?;
-
-                // LEAF §4.2's MUST. The number is read by `eio_manifest`'s own module walk,
-                // not by a second reader of the same bytes.
-                let module =
-                    eio_manifest::Module::read(bytes).map_err(|error| Error::Manifest {
-                        id: id.clone(),
-                        block: instance.block.clone(),
-                        path: path.clone(),
-                        error: error.to_string(),
-                    })?;
-                if let Some(pages) = module.min_pages
-                    && pages > inputs.memory_pages
-                {
-                    return Err(Error::MemoryBudget {
-                        id: id.clone(),
-                        block: instance.block.clone(),
-                        declared: pages,
-                        budget: inputs.memory_pages,
-                    });
-                }
 
                 let index = artifacts.len();
                 artifacts.push(Artifact {
@@ -276,14 +277,16 @@ pub fn bake(inputs: &Inputs<'_>) -> Result<Baked, Error> {
         // A second instance of an already-read artifact still needs its own entry in the
         // per-instance manifest map, which is keyed by instance id and not by block.
         if !manifests.contains_key(id) {
-            let manifest =
-                eio_manifest::validate(artifacts[index].bytes, None).map_err(|error| {
-                    Error::Manifest {
-                        id: id.clone(),
-                        block: instance.block.clone(),
-                        path: path.clone(),
-                        error: error.to_string(),
-                    }
+            // The same admission as above, though this artifact was admitted when it was
+            // first read: one call shape, so the ceiling cannot be dropped by whichever
+            // path happens to reach a block second.
+            let admission = eio_manifest::Admission::CURRENT.with_max_pages(inputs.memory_pages);
+            let manifest = eio_manifest::validate_against(artifacts[index].bytes, None, admission)
+                .map_err(|error| Error::Manifest {
+                    id: id.clone(),
+                    block: instance.block.clone(),
+                    path: path.clone(),
+                    error: error.to_string(),
                 })?;
             manifests.insert(id.clone(), manifest);
         }

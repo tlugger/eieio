@@ -117,17 +117,19 @@ pub struct Module<'a> {
     /// Read in this walk rather than by a second one over the same bytes, because there is
     /// exactly one reader of a `.wasm` in this repository and that is worth keeping. Read
     /// unconditionally, not behind the portable-subset policy, because it is not a
-    /// judgement: nothing in ABI §4 judges the number, and a host with room for it runs
-    /// the module. It is the one number about a module a memory-constrained host has to
-    /// know *before* it decides whether it can run it.
+    /// judgement in itself: §4.1 makes the ceiling host configuration, and a host with room
+    /// for the module runs it. It is the one number about a module a memory-constrained
+    /// host has to know *before* it decides whether it can run it.
     ///
     /// The *minimum*, because that is what an instantiation has to be able to satisfy; a
-    /// declared maximum only bounds growth, and costs nothing until a module grows into it.
-    /// LEAF §4.2 refuses a module whose minimum exceeds its per-instance page budget at
-    /// firmware build time — the same class of check as ABI §4.3's load-time cross-check,
-    /// made on the build host where a refusal costs a build rather than a field failure —
-    /// and SDK §5.2's link default is what keeps a block built with `cargo eio build` at
-    /// one page.
+    /// declared maximum only bounds growth, which ABI §4.1 leaves to the engine.
+    ///
+    /// **The judgement belongs to [`crate::validate_against`]**, which takes the ceiling as
+    /// part of [`crate::Admission`] and refuses the module in the same walk that reads this
+    /// (ABI §4.1, §9.7 rule 10). A caller reading the number here to compare it itself is
+    /// a caller that can do §4.3's cross-check and forget the memory one; LEAF §4.2's
+    /// firmware build passes its one-page ceiling instead. SDK §5.2's link default is what
+    /// keeps a block built with `cargo eio build` at one page.
     ///
     /// A module declaring a second memory is refused by [`crate::portable`] long before
     /// anything reads this, so only the first is recorded.
