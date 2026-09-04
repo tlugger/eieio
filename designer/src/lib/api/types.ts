@@ -198,6 +198,41 @@ export interface BlockManifest {
   aot: string[];
 }
 
+/** A manifest as a *node* answers it (ABI §11): {@link BlockManifest} minus `block_ref`, which
+ *  is this shell's own bookkeeping key and never part of what a node sends. `GET /blocks`,
+ *  `GET /blocks/available/{reference}` and `POST /blocks/pull` all carry one of these in their
+ *  `manifest` field, and `PUT /api/blocks/{reference}` stores it verbatim. */
+export type NodeManifest = Omit<BlockManifest, 'block_ref'>;
+
+/** One block a node has **installed** — `GET /blocks` and `POST /blocks/pull` both answer this
+ *  shape (`crates/daemon/src/api/blocks.rs`'s `CachedBlock`), field for field.
+ *
+ *  `reference` is the node's *own* name for the entry, `name:version`, never the reference that
+ *  was asked for: DAEMON §4 keys the block cache by name and version, so a pull of
+ *  `ghcr.io/tlugger/filter:1.2.0` answers `reference: "filter:1.2.0"`. DESIGNER §3.3's
+ *  invalidation-on-pull rule turns on that fact — see `proxy.ts`'s `pullBlock` and `client.ts`'s. */
+export interface CachedBlock {
+  name: string;
+  version: string;
+  reference: string;
+  manifest: NodeManifest;
+}
+
+/** One candidate reference `GET /blocks/available` found (DAEMON §9.8's `AvailableTag`): a
+ *  `<repository>:<tag>` string and nothing else. No manifest — a caller that wants to know what
+ *  the reference *is* inspects it, one request per reference rather than one per tag. */
+export interface AvailableTag {
+  reference: string;
+}
+
+/** One reference's manifest, fetched from a registry by the node and **not** installed
+ *  (DAEMON §9.8's `AvailableBlock`). `GET /blocks` is unchanged by having read it, which is
+ *  exactly why DESIGNER §3.3 calls a Designer cache entry sourced from here *unverified*. */
+export interface AvailableBlock {
+  reference: string;
+  manifest: NodeManifest;
+}
+
 /** SERVICE-SPEC §4: a block instance. `id` is the table key — identity
  * (SERVICE §2) — and is carried here as its own field for convenience; it
  * is never derived from `name`. */

@@ -42,6 +42,7 @@
   } from './lib/service/operations';
   import type {
     BlockManifest,
+    NodeManifest,
     NodeSummary,
     RegistrySummary,
     ServiceDefinition,
@@ -399,13 +400,57 @@
     manifests = manifests.map((m) => (m.block_ref === reference ? refreshed : m));
     // Best-effort: the in-memory palette is already corrected regardless of whether this
     // write lands, and a failed re-cache is not a reason to have skipped the correction above.
-    await api.putCachedManifest(reference, outcome.manifest).catch(() => {});
+    //
+    // Cast for the same reason line 398 above casts: `RevalidationOutcome.manifest` is `unknown`
+    // because `manifests.ts` is deliberately ignorant of what a manifest *is* (it compares two
+    // of them structurally and never reads a field), while `putCachedManifest` takes the shape
+    // a node actually sends. This is the seam where the opaque value gets its name back.
+    await api.putCachedManifest(reference, outcome.manifest as NodeManifest).catch(() => {});
   }
 
   /** Every distinct block reference a service actually uses — the set `handleStart` and
    *  `handleTapConnection` revalidate before their respective acts. */
   function serviceBlockRefs(def: ServiceDefinition): string[] {
     return [...new Set(Object.values(def.blocks).map((b) => b.block))];
+  }
+
+  // --- Filling the palette: browsing a registry and installing (eieio-m9s.40) ------------------
+  //
+  // The counterpart to `ensureFreshManifest` above, and DESIGNER §3.3's *other* rule rather than
+  // a fourth revalidation site. A pull invalidates the pulled reference's cache entry, and it
+  // does so inside `api.pullBlock` — the invalidation is not something this file arranges or
+  // could forget to arrange (see that function's own doc). All three handlers below do the same
+  // two things: reach the node the palette is scoped to, then re-read the Designer's own cache
+  // so the palette shows what just changed.
+  //
+  // `listBlockManifests` rather than a local splice: `manifests` is a view of `manifest_cache`
+  // (DESIGNER §2), and building a second, in-memory idea of what it now holds is exactly the
+  // duplicate `BlockLibrary`'s own `$derived` filter already refuses to keep.
+
+  /** The node every registry call below is issued against — the palette is per node by
+   *  construction (DAEMON §9.8), never a Designer-wide catalogue. */
+  function paletteNodeId(): string {
+    if (!selectedNode) throw new Error('select a node first — a registry is browsed per node (DAEMON §9.8)');
+    return String(selectedNode.id);
+  }
+
+  async function handleBrowseRegistry(repository: string): Promise<string[]> {
+    const tags = await api.browseRegistry(paletteNodeId(), repository);
+    return tags.map((tag) => tag.reference);
+  }
+
+  /** `GET /blocks/available/{reference}`, cached — the palette gains an entry for a block the
+   *  node has *not* installed. Unverified from the moment it is stored (DESIGNER §3.3). */
+  async function handlePreviewBlock(reference: string): Promise<void> {
+    await api.previewAvailableBlock(paletteNodeId(), reference);
+    manifests = await api.listBlockManifests();
+  }
+
+  /** `POST /blocks/pull` — and, in the same call, DESIGNER §3.3's invalidation of the pulled
+   *  reference's cache entry. */
+  async function handleInstallBlock(reference: string): Promise<void> {
+    await api.pullBlock(paletteNodeId(), reference);
+    manifests = await api.listBlockManifests();
   }
 
   // --- The one path every canvas edit takes (DESIGNER §3.2, §4) ----------
@@ -712,7 +757,15 @@
 {/if}
 
 {#if libraryOpen}
-  <BlockLibrary {manifests} node={selectedNode} onSelect={handleAddBlock} onClose={() => (libraryOpen = false)} />
+  <BlockLibrary
+    {manifests}
+    node={selectedNode}
+    onSelect={handleAddBlock}
+    onClose={() => (libraryOpen = false)}
+    onBrowseRegistry={handleBrowseRegistry}
+    onPreview={handlePreviewBlock}
+    onInstall={handleInstallBlock}
+  />
 {/if}
 {/if}
 
