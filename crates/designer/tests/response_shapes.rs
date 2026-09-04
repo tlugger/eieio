@@ -36,7 +36,15 @@
 //! `crates/designer/src/api/blocks.rs`'s own doc for why: the real, typed schema is
 //! `eio_manifest::schema::Manifest`, a `no_std` ★ crate with no `utoipa` dependency by design),
 //! so this file's `schema_kind`/`flatten` could not see into it even if the comparison were
-//! reshaped to expect the flattening. `designer/src/lib/api/schema-parity.test.ts`'s own module
+//! reshaped to expect the flattening. That last half is now only true *of this file*:
+//! eieio-m9s.46 gave `crates/cli/tests/response_shapes.rs` a route into an untyped `manifest`
+//! field that costs no ★ crate a `utoipa` dependency — it describes the field from
+//! `eio_manifest::schema::Manifest`'s own serde output, the same code path that writes the wire
+//! bytes (see that file's `SERDE_TYPED_FIELDS`). Nothing here uses it, because the *outer*
+//! exclusion still stands on its own: `BlockManifest` is not a mirror of `ManifestCacheEntry` at
+//! any depth, and describing `manifest`'s interior would not change that. If `types.ts` ever
+//! grows a real `ManifestCacheEntry` mirror, that splice is what this file should reach for
+//! rather than a hand-written schema. `designer/src/lib/api/schema-parity.test.ts`'s own module
 //! doc records the TypeScript half of this exclusion beside its `PAIRS`, the way `BlockManifest`
 //! belongs "if `ServiceDefinition` or `BlockManifest` ever grow a wire twin" per that file's own
 //! words about the daemon side.

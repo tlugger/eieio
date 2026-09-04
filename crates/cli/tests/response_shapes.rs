@@ -43,7 +43,7 @@
 //!
 //! # Scope: which bodies, and which do not compare cleanly
 //!
-//! Five schema pairs are asserted, byte for byte, field for field, required-ness and kind
+//! Eight schema pairs are asserted, byte for byte, field for field, required-ness and kind
 //! included:
 //!
 //! - **`NodeInfo`** (`GET /node`) — the historical bug's own schema. The proof this file exists
@@ -68,24 +68,26 @@
 //!   `@wire at` already established. `instance` and `port`, the two fields `TapSummary` omitted
 //!   entirely, are now real fields the mock populates from the tapped connection's source
 //!   endpoint (DAEMON §6.3), the same value the daemon derives `Tap.instance`/`Tap.port` from.
+//! - **`CachedBlock`** (`GET /blocks`'s listing entries and `POST /blocks/pull`'s response),
+//!   **`AvailableTag`** (`GET /blocks/available`'s entries) and **`AvailableBlock`**
+//!   (`GET /blocks/available/{reference}`) — added by eieio-m9s.46. All three are what the
+//!   Designer's block-install flow reads on the *real* path (`designer/src/lib/api/proxy.ts`'s
+//!   `listCachedBlocks`/`listAvailableBlocks`/`inspectAvailableBlock`/`pullBlock`), and
+//!   `types.ts` carries a field-for-field mirror of each under the same name. `CachedBlock` was
+//!   excluded from `targets` by name until then, because its `manifest` field had no schema to
+//!   compare — see the `SERDE_TYPED_FIELDS` section below for how that field is described now,
+//!   and why neither route through a `ToSchema` derive was taken.
 //!
 //! **What this deliberately does not cover, and why:**
 //!
-//! - **`listBlockManifests` (`BlockManifest`).** The daemon's actual `GET /blocks` answers
-//!   `Vec<CachedBlock>` (`crates/daemon/src/api/blocks.rs`) — `{name, version, reference,
-//!   manifest}`, where `manifest` is `serde_json::Value`. `designer/src/lib/api/types.ts`'s
-//!   `BlockManifest` is not that shape at all: it flattens `CachedBlock.manifest`'s own fields
-//!   up to the top level and renames `CachedBlock.reference` to `block_ref` — a parsed,
-//!   client-side model of two nested wire shapes, not a mirror of either one (the same relation
-//!   `ServiceDefinition` has to `ServiceDetail`'s `definition` text, below). And even a mirror of
-//!   `CachedBlock` alone could not check `manifest`'s own fields: `eio_manifest::schema::Manifest`
-//!   (the real Rust type ABI §11's schema names) has no `#[derive(ToSchema)]` — it is a `no_std`
-//!   crate with no `utoipa` dependency, by `crates/manifest`'s own ★-crate rule (this repository's
-//!   `CLAUDE.md`) — so `manifest` renders in the live OpenAPI document as untyped `AnyValue` and
-//!   this file's `types_of`/`schema_kind` already leave that out of the emitted map on purpose
-//!   (see their own doc above). A real Rust counterpart exists; it is simply unreachable through
-//!   the mechanism this file uses. Extending manifest schema generation to `utoipa` (or teaching
-//!   this file to read `manifest.schema.json` instead) is future work, not this bead's.
+//! - **`listBlockManifests` (`BlockManifest`).** `designer/src/lib/api/types.ts`'s
+//!   `BlockManifest` is a *parsed, client-side model*, not a wire shape: it flattens a
+//!   manifest's own fields up to its top level and adds `block_ref`, this shell's own
+//!   bookkeeping key — the same relation `ServiceDefinition` has to `ServiceDetail`'s
+//!   `definition` text, below. `NodeManifest`, the interface `BlockManifest` now extends, *is* a
+//!   wire shape and is checked: it is what `CachedBlock.manifest` and `AvailableBlock.manifest`
+//!   carry, compared under those dotted paths by the two pairs above rather than as a target of
+//!   its own (nothing serves a bare manifest as a whole response body).
 //! - **`serviceEdit` (`ServiceEditResult`) and `putService` (`PutServiceResult`).** Both are
 //!   synthesized discriminated unions the Designer backend would produce by folding an HTTP
 //!   status code, an `ETag`/`If-Match` header, and a JSON body into one `{ok, ...}` value — not a
@@ -176,6 +178,7 @@ use std::path::PathBuf;
 
 use eio_daemon::api::openapi::Document;
 use eio_daemon::observe::{Observation, What};
+use eio_manifest::{Abi, Manifest};
 use utoipa::openapi::schema::SchemaType;
 use utoipa::openapi::{RefOr, Schema, Type};
 use utoipa::{OpenApi as _, PartialSchema};
@@ -561,6 +564,124 @@ fn types_of(name: &str, components: &BTreeMap<String, RefOr<Schema>>) -> BTreeMa
     out
 }
 
+// --- `manifest`, the one field with no schema to read (eieio-m9s.46) ------------------------
+//
+// `CachedBlock.manifest` and `AvailableBlock.manifest` are `serde_json::Value` on the daemon
+// side (`crates/daemon/src/api/blocks.rs`, `crates/daemon/src/api/available.rs`), so utoipa
+// renders them as untyped `AnyValue`: `flatten` finds an object that declares no properties and
+// `schema_kind` answers `None`, which is why the three block shapes were excluded from `targets`
+// by name until this bead rather than merely compared shallowly.
+//
+// The value underneath is not shapeless, though. Both handlers put
+// `serde_json::to_value(&manifest)` there, and that `manifest` is
+// `eio_manifest::schema::Manifest` — ABI §11's schema, as types.
+//
+// Two obvious routes to a `ToSchema` are both closed, and should stay closed:
+//
+//   - `#[derive(ToSchema)]` on `Manifest` itself. `eio-manifest` is a ★ crate (`CLAUDE.md`'s
+//     repository layout): `no_std`, and compiled into every block that ships. A `utoipa`
+//     dependency there is a dependency in all of them, for the benefit of one HTTP document.
+//   - A mirror struct in `crates/daemon` carrying `#[derive(ToSchema)]` and pointed at by
+//     `#[schema(value_type = ...)]`. That is a second, hand-maintained statement of ABI §11's
+//     schema — precisely the third source of truth this whole file exists to prevent, and it
+//     would drift silently because nothing would compare it to `Manifest`.
+//
+// So this reads the shape off the real type's own **serde output**, which is the same code path
+// that produces the bytes on the wire. [`exemplar_manifest`] is a plain struct literal with no
+// `..Default::default()`, so a field added to `Manifest` fails to compile here until it is
+// named; its wire name and its JSON kind then come from serde, never from a string typed out
+// beside it. Nothing is added to any ★ crate, and `Manifest` is reached through `eio-cli`'s
+// existing `[dependencies]` entry (`--manifest REF=PATH`), not a new one.
+//
+// `designer/src/lib/api/generated-shapes.ts` lists `crates/manifest/src` among the daemon
+// artifact's staleness sources for this reason: the emitted JSON now derives from that tree too,
+// and a comparison against a snapshot taken before a `Manifest` edit is the exact stale read
+// that module refuses to make.
+
+/// Schemas whose named field is declared `serde_json::Value` but always carries a serialized
+/// [`Manifest`] on the wire, and so is spliced in from [`exemplar_manifest`] rather than left
+/// out of the emitted map.
+///
+/// Not an allowlist that hides a gap: [`emit_response_shapes`] asserts, for every entry, both
+/// that the field is still there and that utoipa still cannot type it. If `manifest` ever gains
+/// a real schema — a `ToSchema` route that does not cost a ★ crate its dependency-freedom — that
+/// assertion fires and this splice is deleted rather than silently double-describing the field.
+const SERDE_TYPED_FIELDS: &[(&str, &str)] =
+    &[("CachedBlock", "manifest"), ("AvailableBlock", "manifest")];
+
+/// A [`Manifest`] with every field named, so that serializing it enumerates the manifest's own
+/// wire fields.
+///
+/// The values are deliberately empty (`""`, `0`, `[]`): only which keys serde emits, and what
+/// JSON kind each holds, is read from this — never a value. The one thing that matters about the
+/// literal is that it is exhaustive, which the compiler enforces because there is no `..` in it.
+///
+/// `Manifest` serializes every field it has, always — its own module doc: "Serialization emits
+/// every field, in this declaration order, whether or not it holds a default value — the one
+/// exception being a property's absent `default`". That exception lives inside `Property`, which
+/// is behind the `properties` array and so past this file's array-is-a-leaf rule; nothing here
+/// depends on it either way.
+fn exemplar_manifest() -> Manifest {
+    Manifest {
+        name: String::new(),
+        version: String::new(),
+        abi: Abi { major: 0, minor: 0 },
+        description: String::new(),
+        capabilities: Vec::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        properties: Vec::new(),
+        targets: Vec::new(),
+        aot: Vec::new(),
+    }
+}
+
+/// [`primitive_kind`]'s counterpart for a JSON *value* rather than a declared schema type, in the
+/// identical five-family vocabulary — so a field described this way and a field described from
+/// utoipa are the same kind of statement on the TypeScript side.
+fn value_kind(value: &serde_json::Value) -> Option<&'static str> {
+    match value {
+        serde_json::Value::String(_) => Some("string"),
+        serde_json::Value::Number(_) => Some("number"),
+        serde_json::Value::Bool(_) => Some("boolean"),
+        serde_json::Value::Array(_) => Some("array"),
+        serde_json::Value::Object(_) => Some("object"),
+        // `Manifest` emits no `null` (ABI §11.1 spells absence as absence), and a `null` would
+        // describe nothing comparable if it did — left out rather than guessed at, exactly as
+        // `schema_kind` leaves `AnyValue` out.
+        serde_json::Value::Null => None,
+    }
+}
+
+/// [`flatten`] and [`flatten_types`] at once, over a serialized value instead of a schema.
+///
+/// Same dotted paths, same depth accounting (stepping into a named key spends one hop), and the
+/// same array-is-a-leaf rule `flatten`'s `Schema::Array` arm applies — so a path this produces
+/// means what a path from the schema side means, and `schema-parity.test.ts` compares them with
+/// one mechanism rather than two.
+fn flatten_value(
+    value: &serde_json::Value,
+    prefix: &str,
+    depth: u8,
+    fields: &mut BTreeSet<String>,
+    types: &mut BTreeMap<String, String>,
+) {
+    if !prefix.is_empty() {
+        fields.insert(prefix.to_string());
+        if let Some(kind) = value_kind(value) {
+            types.insert(prefix.to_string(), String::from(kind));
+        }
+    }
+    if depth == 0 {
+        return;
+    }
+    if let serde_json::Value::Object(map) = value {
+        for (name, child) in map {
+            flatten_value(child, &dotted(prefix, name), depth - 1, fields, types);
+        }
+    }
+}
+
 /// [`common_observation_fields`]'s counterpart for kinds — flat, since DAEMON §9.6's SSE
 /// payloads are (`port`'s own kind is folded out of its `Option` the same way [`schema_kind`]
 /// does for any nullable primitive).
@@ -777,18 +898,47 @@ fn emit_response_shapes() {
         "ApiError",
         "ServiceSummary",
         "Tap",
+        "CachedBlock",
+        "AvailableTag",
+        "AvailableBlock",
     ];
 
     let mut shapes = serde_json::Map::new();
     let mut required = serde_json::Map::new();
     let mut types = serde_json::Map::new();
     for name in targets {
-        let fields = fields_of(name, &components);
+        let mut fields = fields_of(name, &components);
+        let mut kinds = types_of(name, &components);
         assert!(
             !fields.is_empty(),
             "`{name}` resolved to a schema with no fields at all — almost certainly a typo in \
              this test, not a fact about the daemon"
         );
+
+        // eieio-m9s.46: the `serde_json::Value` fields whose content is a real Rust type utoipa
+        // cannot be asked about. See `SERDE_TYPED_FIELDS` and the section above it.
+        for (_, field) in SERDE_TYPED_FIELDS
+            .iter()
+            .filter(|(schema, _)| *schema == name)
+        {
+            assert!(
+                fields.contains(*field),
+                "`SERDE_TYPED_FIELDS` names `{name}.{field}`, which `{name}`'s live schema no \
+                 longer has — the field was renamed or removed; follow it, or drop the entry"
+            );
+            assert!(
+                !kinds.contains_key(*field),
+                "`{name}.{field}` now has a schema utoipa can describe, so splicing a \
+                 serde-derived shape over it would be describing the field twice from two \
+                 sources. Drop its `SERDE_TYPED_FIELDS` entry and let the live schema answer"
+            );
+            let value = serde_json::to_value(exemplar_manifest())
+                .expect("the manifest schema is always serializable");
+            // `MAX_DEPTH - 1`: `flatten` already spent one hop stepping into this field, and the
+            // dotted paths have to line up hop for hop with the TypeScript side's own walk.
+            flatten_value(&value, field, MAX_DEPTH - 1, &mut fields, &mut kinds);
+        }
+
         shapes.insert(
             String::from(name),
             serde_json::Value::Array(fields.into_iter().map(serde_json::Value::String).collect()),
@@ -805,7 +955,7 @@ fn emit_response_shapes() {
         types.insert(
             String::from(name),
             serde_json::Value::Object(
-                types_of(name, &components)
+                kinds
                     .into_iter()
                     .map(|(field, kind)| (field, serde_json::Value::String(kind)))
                     .collect(),
