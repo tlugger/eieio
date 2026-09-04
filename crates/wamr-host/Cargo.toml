@@ -50,10 +50,16 @@ eio-manifest.workspace = true
 # multi-memory, memory64, threads, exceptions or GC for a convenience. WAMR selects features
 # at CMake time, so the conforming set is kept here by writing nothing.
 #
+# **Inherited rather than declared, and the workspace entry pins it exactly** (`=0.3.0`,
+# vendoring WAMR 2.4.3): this crate and `eio-conformance` are the only two takers, and two
+# independent caret requirements for the engine that is the sole enforcer of ABI §4.3's
+# feature set is one place too many for a version nothing in this repository chooses. The
+# root `Cargo.toml`'s comment on the entry is the long version, and LEAF §3.3 is the spec's.
+#
 # `wamrx` — the safe wrapper `wamrx-sys` backs — is deliberately absent; `src/lib.rs`'s module
 # docs are the long version of why (its linker closures never see the calling instance, its
 # handles are `pub(crate)`, and its `Engine` wipes the native registry on drop).
-wamrx-sys = "0.3.0"
+wamrx-sys.workspace = true
 
 [lints]
 workspace = true

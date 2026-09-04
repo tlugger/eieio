@@ -112,6 +112,34 @@ toml_edit = "0.25"
 # suite could only be written against pre-assembled bytes nobody can review (ABI §13.1).
 wat = "1.255"
 
+# WAMR itself, vendored: `wamrx-sys` builds `wasm-micro-runtime`'s C core from the tree it
+# carries, so **this line chooses the engine every leaf and the fourth conformance host run**
+# (LEAF §3.3). 0.3.0 vendors WAMR **2.4.3** (`core/version.h`: MAJOR 2, MINOR 4, PATCH 3).
+#
+# `=`, and hoisted here from the two members that declared it, for a reason LEAF §3.1 supplies
+# and an ordinary dependency does not: **the engine is the only place ABI §4.3's accepted
+# feature set is enforced.** WAMR selects proposals at CMake time, so what a leaf accepts is a
+# property of the vendored tree and its build configuration — nothing in this repository's own
+# code states it — and §6.1.1 records that a `.aot`'s `feature_flags` word is checked against
+# the proposals the runtime was *compiled* with. A caret requirement would let `cargo update`
+# move all of that with no edit anywhere in this repository.
+#
+# **What the pin buys, stated honestly, because it is less than it looks.** The interpreter's
+# accepted set is *measured* in `crates/conformance/tests/wamr.rs` and that measurement runs in
+# `just ci`: `wamr_refuses_every_proposal_outside_the_accepted_set` fails if a bump turns one
+# of ABI §4.3's nine refused proposals on, and the instruction table fails if a bump turns one
+# of the accepted six off. So a feature-set move would be *caught* without this pin. What the
+# pin adds is that it cannot happen unattributed — a red conformance test the day after an
+# unrelated `cargo update` is a mystery, and an edit to this line is a decision — and it
+# covers the half the suite cannot reach at all: nothing here builds a `.aot`, so neither the
+# `feature_flags` word nor `AOT_CURRENT_VERSION` is measured by anything (LEAF §6.1.1).
+#
+# Two members take it: `eio-wamr-host` as a normal dependency and `eio-conformance` as a dev
+# one. Neither passes `features` — 0.3.0 defaults to exactly `bulk-memory` and
+# `reference-types`, which is LEAF §3.1's requirement expressed as a build configuration, so
+# the conforming set is kept by writing nothing.
+wamrx-sys = "=0.3.0"
+
 # ── the daemon's own dependencies (std, never reachable from a ★ crate) ──────
 #
 # Pinned here rather than in `crates/daemon/Cargo.toml` for one reason: the leaf

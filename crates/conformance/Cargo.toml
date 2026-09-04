@@ -103,7 +103,14 @@ eio-wamr-host = { path = "../wamr-host" }
 # about `wamrx` — a safe wrapper without instance-scoped host state and with owned, hidden
 # handles is a perfectly good design for a guest that only calls exports — it just is not a
 # shape this ABI's host functions fit.
-wamrx-sys = "0.3.0"
+#
+# Inherited from the workspace, which pins it exactly (`=0.3.0`, vendoring WAMR 2.4.3): this
+# file and `crates/wamr-host` are the only two takers, and LEAF §3.3 records why the version
+# of the engine that is the sole enforcer of ABI §4.3's feature set is chosen in one place.
+# Unlike `eio-wamr-host` above, there is nothing publish-related in the way — cargo inlines a
+# workspace requirement when it packages, and this is not an `eio-*` crate `just
+# publish-dry-run` reasons about.
+wamrx-sys.workspace = true
 
 # The harness must consume any conforming `.wasm`, so there is deliberately no `eio-sdk`
 # here — that would be the coupling ABI §13's language-agnosticism rules out (SDK §7).
