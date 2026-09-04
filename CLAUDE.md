@@ -10,9 +10,9 @@ eieio is a distributed stream-processing platform: WASM **blocks** wired into **
 
 **The Designer is built**: `designer/` is the Vite + Svelte 5 + Svelte Flow SPA and `crates/designer` its axum + rusqlite + rust-embed server — one catch-all proxy to a node, a SQLite registry of Systems and node addresses, session auth, canvas editing with live expression linting, and a schema-parity check that holds its hand-written response types against the daemon's own OpenAPI schemas.
 
-**`crates/leaf` exists as a host build**, not a firmware one: it links the five ★ crates unmodified, binds wasm3, wires `eio:state`, `eio:core` and `eio:timer`, and passes 28 of 32 conformance scenarios. That is the whole of what it proves — it is not a cross-compile, not `no_std`, and says nothing about fitting on an MCU.
+**`crates/leaf` exists as a host build**, not a firmware one: it links the five ★ crates unmodified, binds wasm3, wires `eio:state`, `eio:core` and `eio:timer`, and passes 28 of 32 conformance scenarios. It now has a `no_std` boundary drawn through it (LEAF §2.1): `--no-default-features` builds the shared half — `spawn`, generic over engine, clock, entropy and store; the timer scheduler; the budgets and router wiring — for both bare-metal targets under `just check-nostd`, while the engine binding, the file-backed state store, the host clock and entropy, and the fixtures stay behind `std`. That is the whole of what it proves — nothing has been cross-compiled into an image, linked against an allocator, or run on an MCU.
 
-**Not built yet:** the firmware build pipeline, an MCU target, and `no_std` for the leaf (LEAF §11 lists what each needs). `cargo eio aot` is blocked on a `wamrc` toolchain — see eieio-7d8.21's notes before attempting it, and LEAF §4 for why the interpreter path needs none of it.
+**Not built yet:** the firmware build pipeline, an MCU target, and the platform half of a `no_std` leaf — an allocator, a panic handler, a hardware clock, flash-backed state (LEAF §11 lists what each needs). `cargo eio aot` is blocked on a `wamrc` toolchain — see eieio-7d8.21's notes before attempting it, and LEAF §4 for why the interpreter path needs none of it.
 
 ## The prime directive: specs are normative
 
@@ -67,7 +67,7 @@ Cargo.toml            workspace root
 crates/
   abi/  host-core/  expr/  signal/  manifest/   ★ shared with the leaf runtime
   service/  daemon/  cli/  designer/  block-sdk/  block-sdk-macros/  test-host/  cargo-eio/
-  leaf/                                    the leaf runtime, host build (LEAF §2)
+  leaf/     ★ its runtime half     the leaf runtime; `std` by default (LEAF §2.1)
   conformance/
 expr-tests/           host-agnostic vectors: expressions, property types, canonical CBOR
 schemas/              published JSON Schemas: manifest, service
@@ -97,7 +97,7 @@ Bottom-up, most-specified first. Do not start a later item because an earlier on
 7. Pub/sub transport + cross-node signals (DAEMON §7). ✅
 8. **CLI + agent tooling (MCP)** — `eio` and `eio mcp` are built. ✅
 9. Designer UI — built (DESIGNER §1–§7 ratified); §10's expansion list is what remains. ✅
-10. Leaf runtime + firmware build pipeline — `crates/leaf` runs on the host and passes conformance; the MCU target, `no_std`, AOT and the firmware pipeline are LEAF §11's expansion items.
+10. Leaf runtime + firmware build pipeline — `crates/leaf` runs on the host, passes conformance, and its runtime half builds `no_std` for both bare-metal targets (LEAF §2.1); the MCU target itself, the platform half, AOT and the firmware pipeline are LEAF §11's expansion items.
 
 Items 1–4 are ✅ too. The authoritative list is SCOPE §7, with the epic-to-item mapping in §7.1; this is the same sequence, annotated.
 
