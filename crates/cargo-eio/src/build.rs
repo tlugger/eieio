@@ -19,20 +19,33 @@ use serde::Deserialize;
 ///
 /// No `-C target-feature` of any kind: ABI §4.3's accepted set is exactly what rustc emits by
 /// default, and the flag earlier drafts required here was measured to do nothing.
-const PROFILE: [&str; 4] = [
+pub const PROFILE: [&str; 4] = [
     "profile.release.panic=\"abort\"",
     "profile.release.opt-level=\"z\"",
     "profile.release.lto=true",
     "profile.release.strip=true",
 ];
 
-/// SDK §5.2's shadow-stack default, as a `build.rustflags` cargo `--config` override.
+/// SDK §5.2's shadow-stack size, in bytes — **the one place this number is written in Rust**.
 ///
 /// `wasm-ld` defaults the shadow stack to 1 MiB, which is not a size anybody chose for a
 /// block: it is a desktop linker's default, and it is what made every one of ABI §13.2's
 /// five golden blocks declare a **minimum linear memory of 17 pages, 1088 KiB** — three and
 /// a half times the whole of LEAF §4.2's v1 target chip. 16 KiB takes all five to one page
-/// with no source change and no measurable size difference.
+/// with no source change and no measurable size difference; §5.2 has the measurement of why
+/// that number and not 8 or 32 KiB.
+///
+/// Two things downstream are formatted from this and never restate it: [`shadow_stack`],
+/// the `--config` override `build` passes, and the `{{stack_size}}` the `.cargo/config.toml`
+/// of `cargo eio new`'s template is rendered with (`template::render`). The third
+/// restatement, `examples/blocks/.cargo/config.toml`, is a *separate cargo workspace* that no
+/// Rust constant can reach; `tests/end_to_end.rs` reads that file and fails if it disagrees
+/// with this. The fourth is SDK §5.2 itself, which is the decision rather than a copy of it —
+/// and the same test extracts §5.2's command line and pins this against it, the way
+/// `crates/manifest/tests/roundtrip.rs` pins its fixture against ABI §11's example.
+pub const SHADOW_STACK_BYTES: u32 = 16_384;
+
+/// SDK §5.2's shadow-stack default, as a `build.rustflags` cargo `--config` override.
 ///
 /// `build.rustflags` and not `target.<triple>.rustflags` is the whole of the override story,
 /// and it is deliberate: cargo resolves rustflags from the *first* source that has any, in
@@ -42,7 +55,9 @@ const PROFILE: [&str; 4] = [
 /// command line, and which a plain `cargo build --release --target wasm32-unknown-unknown`
 /// honours identically. That is the property SDK §5.1 asks of the template's
 /// `[profile.release]`, kept for the one setting a `Cargo.toml` cannot carry.
-const SHADOW_STACK: &str = "build.rustflags=[\"-C\", \"link-arg=-zstack-size=16384\"]";
+pub fn shadow_stack() -> String {
+    format!("build.rustflags=[\"-C\", \"link-arg=-zstack-size={SHADOW_STACK_BYTES}\"]")
+}
 
 /// The manifest file `build` writes beside the module (ABI §11, §4.4).
 const MANIFEST_JSON: &str = "manifest.json";
@@ -163,7 +178,7 @@ fn compile(args: &BuildArgs) -> anyhow::Result<Artifact> {
     for setting in PROFILE {
         command.args(["--config", setting]);
     }
-    command.args(["--config", SHADOW_STACK]);
+    command.args(["--config", shadow_stack().as_str()]);
 
     let output = command
         .spawn()

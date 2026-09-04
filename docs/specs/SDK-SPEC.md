@@ -340,7 +340,8 @@ Five things about it are normative, because each is load-bearing somewhere else:
   `Cargo.toml`, so this is the file that gives the previous rule its other half — and the
   table is the target-specific one deliberately: it outranks the `build.rustflags` §5.2
   passes, so **this file is where a block raises its stack, and editing it moves both build
-  paths together**. `[build]` here would move only the plain one.
+  paths together**. `[build]` here would move only the plain one. The size itself is
+  *rendered*, not written into the template: §5.2 says which constant, and why.
 
 The conformance scenarios name the built module by path, relative to the scenario file
 (`../target/wasm32-unknown-unknown/release/<lib>.wasm`), because ABI §13.1 already says a
@@ -406,6 +407,18 @@ against a leaf's number hard-coded into the SDK, would be a second definition of
 memory budget — the drift this project's whole conformance argument exists to prevent. **A
 block that declares more than one page is a valid block.** It is refused when, and only when,
 somebody tries to put it on a leaf.
+
+**The number is written once in Rust, and the copies it cannot reach are checked.**
+`cargo-eio`'s `build::SHADOW_STACK_BYTES` is the single Rust definition: `cargo eio build`
+formats the `--config` line above from it, and `cargo eio new` renders §5.1's
+`.cargo/config.toml` from it as `{{stack_size}}`, so neither can drift from the other. Two
+restatements remain that no constant can reach — this section, which is the decision rather
+than a copy of it, and `examples/blocks/.cargo/config.toml`, which is a separate cargo
+workspace. Both are pinned against the constant by `crates/cargo-eio/tests/end_to_end.rs`,
+which extracts the invocation above out of this file the way `crates/manifest/tests/`
+extracts ABI §11's example manifest. That test exists because the obvious one does not work:
+a copy that drifted to 8 or 32 KiB would still produce a one-page module and still pass every
+`min_pages == 1` assertion in the repository, silently.
 
 What `build` does instead is **print the module's declared minimum linear memory** beside its
 size, every time. That is the number LEAF §4.2 refuses on, and printing it is what turns a

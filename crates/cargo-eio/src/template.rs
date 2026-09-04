@@ -104,6 +104,13 @@ pub const FILES: [File; 8] = [
 /// `sdk` and `test_host` are whole dependency lines rather than versions or paths, because
 /// the two forms differ in shape and not only in value: `eio-sdk = "0.1.0"` against
 /// `eio-sdk = { path = "..." }` (SDK §5.1).
+///
+/// `{{stack_size}}` takes no parameter because it is not a caller's choice: it is
+/// [`crate::build::SHADOW_STACK_BYTES`], the same constant `cargo eio build` formats its own
+/// `--config` override from. §5.1 requires the generated `.cargo/config.toml` to *restate*
+/// §5.2's shadow stack, and a restatement written a second time is one that drifts — a
+/// template that had wandered to 32 KiB would still declare one page and still pass every
+/// `min_pages == 1` assertion in the suite, silently.
 pub fn render(source: &str, names: &Names, sdk: &str, test_host: &str) -> String {
     source
         .replace("{{name}}", &names.name)
@@ -111,6 +118,10 @@ pub fn render(source: &str, names: &Names, sdk: &str, test_host: &str) -> String
         .replace("{{struct}}", &names.type_name)
         .replace("{{sdk_dep}}", sdk)
         .replace("{{test_host_dep}}", test_host)
+        .replace(
+            "{{stack_size}}",
+            &crate::build::SHADOW_STACK_BYTES.to_string(),
+        )
 }
 
 /// A `name = { path = "..." }` dependency line, with the path spelled for TOML.
