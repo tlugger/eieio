@@ -97,6 +97,33 @@ const MAX_ARITY: usize = 4;
 const ERR_BUF_SIZE: usize = 256;
 
 /// `wamrx::InstanceConfig`'s defaults, restated because that type's fields are `pub(crate)`.
+///
+/// **These stay `wamrx`'s numbers, and `crates/leaf/src/wamr.rs`'s no longer do** — the two
+/// files are otherwise the same shape, so the difference is worth stating here rather than
+/// leaving to whoever notices it next (eieio-x7g.2.24).
+///
+/// `EXEC_STACK_SIZE` is the size `wasm_runtime_create_exec_env` mallocs *and* `memset`s per
+/// instance, retained for that instance's life. Eight mebibytes of it is indefensible on a
+/// leaf, where LEAF §4.2 reserves 8 KiB per instance out of a 192 KiB heap floor, and the leaf
+/// binding now measures its way to that number (`crates/leaf/tests/exec_stack.rs`: the whole
+/// suite fits in 3 252 bytes on WAMR's interpreter, and 8 KiB is a 2.5× margin over it).
+///
+/// It is *not* indefensible here, and the reason is what this file is for. This is a desktop
+/// reference measurement of what WAMR does with ABI §13's scenarios — including the hostile
+/// blocks, whose whole job is to behave badly — and its design goal is that a scenario result
+/// never has to be qualified with "on a host that was being stingy". A conformance harness that
+/// imposed a *measured* limit would be a harness whose failures need a second explanation, and
+/// the number it imposed would have nothing to do with the ABI it is testing. The cost is one
+/// 8 MiB allocation live at a time (this file's `Guest` holds `WAMR_LOCK` for its whole life,
+/// so there is never a second), on a machine with gigabytes, and it was measured before being
+/// kept: dropping the leaf's copy from 8 MiB to 8 KiB moved that crate's whole suite by less
+/// than its own run-to-run noise (0.127 s → 0.147 s over 33 tests). So this is a memory
+/// number, not a time one, and the memory is not scarce here.
+///
+/// What was worth fixing is that the *leaf* inherited it by copying, which is the same class of
+/// defect as the golden blocks' 17-page shadow stack (eieio-x7g.2.21). Hence this comment: the
+/// next file that copies this one is copying a desktop harness, and should say which of the two
+/// it is before it takes the number.
 const AUX_STACK_SIZE: u32 = 64 * 1024;
 const HEAP_SIZE: u32 = 0;
 const EXEC_STACK_SIZE: u32 = 8 * 1024 * 1024;

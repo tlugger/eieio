@@ -149,9 +149,26 @@ So the bound is a **constant, not a per-target one**: `eio_signal::MAX_DEPTH`, t
 |Reserve|Size|Why|
 |---|---|---|
 |Guest linear memory|2 × 64 KiB|One WASM page is 64 KiB and a module cannot declare less. This is the dominant per-instance cost and there is no lever on it below one page.|
-|Engine execution stack|2 × 8 KiB|The stack WAMR is instantiated with, per instance. 8 KiB is the engine's own configuration and the figure §11's binding confirms.|
+|Engine execution stack|2 × 8 KiB|The stack `wasm_runtime_create_exec_env` allocates **and zeroes** per instance, held for that instance's whole life. **Measured** — see the paragraph below the table.|
 |Signal working set|48 KiB|One decoded batch in flight, the bounded emission queue, and one mailbox slot per connection (DAEMON §6.2). **Shared, not per-instance**: a leaf runs one callback at a time, so only the running instance's batch is live.|
 |**Total**|**192 KiB**||
+
+**The engine execution stack is 8 KiB because it was measured there, not because a wrapper said so.** This row was the one number in the table with nothing behind it, and the binding underneath it proved the point: `crates/leaf/src/wamr.rs` asked WAMR for **8 MiB** per instance — `wamrx::InstanceConfig`'s desktop default, copied verbatim from `crates/conformance/tests/wamr.rs`, which is 42× this whole heap floor, per instance, and `wasm_runtime_create_exec_env` `memset`s all of it. It is the same defect as the 17-page shadow stack below, one layer down: a host default inherited into the code that exists to fit an MCU. Harmless while `crates/leaf` is a host build, fatal on the first cross-compile.
+
+What it costs is now bisected on every `just ci`, by `crates/leaf/tests/exec_stack.rs`, over every ABI §13 scenario WAMR's interpreter reaches — all five golden blocks, the four hostile blocks, and the hand-written fixtures — by shrinking the stack until a scenario stops passing:
+
+|Block|Deepest scenario|Bytes|
+|---|---|---|
+|`transform`|`03_property_failure` (`eio_configure`, property evaluation, failure path)|**3 252**|
+|`counter`|`11_state_throttled` / `12_capability_denied`|3 000|
+|`filter`|`16_filter_routing`|2 304|
+|`emitter`|`13_timer_emitter`|2 292|
+|`gpio-echo`|`14_gpio_echo`|2 292|
+|hostile blocks and `.wat` fixtures|`31_i2c_write_read_and_read` is the largest|≤ 340|
+
+**So 8 KiB held, at 2.5× the worst golden block.** The number stays 8 KiB rather than dropping to the measured 3 252 bytes, and the margin is the reason: the golden blocks are small by construction, a field block need not be, and WAMR's own `DEFAULT_WASM_STACK_SIZE` (`core/config.h`) is 12–16 KiB for a general-purpose host — so 8 KiB is already below what upstream picks, and the margin is what makes that defensible rather than merely small. What the bisection measures is bytes and not frames: WAMR's `wasm_exec_env_alloc_wasm_frame` bumps a pointer by a per-function frame size and refuses when twice that size will not fit, so "the depth a block needs" only has one answer in bytes.
+
+Two things this does **not** settle, both §11's. It is the *interpreter*'s frame layout, and §3 deploys **AOT**, whose frames are the compiler's; and it is a 64-bit host, where WAMR's frame headers carry 64-bit pointers. Both point the same way — a 32-bit target's frames are smaller — but "probably smaller" is not a measurement, which is why the bring-up still has this on its list.
 
 Outside the heap and additional to it: §4.1's **32 KiB native stack reserve**, and whatever `.data`/`.bss` the image and WAMR's runtime globals need, which is measured from the linked image rather than chosen. 192 + 32 = 224 KiB of 313 KiB, leaving ≈ 89 KiB for statics and the loaded modules.
 
@@ -167,7 +184,7 @@ Outside the heap and additional to it: §4.1's **32 KiB native stack reserve**, 
 - **4096 is EXPR §9's `MAX_VALUE_BYTES` floor**, and choosing it there is the whole argument: a conforming expression may build a value whose canonical encoding is 4 096 bytes, and a leaf whose `max_payload` were smaller would make a value the language guarantees can be *built* impossible to *emit* — the §4.1 shape of divergence, in a third place. Framing means a batch of exactly one maximal value does not fit, which is the honest cost of not sizing above the floor.
 - **8 delivered signals** is a delivery bound only (ABI §9.7 rule 8): a leaf block may still emit a larger batch and the leaf routes it. It is deliberately small because §4.4's deadline is derived from it — `max_batch` is the one number that appears in both budgets, and a leaf that raises it pays in wall-clock time as well as in RAM.
 
-**What §11's bring-up must report back:** the linked image's `.data`/`.bss` and WAMR's runtime globals, which decide whether 89 KiB of headroom is real; the engine execution stack a golden block actually needs, against the 8 KiB assumed; and the expansion factor §4.3 defines, which is measured there on a 64-bit host and is the least certain number in either section.
+**What §11's bring-up must report back:** the linked image's `.data`/`.bss` and WAMR's runtime globals, which decide whether 89 KiB of headroom is real; the engine execution stack a golden block actually needs **on the target and in AOT mode** — the table above answers it for WAMR's interpreter on a 64-bit host, which is the half that can be measured without a board; and the expansion factor §4.3 defines, which is measured there on a 64-bit host and is the least certain number in either section.
 
 ### 4.3 When a batch will not fit
 
