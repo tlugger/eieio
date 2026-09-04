@@ -1,0 +1,26 @@
+# SDK §5.2's shadow-stack default for ABI §13.2's golden blocks.
+#
+# `wasm-ld` defaults the shadow stack to 1 MiB, which made all five of these declare a
+# minimum linear memory of 17 pages — 1088 KiB, three and a half times the whole of LEAF
+# §4.2's v1 target chip, so none of them could be instantiated on a leaf at all. At 16 KiB
+# they declare one page each and nothing else about them changes: the modules differ from
+# their 1 MiB-stack builds by three bytes.
+#
+# The workspace's `[profile.release]` restates the rest of §5.2 for the same reason and in
+# the same spirit; a rustflag simply cannot live in a `Cargo.toml`. `cargo eio build` passes
+# the equivalent `build.rustflags` itself, so a golden block built through the tooling gets
+# the same stack whatever the working directory — this file is what the *plain*
+# `cargo build` the harness and `just build-golden` run needs.
+#
+# **Cargo finds this file by walking up from the working directory, never from
+# `--manifest-path`.** All three plain builds of these blocks therefore set their working
+# directory here — `eio_conformance::golden::build`, `eio_leaf::fixtures::build`, and
+# `just build-golden`, which is why that recipe `cd`s instead of pointing at the manifest.
+# A build that forgets to would silently produce the 17-page modules again;
+# `crates/conformance/tests/golden.rs` is the test that would notice.
+#
+# `[target.<triple>]` rather than `[build]` deliberately: it is the higher-priority of the
+# two rustflags sources, so raising the number here would also outrank `cargo eio build`'s
+# own default — the same lever SDK §5.1 gives a generated block repo.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=16384"]

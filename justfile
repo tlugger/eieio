@@ -202,8 +202,16 @@ test-golden:
 #
 # Building first makes every later invocation a no-op that touches no artifact, which is the
 # fix: the race needs a *writer*, and after this there is none.
+#
+# `cd` rather than `--manifest-path`, and that is load-bearing rather than a style: cargo
+# discovers `.cargo/config.toml` by walking up from the *working directory*, and
+# `examples/blocks/.cargo/config.toml` is where SDK §5.2's shadow-stack default lives for
+# these blocks. Pointed at the manifest from here it would be silently ignored, and the
+# golden blocks would go back to declaring 17 pages of linear memory — which is also the
+# working directory `eio_conformance::golden::build` and `eio_leaf::fixtures::build` use,
+# so all three plain builds agree.
 build-golden:
-    cargo build --release --manifest-path examples/blocks/Cargo.toml --target {{ guest_target }}
+    cd examples/blocks && cargo build --release --target {{ guest_target }}
 
 # Emit the daemon's and the Designer backend's own response shapes for the Designer's parity
 # checks, up front.

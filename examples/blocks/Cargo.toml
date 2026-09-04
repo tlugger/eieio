@@ -18,6 +18,11 @@ members = ["counter", "emitter", "filter", "gpio-echo", "transform"]
 # Stated once here rather than per block. SDK §5.2's defaults are what `cargo eio build`
 # enforces anyway; restating them means a plain `cargo build --release` produces the same
 # modules, which is what the conformance suite reads off disk.
+#
+# §5.2's other default — the 16 KiB shadow stack that keeps a block's declared linear
+# memory at one page — is a rustflag and cannot live in a `Cargo.toml`. It is in
+# `.cargo/config.toml` beside this file, which says at length why every plain build of
+# these blocks has to set its working directory here to pick it up.
 [profile.release]
 panic = "abort"
 opt-level = "z"
