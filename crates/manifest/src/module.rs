@@ -107,10 +107,23 @@ pub struct Module<'a> {
     pub exports: Vec<Export<'a>>,
     /// The `eio:manifest` custom section's bytes, if the module carries one (§4.4).
     pub manifest_section: Option<&'a [u8]>,
+    /// The declared **minimum** size, in 64 KiB pages, of the first memory the module
+    /// defines — the memory a host MUST be able to allocate before the instance exists.
+    ///
+    /// `None` when the module declares none, which for a conforming block cannot happen:
+    /// §3 requires an exported `memory` and every import MUST be an `eio:*` function
+    /// (§4.3, §7), so a block's memory is always one it defines itself.
+    ///
+    /// Read out unconditionally, not behind the portable-subset policy, because it is not
+    /// a judgement: it is the one number about a module a memory-constrained host has to
+    /// know *before* it decides whether it can run it. LEAF §4.2 refuses a module whose
+    /// minimum exceeds its per-instance page budget at firmware build time, and SDK §5.2's
+    /// link default is what keeps a block built with `cargo eio build` at one page.
+    pub min_pages: Option<u64>,
 }
 
 impl<'a> Module<'a> {
-    /// Reads a module's imports, exports, and manifest section.
+    /// Reads a module's imports, exports, manifest section and declared memory size.
     ///
     /// Fails only if the bytes are not a readable WASM module. Everything else — a
     /// missing export, a wrong signature, an import from nowhere — is a finding for
@@ -144,6 +157,7 @@ impl<'a> Module<'a> {
         let mut imports = Vec::new();
         let mut exports: Vec<Export<'a>> = Vec::new();
         let mut manifest_section = None;
+        let mut min_pages = None;
 
         // Signatures by type index, and the type index of every function. Imported
         // functions occupy the function index space *before* defined ones, so an
@@ -203,11 +217,17 @@ impl<'a> Module<'a> {
                     // here — every import MUST be an `eio:*` function (§4.3, §7), so
                     // `crate::check::check_imports` refuses one whatever its flags
                     // say, and it says the more useful thing.
-                    if policy.is_some() {
-                        for memory in reader {
-                            portable::memory_declaration(
-                                &memory.map_err(ModuleError::Unreadable)?,
-                            )?;
+                    for memory in reader {
+                        let memory = memory.map_err(ModuleError::Unreadable)?;
+                        // The first, because a conforming module has exactly one:
+                        // `portable::memory_declaration` refuses `shared` and 64-bit
+                        // memories and the multi-memory proposal is outside §4.3's
+                        // accepted set, so a second declaration is a module no host
+                        // loads. Recorded before that judgement rather than after,
+                        // so the plain reader answers too.
+                        min_pages.get_or_insert(memory.initial);
+                        if policy.is_some() {
+                            portable::memory_declaration(&memory)?;
                         }
                     }
                 }
@@ -263,6 +283,7 @@ impl<'a> Module<'a> {
             imports,
             exports,
             manifest_section,
+            min_pages,
         })
     }
 
