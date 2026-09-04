@@ -238,7 +238,7 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// block instances rather than one, at 2 × 64 + 2 × 8 + 48 = 192 KiB exactly. Both of those
 /// numbers have been wrong in both directions inside one epic, which is the argument for a
 /// reserve that is re-measured on every `just ci` rather than quoted. §4.2 carries the
-/// arithmetic.
+/// arithmetic and [`V1_MAX_INSTANCES`] is it, evaluated.
 ///
 /// # Where it is enforced, and why in two places
 ///
@@ -262,6 +262,70 @@ pub fn leaf_budgets() -> ExprBudgets {
 /// ceiling is a compile-time define of a published crate. See [`wamr::instantiate`] and
 /// `tests/memory_growth.rs` for the gap and where its fix belongs.
 pub const V1_MEMORY_PAGES: u32 = 1;
+
+/// The engine execution stack a leaf reserves per instance — LEAF §4.2's second table row.
+///
+/// 8 KiB, measured by `tests/exec_stack.rs` by bisection over every ABI §13 scenario WAMR's
+/// interpreter reaches: the deepest golden block needs 3 252 bytes, so this is 2.5× the worst
+/// case and still below WAMR's own `DEFAULT_WASM_STACK_SIZE`. [`wamr::EXEC_STACK_SIZE`] is
+/// this constant, and that is where the measurement and its caveats are written down.
+///
+/// **Here rather than only there** because §4.2's floor is a sum and the thing that adds it up
+/// must be able to read every row. [`V1_MAX_INSTANCES`] is that sum; `crates/leaf-gen` reads
+/// it, and it depends on this crate with `default-features = false`, so a row behind an engine
+/// feature is a row the arithmetic cannot see.
+pub const V1_EXEC_STACK_BYTES: u32 = 8 * 1024;
+
+/// The shared signal working set — LEAF §4.2's third table row, and the only one that is not
+/// per-instance.
+///
+/// One decoded batch in flight, the bounded emission queue, and one mailbox slot per
+/// connection (DAEMON §6.2). A leaf runs one callback at a time, so only the running
+/// instance's batch is live, which is what makes 48 KiB a constant rather than a multiple.
+pub const V1_SIGNAL_WORKING_SET_BYTES: u32 = 48 * 1024;
+
+/// The heap floor a v1 firmware build fails below — LEAF §4.2's derived 192 KiB.
+///
+/// Not a size a leaf allocates: §4.2 gives the allocator everything between the end of `.bss`
+/// and the top of `DRAM`, and this is the number that remainder is *checked against*. It sits
+/// 8 KiB above the 184 KiB the rows below it sum to, and that rounding is the table's only
+/// picked number — a floor sitting exactly on a measurement fails on the first block a hair
+/// larger than a golden one.
+pub const V1_HEAP_FLOOR_BYTES: u32 = 192 * 1024;
+
+/// How many block instances a v1 leaf image carries — LEAF §4.2's headline, evaluated rather
+/// than restated.
+///
+/// **Two**, and the arithmetic is the whole of the answer: the floor less the shared working
+/// set, divided by what one instance costs.
+///
+/// ```text
+/// (192 - 48) KiB / (1 × 64 KiB + 8 KiB) = 147 456 / 73 728 = 2
+/// ```
+///
+/// This is spelled as an expression over the table's own rows rather than as a `2` because
+/// every input to it has been wrong at least once. [`V1_MEMORY_PAGES`] read 17 while SDK §5.2
+/// had no link default, then two while `dlmalloc` declined the linker's remainder, and is one
+/// now; [`V1_EXEC_STACK_BYTES`] was 8 MiB in the binding underneath it. A hard-coded instance
+/// count would have survived all four of those unchanged and been wrong after each.
+///
+/// # What a build does with it
+///
+/// `eio_leaf_gen` refuses a service file with more instances than this, at firmware build
+/// time, naming both numbers — the same class of refusal and the same place as the
+/// per-instance page budget above. There is no runtime check and there should not be: nothing
+/// is loaded on a leaf (§6.3), so a graph that does not fit is a build that must not produce
+/// an image, not a device that discovers it in the field.
+///
+/// # What it is not
+///
+/// Not a statement about the *part*. 313 KiB of DRAM less §4.1's 32 KiB native stack reserve
+/// would arithmetically hold three instances at 264 KiB, leaving ≈ 17 KiB for the image's
+/// `.data`/`.bss` and WAMR's runtime globals — which §4.2 lists as unmeasured until the MCU
+/// bring-up. The floor is what a build fails against, and it is deliberately the conservative
+/// number.
+pub const V1_MAX_INSTANCES: u32 = (V1_HEAP_FLOOR_BYTES - V1_SIGNAL_WORKING_SET_BYTES)
+    / (V1_MEMORY_PAGES * 64 * 1024 + V1_EXEC_STACK_BYTES);
 
 /// A leaf's own ABI §5.2 limits (LEAF §4.2, §4.3): `max_payload` 4 096, `max_batch` 8,
 /// `max_emission_bytes` 4 096.

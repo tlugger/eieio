@@ -94,6 +94,21 @@ pub use emit::emit;
 /// [`Inputs::memory_pages`] is how a build states a different number.
 pub const V1_MEMORY_PAGES: u64 = eio_leaf::V1_MEMORY_PAGES as u64;
 
+/// How many block instances the v1 leaf target's heap floor carries (LEAF §4.2).
+///
+/// **`eio_leaf::V1_MAX_INSTANCES` widened, and derived there rather than picked here.** It is
+/// §4.2's table, evaluated: the 192 KiB floor less the 48 KiB shared working set, divided by
+/// what one instance costs — [`V1_MEMORY_PAGES`] of guest linear memory plus an 8 KiB engine
+/// execution stack. Two, for v1.
+///
+/// §4.2 states the consequence as a MUST, and it is the same shape as the page budget beside
+/// it: **a leaf refuses, at firmware build time, a service file with more block instances
+/// than its heap floor carries.** The two refusals are deliberately the same class in the
+/// same place — a leaf loads nothing (§6.3), so every admission a daemon would make at load
+/// time falls here, where it costs a build rather than a field failure.
+/// [`Inputs::max_instances`] is how a build states a different number.
+pub const V1_MAX_INSTANCES: u64 = eio_leaf::V1_MAX_INSTANCES as u64;
+
 /// Everything a firmware build states before a graph can be baked (LEAF §6, §6.4.3).
 #[derive(Debug, Clone)]
 pub struct Inputs<'a> {
@@ -128,6 +143,14 @@ pub struct Inputs<'a> {
     /// because the budget is a function of the *target's* heap (§4.2 derives it from a 313
     /// KiB part), and because a host bring-up is not that target.
     pub memory_pages: u64,
+    /// How many block instances this target's heap floor carries (LEAF §4.2).
+    ///
+    /// [`V1_MAX_INSTANCES`] is the v1 leaf target's, and it is an input for exactly the same
+    /// reason [`Self::memory_pages`] is: both are functions of the target's heap rather than
+    /// properties of the platform. The two are not independent — §4.2's floor divides by the
+    /// page budget to get this one — so a build that states one and not the other has written
+    /// down an arithmetic it does not believe.
+    pub max_instances: u64,
 }
 
 /// The bus configuration a build states, as `pubsub.toml`'s own fields (DAEMON §7.1).
@@ -307,6 +330,21 @@ pub fn bake(inputs: &Inputs<'_>) -> Result<Baked, Error> {
         return Err(Error::Resolved(resolved));
     }
 
+    // LEAF §4.2's *other* admission bound: the page budget above asks whether one block fits an
+    // instance, this asks whether the graph's instances fit the heap. It runs here, after both
+    // SERVICE §7 stages and after every module has been admitted, deliberately: "this is a
+    // valid service and it does not fit this target" is a diagnosis, while the same message
+    // over a service file that names a block the build cannot supply would be an accusation
+    // about the wrong thing. Nothing read above can change the answer — every instance costs
+    // one page and one execution stack whatever its block is — so the ordering buys legibility
+    // and costs only a few module reads on a build that was going to fail anyway.
+    if parsed.service.blocks.len() as u64 > inputs.max_instances {
+        return Err(Error::InstanceBudget {
+            instances: parsed.service.blocks.keys().cloned().collect(),
+            budget: inputs.max_instances,
+        });
+    }
+
     // The limits are the runtime crate's, evaluated here only so the assertion in §6.4.4's
     // parity suite has the same value the emitted `eio_leaf::leaf_limits()` will have.
     // §6.4.3: `[limits]` is baked and `[budgets]` is not a build input at all — §4 fixes them.
@@ -442,6 +480,23 @@ pub enum Error {
         /// The budget it exceeded.
         budget: u64,
     },
+    /// LEAF §4.2's instance budget: the service names more block instances than this
+    /// target's heap floor carries.
+    ///
+    /// The sibling of [`Error::MemoryBudget`], deliberately the same class of refusal in the
+    /// same place. That one is about one block declaring more than an instance may have; this
+    /// one is about a graph wanting more instances than the heap has room for, which no block
+    /// can be blamed for and no rebuild can fix.
+    InstanceBudget {
+        /// The instance ids the service file names, in the order the file yields them.
+        ///
+        /// Carried whole rather than counted, because "you have seven and may have two" is
+        /// not actionable and naming the seven is: what a deployer does next is decide which
+        /// of them moves to another node.
+        instances: Vec<String>,
+        /// How many this target's heap floor carries.
+        budget: u64,
+    },
     /// ABI §11.1's required/default rule refused this instance's properties.
     Property {
         /// The instance id.
@@ -526,6 +581,25 @@ impl fmt::Display for Error {
                          or run it on a node with room for it.",
                 }
             ),
+            Error::InstanceBudget { instances, budget } => {
+                writeln!(
+                    f,
+                    "this service names {} block instances and this leaf's heap floor carries \
+                     {budget} (LEAF §4.2):",
+                    instances.len()
+                )?;
+                for id in instances {
+                    writeln!(f, "  - {id}")?;
+                }
+                write!(
+                    f,
+                    "Unlike a block over the page budget, this is not something a rebuild \
+                     fixes: §4.2 derives the count from the target's heap, and every instance \
+                     costs a page of guest linear memory plus an engine execution stack \
+                     whatever the block is. Split the graph across nodes, or build for a part \
+                     with more SRAM."
+                )
+            }
             Error::Property { id, error } => {
                 write!(f, "instance {id:?} cannot be configured: {error}")
             }

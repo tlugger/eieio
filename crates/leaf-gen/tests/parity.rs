@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use eio_host_core::{
     Connection, Descriptor, Endpoint, Overflow, PORT_ERR, Port, PropertySource, Routes, Target,
 };
-use eio_leaf_gen::{Baked, Error, Inputs, V1_MEMORY_PAGES};
+use eio_leaf_gen::{Baked, Error, Inputs, V1_MAX_INSTANCES, V1_MEMORY_PAGES};
 use eio_manifest::MemoryBound;
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
@@ -95,6 +95,7 @@ fn bake(path: &Path, memory_pages: u64) -> Result<Baked, Error> {
         artifacts: &artifacts(),
         transport: None,
         memory_pages,
+        max_instances: V1_MAX_INSTANCES,
     })
 }
 
@@ -220,6 +221,7 @@ fn instances_of_one_block_share_one_artifact() {
         artifacts: &artifacts(),
         transport: None,
         memory_pages: GOLDEN_BLOCK_PAGES,
+        max_instances: V1_MAX_INSTANCES,
     })
     .expect("two instances of one block bake");
 
@@ -482,6 +484,7 @@ fn an_invalid_service_file_is_refused_before_the_build() {
         artifacts: &artifacts(),
         transport: None,
         memory_pages: GOLDEN_BLOCK_PAGES,
+        max_instances: V1_MAX_INSTANCES,
     })
     .expect_err("an unclosed expression is a stage-1 rejection");
     assert!(matches!(error, Error::Parse(_)), "{error}");
@@ -519,6 +522,7 @@ fn a_module_failing_the_abi_4_3_cross_check_is_refused_at_generation_time() {
         artifacts: &BTreeMap::from([("bad:1.0.0".to_string(), path)]),
         transport: None,
         memory_pages: GOLDEN_BLOCK_PAGES,
+        max_instances: V1_MAX_INSTANCES,
     })
     .expect_err("an undeclarable import is an ABI §4.3 refusal");
     assert!(matches!(error, Error::Manifest { .. }), "{error}");
@@ -626,6 +630,146 @@ fn a_maximum_over_budget_is_refused_with_its_own_advice() {
     );
 }
 
+// ── §4.2's other admission bound: how many instances the heap carries ────────
+
+/// §4.2's instance arithmetic, evaluated rather than asserted against a literal.
+///
+/// The floor less the shared working set, divided by what one instance costs. Written out here
+/// as the sum rather than as `assert_eq!(V1_MAX_INSTANCES, 2)` for the reason the constant is
+/// derived in the first place: every input to it has been wrong at least once — the page
+/// budget read 17, then two, and is one; the execution stack was 8 MiB in the binding that
+/// used it — and a test that pinned the *answer* would have had to be edited after each,
+/// which is a test agreeing with whatever the code says.
+#[test]
+fn the_instance_budget_is_leaf_4_2s_table_divided_out() {
+    let per_instance =
+        u64::from(eio_leaf::V1_MEMORY_PAGES) * 64 * 1024 + u64::from(eio_leaf::V1_EXEC_STACK_BYTES);
+    let shared = u64::from(eio_leaf::V1_SIGNAL_WORKING_SET_BYTES);
+    let floor = u64::from(eio_leaf::V1_HEAP_FLOOR_BYTES);
+
+    assert_eq!(
+        V1_MAX_INSTANCES,
+        (floor - shared) / per_instance,
+        "LEAF §4.2's floor is a sum and this is it divided out — if they disagree, the table \
+         and the constant have drifted"
+    );
+    assert!(
+        V1_MAX_INSTANCES * per_instance + shared <= floor,
+        "the budget must fit inside the floor it was derived from"
+    );
+    assert!(
+        (V1_MAX_INSTANCES + 1) * per_instance + shared > floor,
+        "and one more must not, or the floor is buying instances nobody counted"
+    );
+}
+
+/// The fixture the whole of §6.4.4's parity suite is built on still fits, at the real budget.
+///
+/// `counter-transform.toml` is two instances, and this is the assertion that made
+/// eieio-x7g.2.29 a bead: while the per-instance reserve read two pages, §4.2's floor carried
+/// **one** instance and this fixture could not have been baked into a v1 image at all. SDK
+/// §4.1's allocator granularity brought the reserve back to one page, the floor back to two
+/// instances, and this fixture back inside it — at 2 × 64 + 2 × 8 + 48 = 192 KiB exactly, with
+/// nothing to spare and nothing borrowed.
+#[test]
+fn the_two_instance_parity_fixture_fits_a_v1_image() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/services/counter-transform.toml");
+    let baked = bake(&path, V1_MEMORY_PAGES).expect("counter-transform bakes at the v1 budget");
+    assert_eq!(
+        baked.graph.instances.len() as u64,
+        2,
+        "the fixture is two instances, which is what makes it the interesting one"
+    );
+    assert!(
+        baked.graph.instances.len() as u64 <= V1_MAX_INSTANCES,
+        "and a v1 image carries {V1_MAX_INSTANCES}"
+    );
+}
+
+/// A service with more instances than the heap carries is refused at build time, naming them.
+///
+/// The sibling of [`a_module_over_the_page_budget_is_refused`], and §4.2 makes it the same
+/// MUST in the same place for the same reason: a leaf loads nothing (§6.3), so the admission a
+/// daemon would make at load time falls at the firmware build, where a refusal costs a build
+/// rather than a field failure. What it must *not* be is silence — an image that overruns its
+/// heap on the third instance's `wasm_runtime_create_exec_env` fails on a device, with no log
+/// stream to say why (§4.6).
+///
+/// Three instances of `transform`, because the budget is two and one artifact serving three
+/// instances is the case §6.4.2 makes cheap in flash and does nothing for in RAM: the refusal
+/// must be about instances, not about modules.
+#[test]
+fn a_service_with_more_instances_than_the_heap_carries_is_refused() {
+    let text = "name = \"too-many\"\n\nconnections = [ \"a.out -> b.in\", \"b.out -> c.in\" ]\n\n\
+                [blocks.a]\nblock = \"transform:1.0.0\"\n\n\
+                [blocks.b]\nblock = \"transform:1.0.0\"\n\n\
+                [blocks.c]\nblock = \"transform:1.0.0\"\n";
+    let error = eio_leaf_gen::bake(&Inputs {
+        service_path: Path::new("too-many.toml"),
+        service_text: text,
+        node_id: "n-parity",
+        node_name: None,
+        artifacts: &artifacts(),
+        transport: None,
+        memory_pages: V1_MEMORY_PAGES,
+        max_instances: V1_MAX_INSTANCES,
+    })
+    .expect_err("three instances is over a budget of two");
+
+    let Error::InstanceBudget { instances, budget } = &error else {
+        panic!("expected an instance-budget refusal, got {error}");
+    };
+    assert_eq!(instances.len(), 3, "the three it found");
+    assert_eq!(*budget, V1_MAX_INSTANCES, "the budget it exceeded");
+
+    let message = error.to_string();
+    assert!(message.contains("LEAF §4.2"), "{message}");
+    for id in ["a", "b", "c"] {
+        assert!(
+            message.contains(id),
+            "the refusal names the instances so a deployer knows what to move: {message}"
+        );
+    }
+    assert!(
+        !message.contains("stack-size"),
+        "this is not a link-flag problem and saying so would send a deployer to a knob that \
+         cannot help: {message}"
+    );
+    assert!(
+        message.contains("more SRAM") || message.contains("across nodes"),
+        "the refusal names the levers, because neither is a rebuild: {message}"
+    );
+}
+
+/// A sound service is diagnosed as *sound and too large*, not as something else.
+///
+/// The ordering this pins is the reason the check sits after both SERVICE §7 stages rather
+/// than immediately after the parse, where it started: `kitchen.toml` is four instances *and*
+/// names blocks this repository does not build, and "you have four and may have two" is the
+/// wrong first thing to say about a service file whose blocks the build cannot supply at all.
+#[test]
+fn a_service_that_is_also_broken_is_refused_for_being_broken_first() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/services/kitchen.toml");
+    let text = std::fs::read_to_string(&path).expect("reading kitchen.toml");
+    let error = eio_leaf_gen::bake(&Inputs {
+        service_path: &path,
+        service_text: &text,
+        node_id: "n-parity",
+        node_name: None,
+        artifacts: &artifacts(),
+        transport: None,
+        memory_pages: V1_MEMORY_PAGES,
+        max_instances: V1_MAX_INSTANCES,
+    })
+    .expect_err("kitchen.toml names blocks this repository does not build");
+
+    assert!(
+        matches!(error, Error::NoArtifact { .. }),
+        "the missing artifact is the actionable one and comes first, got {error}"
+    );
+}
+
 // ── what the generated text says ─────────────────────────────────────────────
 
 /// The emitted source is a rendering of the baked graph and carries every field of it.
@@ -694,6 +838,7 @@ fn a_bus_configuration_is_baked() {
             key: Some(b"sh".to_vec()),
         }),
         memory_pages: V1_MEMORY_PAGES,
+        max_instances: V1_MAX_INSTANCES,
     })
     .expect("minimal.toml bakes");
 
