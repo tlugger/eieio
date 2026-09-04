@@ -107,6 +107,22 @@ pub struct Module<'a> {
     pub exports: Vec<Export<'a>>,
     /// The `eio:manifest` custom section's bytes, if the module carries one (§4.4).
     pub manifest_section: Option<&'a [u8]>,
+    /// The declared **minimum** size, in 64 KiB pages, of the memory the module defines
+    /// itself — [`None`] for a module that declares none.
+    ///
+    /// Read in this walk rather than by a second one over the same bytes, because there is
+    /// exactly one reader of a `.wasm` in this repository and that is worth keeping.
+    /// Nothing in ABI §4 judges the number: a host with room for it runs the module, and
+    /// the load-time cross-check has no opinion. It is read because LEAF §4.2 gives a
+    /// *leaf* one — a per-instance page budget a firmware build refuses a module against,
+    /// "the same class of check as ABI §4.3's load-time cross-check", made on the build
+    /// host where a refusal costs a build rather than a field failure.
+    ///
+    /// The *minimum*, because that is what an instantiation has to be able to satisfy; a
+    /// declared maximum only bounds growth, and costs nothing until a module grows into it.
+    /// A module declaring a second memory is refused by [`crate::portable`] long before
+    /// anything reads this, so only the first is recorded.
+    pub memory_pages: Option<u64>,
 }
 
 impl<'a> Module<'a> {
@@ -144,6 +160,7 @@ impl<'a> Module<'a> {
         let mut imports = Vec::new();
         let mut exports: Vec<Export<'a>> = Vec::new();
         let mut manifest_section = None;
+        let mut memory_pages = None;
 
         // Signatures by type index, and the type index of every function. Imported
         // functions occupy the function index space *before* defined ones, so an
@@ -203,12 +220,15 @@ impl<'a> Module<'a> {
                     // here — every import MUST be an `eio:*` function (§4.3, §7), so
                     // `crate::check::check_imports` refuses one whatever its flags
                     // say, and it says the more useful thing.
-                    if policy.is_some() {
-                        for memory in reader {
-                            portable::memory_declaration(
-                                &memory.map_err(ModuleError::Unreadable)?,
-                            )?;
+                    for memory in reader {
+                        let memory = memory.map_err(ModuleError::Unreadable)?;
+                        if policy.is_some() {
+                            portable::memory_declaration(&memory)?;
                         }
+                        // First only: a second memory is `portable::memory_declaration`'s
+                        // refusal to make, and `get_or_insert` keeps this from quietly
+                        // becoming a second opinion about which one counts.
+                        memory_pages.get_or_insert(memory.initial);
                     }
                 }
                 Payload::ExportSection(reader) => {
@@ -262,6 +282,7 @@ impl<'a> Module<'a> {
         Ok(Module {
             imports,
             exports,
+            memory_pages,
             manifest_section,
         })
     }
