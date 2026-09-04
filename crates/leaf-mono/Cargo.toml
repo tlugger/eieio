@@ -1,0 +1,28 @@
+[package]
+name = "eio-leaf-mono"
+description = "Instantiates the leaf's portable half at concrete types, so the bare-metal gate emits machine code for it instead of only type-checking it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Never published. This crate is a gate fixture: `just`'s `publish_set` does not name it, and
+# nothing depends on it — `cargo build --package eio-leaf-mono` is its only caller.
+publish = false
+
+[dependencies]
+# The runtime half, and the only reason this crate exists. The workspace entry already carries
+# `default-features = false`, so nothing here can drag wasm3, WAMR or `std` in behind the
+# gate's back — a member cannot turn a workspace dependency's defaults back on by inheriting
+# it, and this crate names no feature.
+eio-leaf.workspace = true
+
+# The traits the stand-ins implement — `Engine`, `Entropy`, `StateStore` — and the `Clock`
+# this crate deliberately does NOT re-implement: `eio_host_core` already ships a fixed
+# `ClockSource` (ABI §13.1's shape), and a second one here would be the duplicate
+# eieio-x7g.4 refused.
+eio-host-core.workspace = true
+
+[lints]
+workspace = true
