@@ -2,6 +2,7 @@
 
 use alloc::string::String;
 
+use minicbor::data::Type;
 use minicbor::decode::{Decode, Decoder, Error as CborError};
 use minicbor::encode::{Encode, Encoder, Error as EncodeError, Write};
 
@@ -210,11 +211,25 @@ impl Signal {
     ///
     /// The typed counterpart to the [`Decode`] impl, which cannot carry a
     /// [`DecodeError`] because the trait fixes its error type.
+    ///
+    /// `max_depth` bounds each attribute **value**, not the signal: the signal's own map is
+    /// not a level (ABI §6.3.1 rule 9), because an attribute is what an expression builds and
+    /// EXPR §9's `MAX_DEPTH` bounds it on its own. Counting the map would refuse at the boundary
+    /// a value one level inside every expression budget — the divergence rule 9 exists to
+    /// prevent. So its entries are read at depth 0, as a bare value's would be.
     pub(crate) fn decode_from(d: &mut Decoder<'_>, max_depth: u32) -> Result<Self, DecodeError> {
-        let attributes = Value::decode_at(d, 0, max_depth)?;
-        if !matches!(attributes, Value::Map(_)) {
-            return Err(DecodeError::SignalNotAMap);
-        }
+        let start = d.position();
+        let attributes = match d.datatype()? {
+            Type::Map => Value::Map(Value::decode_map(d, start, 0, max_depth)?),
+            // Anything else is refused, but decoded first so a malformed item is named for
+            // what is wrong with it (a tag, an indefinite length) rather than only for not
+            // being a map — the reason is diagnostic (§6.3.1), and the precise one is the
+            // one a tap should show.
+            _ => {
+                Value::decode_at(d, 0, max_depth)?;
+                return Err(DecodeError::SignalNotAMap);
+            }
+        };
         Ok(Self { attributes })
     }
 }

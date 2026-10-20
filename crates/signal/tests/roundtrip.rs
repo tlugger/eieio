@@ -295,17 +295,18 @@ fn equality_is_exact_not_numeric() {
 /// rejection is an error, not a stack overflow.
 #[test]
 fn depth_limit_boundary() {
-    // The signal's own map decodes at depth 0, so a value nested `k` deep has
-    // its innermost item at depth `k + 1`. The boundary is therefore exactly
-    // `MAX_DEPTH - 1` accepted / `MAX_DEPTH` rejected — pinned on both sides so
+    // The bound applies to an attribute value: neither the batch's array nor
+    // the signal's own map counts (ABI §6.3.1 rule 9), so this is the same
+    // measure EXPR §9 bounds a constructed value by. The boundary is exactly
+    // `MAX_DEPTH` accepted / `MAX_DEPTH + 1` rejected — pinned on both sides so
     // an off-by-one in either direction fails this test.
-    let bytes = batch_of(nest(MAX_DEPTH - 1)).to_cbor();
+    let bytes = batch_of(nest(MAX_DEPTH)).to_cbor();
     assert!(
         Batch::from_cbor(&bytes).is_ok(),
         "nesting to exactly MAX_DEPTH must be accepted"
     );
 
-    let bytes = batch_of(nest(MAX_DEPTH)).to_cbor();
+    let bytes = batch_of(nest(MAX_DEPTH + 1)).to_cbor();
     let err = Batch::from_cbor(&bytes).expect_err("nesting past MAX_DEPTH must be rejected");
     assert!(
         matches!(err, DecodeError::DepthExceeded),
@@ -361,10 +362,9 @@ fn depth_limit_is_configurable() {
 /// still fails, which proves the clamp lands *on* the floor rather than above it.
 #[test]
 fn depth_limit_cannot_go_below_the_expr_floor() {
-    // The floor guarantees MIN_DEPTH levels of nesting are decodable. A value
-    // nested MIN_DEPTH - 1 deep sits at depth MIN_DEPTH once wrapped in its signal
-    // map, matching the accounting in depth_limit_boundary.
-    let at_floor = batch_of(nest(MIN_DEPTH - 1)).to_cbor();
+    // The floor guarantees an attribute value MIN_DEPTH levels deep is decodable,
+    // with the accounting in depth_limit_boundary.
+    let at_floor = batch_of(nest(MIN_DEPTH)).to_cbor();
     for requested in [0, 1, 8, MIN_DEPTH - 1, MIN_DEPTH] {
         assert!(
             Batch::from_cbor_with_max_depth(&at_floor, requested).is_ok(),
@@ -374,7 +374,7 @@ fn depth_limit_cannot_go_below_the_expr_floor() {
 
     // One level deeper than the floor is refused when the clamp is what applies,
     // so the clamp is not silently raising the bound further than claimed.
-    let past_floor = batch_of(nest(MIN_DEPTH)).to_cbor();
+    let past_floor = batch_of(nest(MIN_DEPTH + 1)).to_cbor();
     assert!(
         matches!(
             Batch::from_cbor_with_max_depth(&past_floor, 0),

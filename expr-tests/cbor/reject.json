@@ -153,6 +153,15 @@
       "note": "Two hundred levels of nested array, asked of a decoder bounded at EXPR §9's floor. A host configured higher would accept it, so the vector states the bound it asserts at rather than assuming one; `depth` is clamped up to the floor, never down, so the floor is what this exercises."
     },
     {
+      "name": "nesting-one-past-the-floor",
+      "bytes": "81a1616181818181818181818181818181818181818181818181818181818181818181818101",
+      "reject": true,
+      "rule": [9],
+      "depth": 1,
+      "spec": "§6.3.1 rule 9",
+      "note": "One array more than `nesting-exactly-at-the-floor`, at the same bound: the other side of the boundary, so a host counting one level too few fails here as one counting one too many fails there."
+    },
+    {
       "name": "trailing-bytes",
       "bytes": "8000",
       "reject": true,

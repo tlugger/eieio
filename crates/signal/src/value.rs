@@ -227,15 +227,17 @@ impl Value {
     }
 
     /// Decodes one value, enforcing eieio's canonical form (ABI §6.3.1).
+    ///
+    /// `depth` is the number of arrays and maps enclosing this item, so a value nests as deep
+    /// as the arrays and maps on its deepest path — scalars add nothing, an empty array adds
+    /// one. That is the measure ABI §6.3.1 rule 9 bounds and EXPR §9 bounds a constructed value
+    /// by, and it has to be the same measure on both sides for rule 9's "at least the
+    /// expression `MAX_DEPTH`" to mean anything.
     pub(crate) fn decode_at(
         d: &mut Decoder<'_>,
         depth: u32,
         max_depth: u32,
     ) -> Result<Self, DecodeError> {
-        if depth > max_depth {
-            return Err(DecodeError::DepthExceeded);
-        }
-
         let start = d.position();
         match d.datatype()? {
             Type::Null => {
@@ -290,6 +292,7 @@ impl Value {
             }
 
             Type::Array => {
+                Self::check_depth(depth, max_depth)?;
                 let n = Self::definite_len(d.array()?)?;
                 Self::check_len_head(d, start, n as usize, 0)?;
                 let mut items = Vec::new();
@@ -302,30 +305,8 @@ impl Value {
                 Ok(Value::Array(items))
             }
             Type::Map => {
-                let n = Self::definite_len(d.map()?)?;
-                Self::check_len_head(d, start, n as usize, 0)?;
-                let mut map = Map::new();
-                for _ in 0..n {
-                    let key = Self::decode_key(d)?;
-                    // Rejecting equal-or-descending keys enforces uniqueness and
-                    // ordering in one comparison. Uniqueness matters on its own:
-                    // a duplicate key would silently collapse into the map and
-                    // re-encode to different bytes than it arrived as.
-                    //
-                    // The previous key is read back out of the map rather than
-                    // kept alongside it: because keys ascend strictly, the last
-                    // one inserted is the greatest. That avoids cloning every
-                    // key — one heap allocation per attribute of every signal
-                    // decoded, on hosts where that cost is not affordable.
-                    if let Some((prev, _)) = map.last_key_value()
-                        && key.as_str() <= prev.as_str()
-                    {
-                        return Err(DecodeError::MapKeysUnordered);
-                    }
-                    let value = Self::decode_at(d, depth + 1, max_depth)?;
-                    map.insert(key, value);
-                }
-                Ok(Value::Map(map))
+                Self::check_depth(depth, max_depth)?;
+                Self::decode_map(d, start, depth + 1, max_depth).map(Value::Map)
             }
 
             // Everything below is well-formed CBOR that is outside the data
@@ -363,6 +344,53 @@ impl Value {
     /// Verifies that an integer used the shortest head for its value.
     fn check_int_head(d: &Decoder<'_>, start: usize, n: i64) -> Result<(), DecodeError> {
         Self::check_head(d, start, Self::canonical_arg_len(Self::int_arg(n)))
+    }
+
+    /// Reads a map's head and entries, the head at `start` already identified as a definite
+    /// map; `depth` is the depth of each entry's **value**.
+    ///
+    /// Shared by [`decode_at`](Self::decode_at), where the map is a level, and by a signal's
+    /// own map, which is not (ABI §6.3.1 rule 9) — so neither has to compensate for the other.
+    pub(crate) fn decode_map(
+        d: &mut Decoder<'_>,
+        start: usize,
+        depth: u32,
+        max_depth: u32,
+    ) -> Result<Map, DecodeError> {
+        let n = Self::definite_len(d.map()?)?;
+        Self::check_len_head(d, start, n as usize, 0)?;
+        let mut map = Map::new();
+        for _ in 0..n {
+            let key = Self::decode_key(d)?;
+            // Rejecting equal-or-descending keys enforces uniqueness and
+            // ordering in one comparison. Uniqueness matters on its own:
+            // a duplicate key would silently collapse into the map and
+            // re-encode to different bytes than it arrived as.
+            //
+            // The previous key is read back out of the map rather than
+            // kept alongside it: because keys ascend strictly, the last
+            // one inserted is the greatest. That avoids cloning every
+            // key — one heap allocation per attribute of every signal
+            // decoded, on hosts where that cost is not affordable.
+            if let Some((prev, _)) = map.last_key_value()
+                && key.as_str() <= prev.as_str()
+            {
+                return Err(DecodeError::MapKeysUnordered);
+            }
+            let value = Self::decode_at(d, depth, max_depth)?;
+            map.insert(key, value);
+        }
+        Ok(map)
+    }
+
+    /// Refuses an array or map that would be the `max_depth + 1`th container on its path
+    /// (ABI §6.3.1 rule 9). Checked before the container's elements are read, so the decoder's
+    /// own recursion is bounded by the limit it enforces.
+    fn check_depth(depth: u32, max_depth: u32) -> Result<(), DecodeError> {
+        if depth >= max_depth {
+            return Err(DecodeError::DepthExceeded);
+        }
+        Ok(())
     }
 
     /// Verifies that a length-prefixed item used the shortest head.

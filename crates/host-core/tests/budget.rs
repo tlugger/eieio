@@ -114,3 +114,46 @@ fn a_batch_within_the_bound_still_decodes() {
         .expect("four levels is well within any conforming bound");
     assert_eq!(batch.len(), 1);
 }
+
+/// Evaluates `(reduce (fn (acc x) (arr acc)) (arr 1) (range n))` under `limits` — a value
+/// nested `n + 1` arrays deep, or `DEPTH` if that is past `limits.max_depth`.
+fn nested_by_expression(limits: EvalLimits, n: u32) -> Result<Value, eio_expr::Error> {
+    let source = format!("(reduce (fn (acc x) (arr acc)) (arr 1) (range {n}))");
+    let expr = eio_expr::parse(&source).expect("parses");
+    eio_expr::eval_with_limits(&expr, None, limits)
+}
+
+#[test]
+fn what_an_expression_can_build_the_boundary_accepts() {
+    // Rule 9's own rationale, end to end (eieio-6c7.6): "otherwise an expression could
+    // construct a value the boundary then refuses". The two crates must count depth the same
+    // way — an attribute value's arrays and maps, not the signal map around it — or the
+    // tightest legal configuration, decode depth equal to expression depth, refuses a value
+    // one level inside the expression budget. Checked at the floor and at the defaults.
+    let decode_limits = Limits::new(1 << 20, 8, None);
+    for eval in [EvalLimits::FLOORS, EvalLimits::DEFAULT] {
+        // The tightest configuration rule 9 allows: decode depth equal to expression depth.
+        let budgets = ExprBudgets::new(eval, eval.max_depth);
+        assert_eq!(budgets.decode_depth(), eval.max_depth);
+
+        // Evaluating under `eval` is what proves the expression side allows this value,
+        // rather than this test assuming so.
+        let value =
+            nested_by_expression(eval, eval.max_depth - 1).expect("exactly at the depth budget");
+        let mut signal = Signal::new();
+        signal.set("v", value);
+        let bytes = Batch::from_vec(vec![signal]).to_cbor();
+        assert!(
+            Outbound::accept(0, 8, 1, decode_limits, 0)
+                .expect("port 0 of 1")
+                .decode(&bytes, budgets)
+                .is_ok(),
+            "a value built at max_depth {} must decode at the same bound",
+            eval.max_depth
+        );
+
+        // And one level more is the expression's to refuse, not the boundary's to discover.
+        let err = nested_by_expression(eval, eval.max_depth).expect_err("one level past");
+        assert_eq!(err.code, eio_expr::ErrorCode::Depth);
+    }
+}

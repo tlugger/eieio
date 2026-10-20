@@ -123,7 +123,25 @@
       "expect": [{"a": {"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"int": 1}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}],
       "rule": [9],
       "spec": "§6.3.1 rule 9",
-      "note": "Sixteen levels, well inside EXPR §9's MAX_DEPTH floor, so every conforming host accepts this whatever bound it configures. The vector deliberately does not sit at the bound: §6.3.1 fixes that the depth is bounded, not where one level is counted, and a vector pinning that off-by-one would fail a host counting the batch array as a level."
+      "note": "Sixteen levels, well inside EXPR §9's MAX_DEPTH floor, so every conforming host accepts this whatever bound it configures. Where the bound sits exactly is pinned by the two at-the-floor vectors after it."
+    },
+    {
+      "name": "nesting-exactly-at-the-floor",
+      "bytes": "81a16161818181818181818181818181818181818181818181818181818181818181818101",
+      "expect": [{"a": {"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"int": 1}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}],
+      "rule": [9],
+      "depth": 1,
+      "spec": "§6.3.1 rule 9",
+      "note": "Exactly EXPR §9's MAX_DEPTH floor of arrays, decoded at the floor. ABI §6.3.1 rule 9 counts depth as the arrays and maps on an attribute value's deepest path — neither the batch array nor the signal map is a level — which is the measure EXPR §9 bounds a constructed value by, so this is the deepest value an expression at the floor can build. A host counting the signal map as a level refuses it."
+    },
+    {
+      "name": "empty-container-exactly-at-the-floor",
+      "bytes": "81a161618181818181818181818181818181818181818181818181818181818181818180",
+      "expect": [{"a": {"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": [{"arr": []}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}]}}],
+      "rule": [9],
+      "depth": 1,
+      "spec": "§6.3.1 rule 9",
+      "note": "The same bound with an empty array innermost: an empty array is a level and a scalar is not, so this nests exactly as deep as `nesting-exactly-at-the-floor` and is accepted for the same reason."
     }
   ]
 }
