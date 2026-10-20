@@ -35,6 +35,8 @@ import {
   onSessionRequired,
   putService as clientPutService,
   reloadService as clientReloadService,
+  ServiceTextError,
+  serviceEdit as clientServiceEdit,
   startService as clientStartService,
   stopService as clientStopService,
   streamLogs as clientStreamLogs,
@@ -736,57 +738,103 @@ describe('client.ts — the same eleven calls stay on mock.ts with no real-backe
   });
 });
 
-describe('client.ts — getService/putService stay on mock.ts in both branches (parked on eieio-m9s.37)', () => {
-  // --- Prove it can fail (3): the guard on eieio-m9s.37 not having landed yet. ------------------
-  //
-  // Real transcript with `getService` in `client.ts` temporarily rewired to
-  // `useRealBackend() ? proxy.getService(nodeId, serviceName) : mock.getService(nodeId, serviceName)`,
-  // matching every one of the eleven functions just above it. (The transcript below is from
-  // before eieio-m9s.43 moved the login gate out of `client.ts`, so its stack still shows the
-  // `watchSession` wrapper that branch used to carry; the failure is otherwise unchanged.) (both tests in this `describe`
-  // fail the same way, since `putService`'s own test calls `getService` first to get a real
-  // `etag`):
-  //
-  //   FAIL  src/lib/api/proxy.test.ts > client.ts — getService/putService stay on mock.ts in
-  //   both branches (parked on eieio-m9s.37) > getService never touches fetch under a real
-  //   backend
-  //   TypeError: Cannot read properties of undefined (reading 'ok')
-  //    ❯ Module.getService src/lib/api/proxy.ts:320:17
-  //       318|   const daemonPath = `services/${encodeURIComponent(serviceName)}`;
-  //       319|   const response = await proxyFetch(nodeId, daemonPath, { method: 'GET…
-  //       320|   if (!response.ok) {
-  //          |                 ^
-  //       321|     await throwFor(nodeId, proxyPath(nodeId, daemonPath), response);
-  //       322|   }
-  //    ❯ watchSession src/lib/api/client.ts:118:12
-  //    ❯ src/lib/api/proxy.test.ts:745:20
-  //
-  // (Fails because this suite's `fetchMock` is a bare `vi.fn()` with no configured response —
-  // the whole point of the assertion just below is that a real backend must never call it at
-  // all, so it was never given one to answer with. The failure mode is exactly what "yours to
-  // notice" looks like: not `expect(fetchMock).not.toHaveBeenCalled()` failing cleanly, but the
-  // call happening at all and blowing up downstream — proxy.ts's `getService` has no code path
-  // that behaves reasonably when the thing to fetch was never supposed to be fetched.)
-  it('getService never touches fetch under a real backend', async () => {
-    vi.stubEnv('VITE_EIO_BACKEND', 'real');
-    const fetchMock = vi.fn();
+describe('client.ts — the canvas reads and writes a real node under a real backend (eieio-m9s.47)', () => {
+  // Until eieio-m9s.47 these three were parked on `mock.ts` in both branches, so a production
+  // build drew, edited and saved fixture data while every other call reached the node. The
+  // assertions below are the routes a real backend must take: the text from the node through
+  // the proxy, the structure from `/api/service-parse`, the edit through `/api/service-edit`,
+  // and the write back through the proxy with the ETag the read returned.
+  const TEXT = 'name = "kitchen"\n\n[blocks.b1]\nblock = "filter:1.0.0"\n\n[ui]\nb1 = { x = 10.0, y = 20.0, locked = true }\nviewport = { x = 0.0, y = 0.0, zoom = 1.5 }\n';
+  const PARSED = {
+    name: 'kitchen',
+    autostart: false,
+    overflow: 'backpressure',
+    blocks: { b1: { id: 'b1', block: 'filter:1.0.0', props: {} } },
+    connections: [{ from_id: 'b1', from_port: 'out', to_id: 'b2', to_port: 'in' }],
+    ui: { b1: '{ x = 10.0, y = 20.0, locked = true }', viewport: '{ x = 0.0, y = 0.0, zoom = 1.5 }' },
+  };
+
+  function routed(handlers: Record<string, (init?: RequestInit) => Response>) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const key = `${init?.method ?? 'GET'} ${url}`;
+      const handler = handlers[key];
+      if (!handler) throw new Error(`unexpected fetch: ${key}`);
+      return handler(init);
+    });
     vi.stubGlobal('fetch', fetchMock);
-    const result = await clientGetService('node-porch', 'kitchen');
-    // `ServiceDefinition`'s parsed shape (`blocks`), not `RemoteServiceDetail`'s raw
-    // `definition` text — the shape a real `GET /services/{s}` cannot supply until
-    // eieio-m9s.37 (see `proxy.ts`'s own `RemoteServiceDetail` doc for the full argument).
-    expect(result).toMatchObject({ name: 'kitchen' });
-    expect(result.blocks).toBeDefined();
-    expect(fetchMock).not.toHaveBeenCalled();
+    return fetchMock;
+  }
+
+  it('getService reads the text through the proxy and the structure from /api/service-parse', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const fetchMock = routed({
+      'GET /api/nodes/node-porch/daemon/services/kitchen': () =>
+        jsonResponse(200, { name: 'kitchen', state: 'stopped', autostart: false, definition: TEXT }, { ETag: '"v1"' }),
+      'POST /api/service-parse': (init) => {
+        expect(JSON.parse(String(init?.body))).toEqual({ toml: TEXT });
+        return jsonResponse(200, PARSED);
+      },
+    });
+    const service = await clientGetService('node-porch', 'kitchen');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(service).toMatchObject({ name: 'kitchen', state: 'stopped', etag: '"v1"', text: TEXT });
+    expect(service.blocks.b1).toMatchObject({ block: 'filter:1.0.0' });
+    expect(service.connections).toEqual([{ fromId: 'b1', fromPort: 'out', toId: 'b2', toPort: 'in' }]);
+    // DESIGNER §4.1: the known keys are read, and the member nobody understands rides along.
+    expect(service.ui).toEqual({
+      viewport: { x: 0, y: 0, zoom: 1.5 },
+      blocks: { b1: { x: 10, y: 20, extra: 'locked = true' } },
+    });
   });
 
-  it('putService never touches fetch under a real backend', async () => {
+  it('getService rejects a node file that does not parse, rather than drawing an empty canvas', async () => {
     vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    routed({
+      'GET /api/nodes/node-porch/daemon/services/kitchen': () =>
+        jsonResponse(200, { name: 'kitchen', state: 'errored', autostart: false, definition: 'name = ' }, { ETag: '"v1"' }),
+      'POST /api/service-parse': () => jsonResponse(422, { errors: [{ message: 'not TOML' }] }),
+    });
+    await expect(clientGetService('node-porch', 'kitchen')).rejects.toBeInstanceOf(ServiceTextError);
+  });
+
+  it('putService writes through the proxy with the If-Match it was given', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    routed({
+      'PUT /api/nodes/node-porch/daemon/services/kitchen': (init) => {
+        expect(new Headers(init?.headers).get('If-Match')).toBe('"v1"');
+        expect(init?.body).toBe(TEXT);
+        return jsonResponse(200, {}, { ETag: '"v2"' });
+      },
+    });
+    expect(await clientPutService('node-porch', 'kitchen', TEXT, '"v1"')).toEqual({ ok: true, etag: '"v2"' });
+  });
+
+  it('serviceEdit posts text and operations to /api/service-edit and decodes both outcomes', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'real');
+    const ops = [{ op: 'set_autostart' as const, autostart: true }];
+    routed({
+      'POST /api/service-edit': (init) => {
+        expect(JSON.parse(String(init?.body))).toEqual({ toml: TEXT, operations: ops });
+        return jsonResponse(200, { toml: 'edited', created: { '0': 'b9' } });
+      },
+    });
+    expect(await clientServiceEdit(TEXT, ops)).toEqual({ ok: true, toml: 'edited', created: { 0: 'b9' } });
+
+    routed({
+      'POST /api/service-edit': () => jsonResponse(422, { errors: [{ message: 'no such block', operation: 0 }] }),
+    });
+    expect(await clientServiceEdit(TEXT, ops)).toEqual({ ok: false, errors: [{ message: 'no such block', operation: 0 }] });
+  });
+
+  it('under the mock backend none of the three touches fetch', async () => {
+    vi.stubEnv('VITE_EIO_BACKEND', 'mock');
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const before = await clientGetService('node-porch', 'kitchen');
-    const result = await clientPutService('node-porch', 'kitchen', before.text, before.etag);
-    expect(result.ok).toBe(true);
+    const edited = await clientServiceEdit(before.text, [{ op: 'set_autostart', autostart: !before.autostart }]);
+    expect(edited.ok).toBe(true);
+    expect((await clientPutService('node-porch', 'kitchen', before.text, before.etag)).ok).toBe(true);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -1,25 +1,20 @@
 // The single seam between the shell and the backend.
 //
-// eieio-m9s.30: three of the exports below — `listSystems`, `listNodes`, `listBlockManifests`,
-// DESIGNER §3.1's own small REST surface — now call the real backend (`./backend.ts`,
-// `fetch('/api/...')`) some of the time, chosen by `useRealBackend()` just below. Every other
-// export is still re-exported straight from `mock.ts`, unchanged: everything service-, tap-,
-// log- or block-pull-shaped is reached through DESIGNER §3.1's one catch-all proxy and needs a
-// real node on the other end of it, which is a separate decision this bead does not make. This
-// file's own promise — that swapping an implementation never touches a call site elsewhere in
-// `src/` — is exactly why the three swapped functions below still have the mock's own
-// signatures, `listNodes`'s included (see `./backend.ts`'s doc comment on why that one needs
-// client-side filtering to keep it that way).
+// Every export below is real or fixture, chosen by `useRealBackend()` just below, and the
+// choice never touches a call site elsewhere in `src/` — which is why the mock and the real
+// implementation of each share one signature. Three families sit behind it:
 //
-// `parseServiceText` (eieio-m9s.37) is a fourth: `POST /api/service-parse` is not proxied
-// either (DESIGNER §3.2 amended — it reaches no node, the same as `service-edit`), so it is
-// dispatched the identical way. Its mock branch is NOT re-exported from `mock.ts`, unlike
-// `serviceEdit`/`getService`/etc. just below: `mock.ts` is another agent's file in this bead's
-// worktree, and its own module doc already commits to a specific stand-in for "a service
-// file's text" (`JSON.stringify` of the file-content fields, never real TOML — see that file's
-// header). `mockParseServiceText`, defined in this file, reads exactly that same stand-in
-// back — the mirror image of what `mock.ts`'s own `serviceEdit`/`putService` already do with
-// `JSON.parse` — without this file needing to add a function to a module it does not own.
+// - DESIGNER §3.1's own small REST surface (systems, nodes, registries, the manifest cache),
+//   in `./backend.ts`;
+// - DESIGNER §3.2's two stateless transforms, `/api/service-parse` and `/api/service-edit`,
+//   also `./backend.ts` — they reach no node, so they are not proxied;
+// - everything a node answers — services, taps, logs, node identity — through §3.1's one
+//   catch-all proxy, in `./proxy.ts`.
+//
+// `getService` is the one export that composes two of them: the node's file text through the
+// proxy, its structure from `/api/service-parse` (eieio-m9s.47). Until then it, `putService`
+// and `serviceEdit` were parked on `mock.ts` in both branches, so a production build edited
+// fixture data while everything else reached the node.
 //
 // **Real versus mock is chosen by `import.meta.env.PROD`, with an explicit override.** The
 // default is the property that must hold regardless of anything else: neither `vite dev`'s
@@ -55,20 +50,24 @@ import type {
   NodeInfo,
   NodeSummary,
   OverflowPolicy,
+  ParsedServiceError,
   ParseServiceResult,
   PutServiceResult,
   RegistrySummary,
   ServiceDefinition,
+  ServiceEditOperation,
+  ServiceEditResult,
   ServiceSummary,
   StreamHandle,
   SystemSummary,
   TapStreamHandlers,
   TapSummary,
+  UiLayout,
 } from './types';
 import * as backend from './backend';
 import * as mock from './mock';
 import * as proxy from './proxy';
-export { serviceEdit } from './mock';
+import { formatPositionToml, formatViewportToml, uiLayoutFromEntries } from '../service/toml-values';
 
 /** See this file's own module doc for what each branch means and why the default is safe. */
 function useRealBackend(): boolean {
@@ -148,13 +147,9 @@ interface MockServiceFile {
   overflow: OverflowPolicy;
   blocks: Record<string, BlockInstance>;
   connections: Connection[];
-  // `Record<string, unknown>`, not `UiLayout`: `ParsedService.ui` is the opaque, JSON-reshaped
-  // `[ui]` a *read* answers (see that type's own doc — it is NOT the `{x, y, zoom}` shape the
-  // *write* path uses), and `UiLayout`'s own named properties are not structurally assignable
-  // to an index signature. `mock.ts`'s fixtures happen to already be shaped like `UiLayout`,
-  // and that shape is itself valid `Record<string, unknown>` data — this is a wider type for
-  // the same values, not a different value.
-  ui?: Record<string, unknown>;
+  // `mock.ts`'s fixtures hold the canvas's own `UiLayout`; `mockParseServiceText` writes it back
+  // out as entry texts, the shape `/api/service-parse` answers.
+  ui?: UiLayout;
 }
 
 /**
@@ -183,9 +178,21 @@ function mockParseServiceText(toml: string): Promise<ParseServiceResult> {
       overflow: file.overflow,
       blocks: file.blocks,
       connections: file.connections,
-      ui: file.ui,
+      ui: file.ui && uiEntriesOf(file.ui),
     },
   });
+}
+
+/** A fixture's `UiLayout` as `[ui]` entry texts — the inverse of `uiLayoutFromEntries`, written
+ *  with the same formatters a real `set_ui` sends, so the mock answers the real endpoint's
+ *  shape. */
+function uiEntriesOf(ui: UiLayout): Record<string, string> {
+  const entries: Record<string, string> = {};
+  if (ui.viewport) entries.viewport = formatViewportToml(ui.viewport, ui.viewport.extra);
+  for (const [id, position] of Object.entries(ui.blocks)) {
+    entries[id] = formatPositionToml(position, position.extra);
+  }
+  return entries;
 }
 
 /** `POST /api/service-parse` (DESIGNER §3.2, amended), real or the mock stand-in above per
@@ -272,31 +279,68 @@ export function deleteRegistry(id: number): Promise<void> {
 // simply no longer what the gate hangs on.)
 
 /**
- * `GET /services/{s}` (DAEMON §9.3), parked on `mock.ts` in **both** branches — never
- * `useRealBackend()`-switched — until eieio-m9s.37 lands. `proxy.ts`'s own `getService` already
- * exists and is correct against the wire, but it answers `RemoteServiceDetail` (raw TOML
- * `definition` text), not `ServiceDefinition` (parsed `blocks`/`connections`/`ui`): see that
- * function's doc comment in `./proxy.ts` for the full argument that this SPA has no
- * TOML-to-graph parser and, per SERVICE §9's one-editor rule, must not grow a second one.
- * `ServiceCanvas.svelte` renders against `ServiceDefinition` today, so routing a real node's
- * answer here would hand the canvas a shape it cannot use. Asserted in `proxy.test.ts`'s
- * "getService/putService stay on mock.ts in both branches" suite (this bead's own negative
- * proof: point this at `proxy.ts` instead and that suite fails) so the exception outlives
- * whoever reads this comment next.
+ * `GET /services/{s}` (DAEMON §9.3) as the canvas draws it: real or fixture per
+ * `useRealBackend()`, like everything above.
+ *
+ * A real node answers the file's **text** (`proxy.getService`'s `RemoteServiceDetail`), and
+ * nothing in this SPA parses TOML (SERVICE §9's one-editor rule), so the structure comes from
+ * `POST /api/service-parse` (DESIGNER §3.2) — `eio-service` itself, on the backend — and `[ui]`
+ * from that endpoint's entry texts through `uiLayoutFromEntries` (DESIGNER §4.1). The text is
+ * kept as `text`, unread, because it is what `serviceEdit` transforms and `putService` sends
+ * back: the parsed view is derived and never a second source of truth (§3.2).
+ *
+ * A file the node holds but that does not parse — a hand edit gone wrong — rejects with
+ * {@link ServiceTextError}, carrying SERVICE §7's own error list, rather than rendering an empty
+ * canvas a save would then overwrite the real file with.
  */
-export function getService(nodeId: string, serviceName: string): Promise<ServiceDefinition> {
-  return mock.getService(nodeId, serviceName);
+export async function getService(nodeId: string, serviceName: string): Promise<ServiceDefinition> {
+  if (!useRealBackend()) return mock.getService(nodeId, serviceName);
+  const detail = await proxy.getService(nodeId, serviceName);
+  const parsed = await backend.parseServiceText(detail.definition);
+  if (!parsed.ok) throw new ServiceTextError(nodeId, serviceName, parsed.errors);
+  const { service } = parsed;
+  return {
+    name: detail.name,
+    autostart: detail.autostart,
+    overflow: service.overflow,
+    blocks: service.blocks,
+    connections: service.connections,
+    ui: uiLayoutFromEntries(service.ui),
+    state: detail.state,
+    error: detail.error,
+    etag: detail.etag,
+    text: detail.definition,
+  };
 }
 
-/** `PUT /services/{s}` (DAEMON §9.3) — parked on `mock.ts` for the same reason as `getService`
- *  just above, and the same bead (eieio-m9s.37). */
+/** A node's service file that `POST /api/service-parse` refused (SERVICE §7 stage 1). */
+export class ServiceTextError extends Error {
+  constructor(
+    readonly nodeId: string,
+    readonly serviceName: string,
+    readonly errors: ParsedServiceError[],
+  ) {
+    super(`${serviceName} on node ${nodeId} is not a valid service file: ${errors.map((e) => e.message).join('; ')}`);
+    this.name = 'ServiceTextError';
+  }
+}
+
+/** `PUT /services/{s}` (proxied, DAEMON §9.3), real or fixture per `useRealBackend()`. */
 export function putService(
   nodeId: string,
   serviceName: string,
   definition: string,
   ifMatch: string,
 ): Promise<PutServiceResult> {
-  return mock.putService(nodeId, serviceName, definition, ifMatch);
+  return useRealBackend()
+    ? proxy.putService(nodeId, serviceName, definition, ifMatch)
+    : mock.putService(nodeId, serviceName, definition, ifMatch);
+}
+
+/** `POST /api/service-edit` (DESIGNER §3.2), real or fixture per `useRealBackend()`. Not
+ *  proxied: the endpoint reaches no node (see `backend.ts`). */
+export function serviceEdit(toml: string, operations: ServiceEditOperation[]): Promise<ServiceEditResult> {
+  return useRealBackend() ? backend.serviceEdit(toml, operations) : mock.serviceEdit(toml, operations);
 }
 
 /** `GET /services` (proxied, DAEMON §9), real or fixture per `useRealBackend()`. */

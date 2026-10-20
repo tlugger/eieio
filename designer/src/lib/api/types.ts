@@ -341,15 +341,15 @@ export interface ParsedService {
   blocks: Record<string, BlockInstance>;
   connections: Connection[];
   /**
-   * `[ui]`, reshaped to JSON member for member and never interpreted (SERVICE §6 — see
-   * `crates/designer/src/api/service_parse.rs`'s own module doc, which this mirrors). **Not**
-   * {@link UiLayout}: that shape is this shell's own convention for the value it *writes*
-   * through `set_ui` (`lib/service/toml-values.ts`), not a fact about what `[ui]` contains on
-   * read — reading `x`/`y`/`zoom` (or anything else) out of this object is a caller's own job,
-   * the same convention DESIGNER §4.1 already gives the write path. Absent when the file
-   * declares no `[ui]` table at all, which is not the same thing as an empty one.
+   * `[ui]`'s top-level entries, each as the TOML value **text** it is written as — read by
+   * `eio-service`'s own editor module on the backend (`eio_service::edit::ui_entries`), never interpreted there
+   * (SERVICE §6). **Not** {@link UiLayout}: reading `x`/`y`/`zoom` out of an entry is this
+   * shell's job (`lib/service/toml-values.ts`'s `uiLayoutFromEntries`), and text rather than a
+   * value tree is what lets a member it does not understand ride back into a later `set_ui`
+   * verbatim (DESIGNER §4.1). Absent when the file declares no `[ui]` table at all, which is
+   * not the same thing as an empty one.
    */
-  ui?: Record<string, unknown>;
+  ui?: Record<string, string>;
 }
 
 /** One entry of `POST /api/service-parse`'s `422 { errors }` — the identical shape {@link
@@ -394,7 +394,7 @@ export type ParseServiceResult =
  * that fragment for the one shape it ever writes (a block position or the
  * viewport), and the only place that reads it back. */
 export type ServiceEditOperation =
-  | { op: 'add_block'; id?: string; block: string; name?: string; props?: Record<string, string> }
+  | { op: 'add_block'; id?: string; block: string; name?: string }
   | { op: 'remove_block'; id: string }
   | { op: 'set_name'; id: string; name: string }
   | { op: 'remove_name'; id: string }
@@ -402,12 +402,15 @@ export type ServiceEditOperation =
   | { op: 'remove_prop'; id: string; property: string }
   | { op: 'connect'; from: string; to: string }
   | { op: 'disconnect'; from: string; to: string }
-  | { op: 'set_autostart'; value: boolean }
-  /** `key` is a block id (positioning that block) or the literal string
-   * `"viewport"` — SERVICE §6's "conventionally block ids", plus the one
-   * other entry `[ui]` needs (DESIGNER §5's viewport-in-`toObject()`). */
-  | { op: 'set_ui'; key: string; value: string }
-  | { op: 'remove_ui'; key: string };
+  | { op: 'set_autostart'; autostart: boolean }
+  /** `path` is the `[ui]` key, as `Document::set_ui`'s path (SERVICE §9): this shell only
+   * ever writes a top-level entry — a block id (positioning that block) or the literal
+   * `"viewport"`, SERVICE §6's "conventionally block ids" plus the one other entry `[ui]`
+   * needs (DESIGNER §4.1) — so it is always one segment. Field names are
+   * `crates/designer/src/api/service_edit.rs`'s `Operation`, which refuses one it does not
+   * know rather than ignoring it (eieio-m9s.47). */
+  | { op: 'set_ui'; path: [string]; value: string }
+  | { op: 'remove_ui'; path: [string] };
 
 /** One entry of a `422` response's `errors` (DESIGNER §3.2, landed shape).
  * `code`/`span` are EXPR §8's, populated when the failure is a property

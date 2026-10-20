@@ -975,13 +975,10 @@ async function applyOneOperation(
       if (id in file.blocks) {
         return { error: { message: `duplicate block id "${id}"`, instance: id } };
       }
-      for (const [property, expression] of Object.entries(op.props ?? {})) {
-        const failure = await lintProperty(expression);
-        if (failure) return { error: { ...failure, instance: id, property } };
-      }
+      // No `props`: `/api/service-edit`'s `add_block` takes none — a property is a `set_prop`.
       file.blocks = {
         ...file.blocks,
-        [id]: { id, name: op.name, block: op.block, props: { ...(op.props ?? {}) } },
+        [id]: { id, name: op.name, block: op.block, props: {} },
       };
       return { error: null, mintedId: op.id === undefined ? id : undefined };
     }
@@ -1059,12 +1056,12 @@ async function applyOneOperation(
       return { error: null };
     }
     case 'set_autostart': {
-      file.autostart = op.value;
+      file.autostart = op.autostart;
       return { error: null };
     }
     case 'set_ui': {
       const values = parseInlineNumberTable(op.value);
-      if (op.key === 'viewport') {
+      if (op.path[0] === 'viewport') {
         const { x, y, zoom } = values;
         if (x === undefined || y === undefined || zoom === undefined) {
           return { error: { message: `"${op.value}" is not a valid viewport (expected x, y, zoom)` } };
@@ -1073,18 +1070,18 @@ async function applyOneOperation(
       } else {
         const { x, y } = values;
         if (x === undefined || y === undefined) {
-          return { error: { message: `"${op.value}" is not a valid position (expected x, y)`, instance: op.key } };
+          return { error: { message: `"${op.value}" is not a valid position (expected x, y)`, instance: op.path[0] } };
         }
-        file.ui = { ...file.ui, blocks: { ...file.ui.blocks, [op.key]: { x, y } } };
+        file.ui = { ...file.ui, blocks: { ...file.ui.blocks, [op.path[0]]: { x, y } } };
       }
       return { error: null };
     }
     case 'remove_ui': {
-      if (op.key === 'viewport') {
+      if (op.path[0] === 'viewport') {
         const { viewport: _v, ...rest } = file.ui;
         file.ui = rest;
       } else {
-        const { [op.key]: _b, ...restBlocks } = file.ui.blocks;
+        const { [op.path[0]]: _b, ...restBlocks } = file.ui.blocks;
         file.ui = { ...file.ui, blocks: restBlocks };
       }
       return { error: null };

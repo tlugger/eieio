@@ -70,7 +70,7 @@ export function addBlockOperations(
 ): ServiceEditOperation[] {
   return [
     { op: 'add_block', id, block: blockRef, ...(name && name.trim().length > 0 ? { name: name.trim() } : {}) },
-    { op: 'set_ui', key: id, value: formatPositionToml(position) },
+    { op: 'set_ui', path: [id], value: formatPositionToml(position) },
   ];
 }
 
@@ -137,7 +137,7 @@ export function setPropertiesOperations(id: string, changedProps: Record<string,
 }
 
 export function setAutostartOperations(value: boolean): ServiceEditOperation[] {
-  return [{ op: 'set_autostart', value }];
+  return [{ op: 'set_autostart', autostart: value }];
 }
 
 /**
@@ -168,14 +168,14 @@ export function layoutOperations(
   for (const [id, position] of Object.entries(next.blocks)) {
     const before = previous.blocks[id];
     if (before && before.x === position.x && before.y === position.y) continue;
-    ops.push({ op: 'set_ui', key: id, value: formatPositionToml(position, before?.extra) });
+    ops.push({ op: 'set_ui', path: [id], value: formatPositionToml(position, before?.extra) });
   }
   if (next.viewport) {
     const before = previous.viewport;
     const unchanged =
       before && before.x === next.viewport.x && before.y === next.viewport.y && before.zoom === next.viewport.zoom;
     if (!unchanged) {
-      ops.push({ op: 'set_ui', key: 'viewport', value: formatViewportToml(next.viewport, before?.extra) });
+      ops.push({ op: 'set_ui', path: ['viewport'], value: formatViewportToml(next.viewport, before?.extra) });
     }
   }
   return ops;

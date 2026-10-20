@@ -49,7 +49,7 @@ describe('addBlockOperations', () => {
     const ops = addBlockOperations('t9k2', 'filter:1.2.0', { x: 40, y: 120 });
     expect(ops).toEqual([
       { op: 'add_block', id: 't9k2', block: 'filter:1.2.0' },
-      { op: 'set_ui', key: 't9k2', value: '{ x = 40.0, y = 120.0 }' },
+      { op: 'set_ui', path: ['t9k2'], value: '{ x = 40.0, y = 120.0 }' },
     ]);
   });
 
@@ -65,7 +65,7 @@ describe('addBlockOperations', () => {
 
   it('formats an already-fractional position without adding a spurious .0', () => {
     const ops = addBlockOperations('t9k2', 'filter:1.2.0', { x: 40.5, y: -12.25 });
-    expect(ops[1]).toEqual({ op: 'set_ui', key: 't9k2', value: '{ x = 40.5, y = -12.25 }' });
+    expect(ops[1]).toEqual({ op: 'set_ui', path: ['t9k2'], value: '{ x = 40.5, y = -12.25 }' });
   });
 });
 
@@ -139,8 +139,8 @@ describe('setPropertiesOperations', () => {
 
 describe('setAutostartOperations', () => {
   it('wraps the value exactly', () => {
-    expect(setAutostartOperations(true)).toEqual([{ op: 'set_autostart', value: true }]);
-    expect(setAutostartOperations(false)).toEqual([{ op: 'set_autostart', value: false }]);
+    expect(setAutostartOperations(true)).toEqual([{ op: 'set_autostart', autostart: true }]);
+    expect(setAutostartOperations(false)).toEqual([{ op: 'set_autostart', autostart: false }]);
   });
 });
 
@@ -148,13 +148,13 @@ describe('layoutOperations', () => {
   it('emits set_ui only for blocks that actually moved', () => {
     const previous = { blocks: { a: { x: 0, y: 0 }, b: { x: 10, y: 10 } } };
     const ops = layoutOperations({ blocks: { a: { x: 0, y: 0 }, b: { x: 20, y: 10 } } }, previous);
-    expect(ops).toEqual([{ op: 'set_ui', key: 'b', value: '{ x = 20.0, y = 10.0 }' }]);
+    expect(ops).toEqual([{ op: 'set_ui', path: ['b'], value: '{ x = 20.0, y = 10.0 }' }]);
   });
 
   it('emits set_ui for a block with no prior recorded position', () => {
     const previous = { blocks: {} };
     const ops = layoutOperations({ blocks: { a: { x: 5, y: 5 } } }, previous);
-    expect(ops).toEqual([{ op: 'set_ui', key: 'a', value: '{ x = 5.0, y = 5.0 }' }]);
+    expect(ops).toEqual([{ op: 'set_ui', path: ['a'], value: '{ x = 5.0, y = 5.0 }' }]);
   });
 
   it('emits nothing when nothing moved', () => {
@@ -168,7 +168,7 @@ describe('layoutOperations', () => {
     expect(unchanged).toEqual([]);
 
     const changed = layoutOperations({ blocks: {}, viewport: { x: 0, y: 0, zoom: 1.5 } }, previous);
-    expect(changed).toEqual([{ op: 'set_ui', key: 'viewport', value: '{ x = 0.0, y = 0.0, zoom = 1.5 }' }]);
+    expect(changed).toEqual([{ op: 'set_ui', path: ['viewport'], value: '{ x = 0.0, y = 0.0, zoom = 1.5 }' }]);
   });
 
   // eieio-m9s.26: SERVICE §6's "[ui] MUST survive a read-modify-write
@@ -180,14 +180,14 @@ describe('layoutOperations', () => {
   it('carries a moved block\'s unrecognized nested key forward into the new value', () => {
     const previous = { blocks: { a: { x: 0, y: 0, extra: 'locked = true' } } };
     const ops = layoutOperations({ blocks: { a: { x: 20, y: 10 } } }, previous);
-    expect(ops).toEqual([{ op: 'set_ui', key: 'a', value: '{ x = 20.0, y = 10.0, locked = true }' }]);
+    expect(ops).toEqual([{ op: 'set_ui', path: ['a'], value: '{ x = 20.0, y = 10.0, locked = true }' }]);
   });
 
   it('carries a moved viewport\'s unrecognized nested key forward into the new value', () => {
     const previous = { blocks: {}, viewport: { x: 0, y: 0, zoom: 1, extra: 'note = "do not touch"' } };
     const ops = layoutOperations({ blocks: {}, viewport: { x: 5, y: 5, zoom: 2 } }, previous);
     expect(ops).toEqual([
-      { op: 'set_ui', key: 'viewport', value: '{ x = 5.0, y = 5.0, zoom = 2.0, note = "do not touch" }' },
+      { op: 'set_ui', path: ['viewport'], value: '{ x = 5.0, y = 5.0, zoom = 2.0, note = "do not touch" }' },
     ]);
   });
 
@@ -257,11 +257,11 @@ describe('round trip: an unknown [ui] key survives an edit that rewrites the tab
   it('an unknown key nested inside the block that moves survives, and only that line changes', () => {
     const previous = buildUiLayoutFromRawTable(rawUiTable);
     const ops = layoutOperations({ blocks: { b7k2: { x: 40, y: 120 }, f3m9: { x: 999, y: 888 } } }, previous);
-    expect(ops).toEqual([{ op: 'set_ui', key: 'f3m9', value: '{ x = 999.0, y = 888.0, locked = true }' }]);
+    expect(ops).toEqual([{ op: 'set_ui', path: ['f3m9'], value: '{ x = 999.0, y = 888.0, locked = true }' }]);
 
     let text = rawUiTable;
     for (const op of ops) {
-      if (op.op === 'set_ui') text = applySetUi(text, op.key, op.value);
+      if (op.op === 'set_ui') text = applySetUi(text, op.path[0], op.value);
     }
     expect(text).toBe(
       [
@@ -284,12 +284,12 @@ describe('round trip: an unknown [ui] key survives an edit that rewrites the tab
       previous,
     );
     expect(ops).toEqual([
-      { op: 'set_ui', key: 'viewport', value: '{ x = 10.0, y = 20.0, zoom = 2.0, locked = true }' },
+      { op: 'set_ui', path: ['viewport'], value: '{ x = 10.0, y = 20.0, zoom = 2.0, locked = true }' },
     ]);
 
     let text = rawWithViewportExtra;
     for (const op of ops) {
-      if (op.op === 'set_ui') text = applySetUi(text, op.key, op.value);
+      if (op.op === 'set_ui') text = applySetUi(text, op.path[0], op.value);
     }
     expect(text).toBe(
       [

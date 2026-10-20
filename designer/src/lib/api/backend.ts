@@ -30,6 +30,9 @@ import type {
   ParsedServiceError,
   ParseServiceResult,
   RegistrySummary,
+  ServiceEditError,
+  ServiceEditOperation,
+  ServiceEditResult,
   SystemSummary,
 } from './types';
 import { notifySessionRequired } from './session';
@@ -389,7 +392,7 @@ interface ServiceParseOut {
   overflow: OverflowPolicy;
   blocks: Record<string, BlockInstance>;
   connections: Array<{ from_id: string; from_port: string; to_id: string; to_port: string }>;
-  ui?: Record<string, unknown>;
+  ui?: Record<string, string>;
 }
 
 /**
@@ -411,24 +414,9 @@ interface ServiceParseOut {
  * that reshaping happens here and not by changing either shape to match the other.
  */
 export async function parseServiceText(toml: string): Promise<ParseServiceResult> {
-  const path = '/api/service-parse';
-  const response = await fetch(path, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ toml }),
-  });
-  if (response.status === 401) {
-    throw new SessionRequiredError(path);
-  }
-  if (response.status === 422) {
-    const body = (await response.json()) as { errors: ParsedServiceError[] };
-    return { ok: false, errors: body.errors };
-  }
-  if (!response.ok) {
-    throw await backendErrorFrom(path, response);
-  }
-  const body = (await response.json()) as ServiceParseOut;
+  const result = await postTransform<ServiceParseOut>('/api/service-parse', { toml });
+  if (!result.ok) return result;
+  const { body } = result;
   const service: ParsedService = {
     name: body.name,
     autostart: body.autostart,
@@ -443,4 +431,56 @@ export async function parseServiceText(toml: string): Promise<ParseServiceResult
     ui: body.ui,
   };
   return { ok: true, service };
+}
+
+/**
+ * `POST /api/service-edit` (DESIGNER §3.2): text plus operations in, text out. Reached the way
+ * {@link parseServiceText} is — this crate's own backend, not the proxy, because the endpoint
+ * reaches no node — and for the same reason it does not use `postJson`: a `422` is an expected,
+ * structured refusal (SERVICE §9: "an edit that would make the file invalid MUST fail and change
+ * nothing... the caller is told which rule it broke"), decoded into {@link ServiceEditResult}'s
+ * `{ok: false}` arm, while a thrown error means the request itself did not complete.
+ *
+ * `created`'s keys are operation indices; JSON object keys are strings on the wire, and the
+ * Rust side omits the field when nothing was minted, so both are normalised here.
+ */
+export async function serviceEdit(toml: string, operations: ServiceEditOperation[]): Promise<ServiceEditResult> {
+  const result = await postTransform<{ toml: string; created?: Record<string, string> }>('/api/service-edit', {
+    toml,
+    operations,
+  });
+  if (!result.ok) return result;
+  const { body } = result;
+  const created: Record<number, string> = {};
+  for (const [index, id] of Object.entries(body.created ?? {})) created[Number(index)] = id;
+  return { ok: true, toml: body.toml, created };
+}
+
+/**
+ * A `POST` to one of DESIGNER §3.2's two stateless transforms, `/api/service-parse` and
+ * `/api/service-edit`, which share one outcome shape: a `200` body, or a `422 { errors }` a
+ * caller switches on (SERVICE §7, §9 — an invalid file or edit is the ordinary case, not a
+ * fault). A `401` raises the login gate and anything else throws, as everywhere in this file.
+ */
+async function postTransform<T>(
+  path: string,
+  payload: unknown,
+): Promise<{ ok: true; body: T } | { ok: false; errors: ServiceEditError[] }> {
+  const response = await fetch(path, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (response.status === 401) {
+    throw new SessionRequiredError(path);
+  }
+  if (response.status === 422) {
+    const body = (await response.json()) as { errors: ServiceEditError[] };
+    return { ok: false, errors: body.errors };
+  }
+  if (!response.ok) {
+    throw await backendErrorFrom(path, response);
+  }
+  return { ok: true, body: (await response.json()) as T };
 }

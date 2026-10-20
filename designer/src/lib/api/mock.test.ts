@@ -77,7 +77,7 @@ describe('serviceEdit', () => {
     const service = await getService('node-porch', 'greenhouse');
     const result = await serviceEdit(service.text, [
       { op: 'add_block', id: 'new1', block: 'filter:1.2.0' },
-      { op: 'set_ui', key: 'new1', value: '{ x = 40.0, y = 80.0 }' },
+      { op: 'set_ui', path: ['new1'], value: '{ x = 40.0, y = 80.0 }' },
     ]);
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('unreachable');
@@ -161,7 +161,7 @@ describe('serviceEdit', () => {
 describe('putService', () => {
   it('writes through on a matching ETag', async () => {
     const service = await getService('node-porch', 'greenhouse');
-    const edit = await serviceEdit(service.text, [{ op: 'set_autostart', value: true }]);
+    const edit = await serviceEdit(service.text, [{ op: 'set_autostart', autostart: true }]);
     if (!edit.ok) throw new Error('unreachable');
     const put = await putService('node-porch', 'greenhouse', edit.toml, service.etag);
     expect(put.ok).toBe(true);
@@ -173,12 +173,12 @@ describe('putService', () => {
   it('refuses a stale If-Match with 412 and the current text (DAEMON §9.3)', async () => {
     const service = await getService('node-porch', 'kitchen');
     // Someone else's edit lands first.
-    const first = await serviceEdit(service.text, [{ op: 'set_autostart', value: false }]);
+    const first = await serviceEdit(service.text, [{ op: 'set_autostart', autostart: false }]);
     if (!first.ok) throw new Error('unreachable');
     await putService('node-porch', 'kitchen', first.toml, service.etag);
 
     // The original caller, still holding the stale tag, tries to write.
-    const stale = await serviceEdit(service.text, [{ op: 'set_autostart', value: true }]);
+    const stale = await serviceEdit(service.text, [{ op: 'set_autostart', autostart: true }]);
     if (!stale.ok) throw new Error('unreachable');
     const conflict = await putService('node-porch', 'kitchen', stale.toml, service.etag);
     expect(conflict.ok).toBe(false);
@@ -189,7 +189,7 @@ describe('putService', () => {
 
   it('honours If-Match: * unconditionally', async () => {
     const service = await getService('node-porch', 'greenhouse');
-    const edit = await serviceEdit(service.text, [{ op: 'set_autostart', value: false }]);
+    const edit = await serviceEdit(service.text, [{ op: 'set_autostart', autostart: false }]);
     if (!edit.ok) throw new Error('unreachable');
     const put = await putService('node-porch', 'greenhouse', edit.toml, '*');
     expect(put.ok).toBe(true);

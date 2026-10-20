@@ -342,7 +342,15 @@
     // sub-plan calls out.
     tappedConnection = null;
     selectedBlockId = null;
-    currentService = await api.getService(String(nodeId), serviceName);
+    try {
+      currentService = await api.getService(String(nodeId), serviceName);
+      loadError = null;
+    } catch (err) {
+      // A node file that does not parse (`ServiceTextError`, SERVICE §7's list in its message)
+      // or a node that did not answer: said out loud, never an empty canvas a save would then
+      // write over the real file with.
+      loadError = err instanceof Error ? err.message : String(err);
+    }
   }
 
   async function refreshServiceList(nodeId: number) {

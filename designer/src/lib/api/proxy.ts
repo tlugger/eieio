@@ -50,10 +50,8 @@
 // `/api/nodes/{id}/daemon` prefix, no node involved, `eio-service`'s `Document` editor called
 // directly in-process. `mock.ts`'s own signature confirms it: `serviceEdit(toml, operations)`
 // takes no `nodeId`, unlike every function below, because there is no node to proxy to. It
-// belongs beside `listSystems`/`listNodes`/`listBlockManifests` in `./backend.ts` — which two
-// other agents are already editing this cycle — not in this module. Implementing it here would
-// have been the exact mistake this file's whole premise argues against: a second, wrong home for
-// something that already has a right one.
+// belongs beside `listSystems`/`listNodes`/`listBlockManifests` in `./backend.ts`, which is
+// where it lives (eieio-m9s.47).
 //
 // --- `getNodeInfo`, included despite the bead text omitting it ------------------------------
 //
@@ -303,14 +301,9 @@ export function getServiceErrors(nodeId: string, serviceName: string): Promise<A
  * rather than re-implementing it).
  *
  * So this function returns the honest wire shape (below) rather than force-fitting
- * `ServiceDefinition` by fabricating the fields it cannot populate. `ServiceCanvas.svelte` (not
- * owned by this bead) renders against `ServiceDefinition` today, which means **the canvas cannot
- * render a real node's existing service without a further decision** — either a client-side
- * TOML parser (a second implementation SERVICE §9 warns against), a new daemon endpoint that
- * serves structure instead of text (a spec change), or building `eio-service` to WASM the way
- * `expr` already is (the biggest lift, and the most consistent with this repository's existing
- * answer to the identical problem for expressions). That decision is out of this bead's remit —
- * this comment, and the final report, are where it is raised.
+ * `ServiceDefinition` by fabricating the fields it cannot populate. The structure comes from
+ * `crates/designer`'s `POST /api/service-parse` — `eio-service` itself, on the backend — and
+ * `client.ts`'s `getService` composes the two (eieio-m9s.47).
  */
 export interface RemoteServiceDetail {
   name: string;

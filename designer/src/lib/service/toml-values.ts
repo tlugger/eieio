@@ -23,6 +23,8 @@
 // recognition without the carry-forward; the two agree on every input where
 // there is nothing to carry.
 
+import type { UiLayout } from '../api/types';
+
 /** TOML requires a float literal to carry a decimal point (`40`, unqualified,
  * is TOML's integer type) — canvas positions and zoom are conceptually
  * continuous, so this always emits one. */
@@ -159,4 +161,30 @@ export function parseUiFragment(text: string): ParsedUiFragment {
     }
   }
   return { known, extra: extras.join(', ') };
+}
+
+/**
+ * The {@link UiLayout} a canvas draws, from `[ui]`'s entries as `POST /api/service-parse`
+ * answers them — each entry's TOML value text, keyed by its `[ui]` key (DESIGNER §4.1).
+ *
+ * The reading rules are §4.1's, applied through {@link parseUiFragment}: the literal `viewport`
+ * is placed when it carries a bare-number `x`, `y` and `zoom`; any other key is a block
+ * position when it carries a bare-number `x` and `y`. Every other member rides along as
+ * `extra`, so the next `set_ui` for that entry re-splices it verbatim. An entry with neither
+ * shape is not placed at all — and is not lost, because no operation ever names it and the
+ * file it lives in is what a `PUT` sends back.
+ */
+export function uiLayoutFromEntries(entries: Record<string, string> | undefined): UiLayout {
+  const layout: UiLayout = { blocks: {} };
+  for (const [key, text] of Object.entries(entries ?? {})) {
+    const { known, extra } = parseUiFragment(text);
+    if (known.x === undefined || known.y === undefined) continue;
+    const withExtra = extra ? { extra } : {};
+    if (key === 'viewport') {
+      if (known.zoom !== undefined) layout.viewport = { x: known.x, y: known.y, zoom: known.zoom, ...withExtra };
+    } else {
+      layout.blocks[key] = { x: known.x, y: known.y, ...withExtra };
+    }
+  }
+  return layout;
 }
