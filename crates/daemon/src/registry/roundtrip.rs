@@ -89,19 +89,23 @@ fn built_manifest() -> eio_manifest::Manifest {
 /// `publish`'s own arguments for pushing `filter` to `fake` under the `tlugger` namespace,
 /// signing with `key` when given.
 fn args(fake: &Fake, key: Option<PathBuf>) -> PublishArgs {
-    let signing = key.is_some();
+    // The throwaway key `generate_key` mints has an empty passphrase, and `cosign sign` learns
+    // it on the child's own environment, set by `publish::run` — not `std::env::set_var`,
+    // which is `unsafe` because its contract is about the whole process (see
+    // `PublishArgs::cosign_env`). The same helper isolates it from this machine's docker
+    // credential helpers (eieio-6c7.13).
+    let cosign_env = key
+        .as_deref()
+        .and_then(Path::parent)
+        .map(cargo_eio::publish::throwaway_key_cosign_env)
+        .unwrap_or_default();
     PublishArgs {
         registry: format!("{}/tlugger", fake.host()),
         key,
         username: None,
         password: None,
         manifest_path: Some(filter_manifest_path()),
-        // The throwaway key `generate_key` mints has an empty passphrase, and this is how
-        // `cosign sign` learns it: on the child's own environment, set by `publish::run`.
-        // Not `std::env::set_var` — that is `unsafe` because its contract is about the whole
-        // process, and this test binary runs sibling tests whose `std::env::temp_dir` reads
-        // one, so the contract cannot honestly be met here (see `PublishArgs::cosign_password`).
-        cosign_password: signing.then(String::new),
+        cosign_env,
     }
 }
 

@@ -46,6 +46,7 @@
 //! own unmodified defaults would. See [`sign`]'s doc comment for the offline-verifiability
 //! consequence that follows from it.
 
+use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -113,21 +114,27 @@ pub struct PublishArgs {
     #[arg(long, value_name = "PATH")]
     pub manifest_path: Option<PathBuf>,
 
-    /// The passphrase for `key`, handed to `cosign` on its own child environment.
+    /// Extra environment for the `cosign` child, and only for it.
     ///
     /// **Not a command-line flag** — `#[arg(skip)]`, so no passphrase can be typed onto an
-    /// argv every process on the machine can read. `None` is the only value a real invocation
+    /// argv every process on the machine can read. Empty is the only value a real invocation
     /// ever has, and it means what it has always meant: `cosign` inherits this process's
     /// environment and finds `COSIGN_PASSWORD` there, exactly as a block author's own shell
-    /// or CI secret provides it (`template/ci.yml.in`).
+    /// or CI secret provides it (`template/ci.yml.in`), and reads the author's own
+    /// `~/.docker/config.json`, which is where their registry credential helper lives.
     ///
     /// It exists for a caller that drives `run` in-process and cannot use the environment to
-    /// reach the child — `eio-daemon`'s `registry::roundtrip` (eieio-7d8.33). `std::env::set_var`
-    /// is `unsafe` precisely because its contract covers the whole process, and a test binary
-    /// running threads that call `std::env::temp_dir` cannot honour it; passing the value down
-    /// to the one `Command` that needs it has no such contract to break.
+    /// reach the child — this module's tests and `eio-daemon`'s `registry::roundtrip`
+    /// (eieio-7d8.33). `std::env::set_var` is `unsafe` precisely because its contract covers
+    /// the whole process, and a test binary running threads that call `std::env::temp_dir`
+    /// cannot honour it; passing the value down to the one `Command` that needs it has no
+    /// such contract to break. Those callers set two things: the throwaway key's empty
+    /// `COSIGN_PASSWORD`, and an empty `DOCKER_CONFIG`, because a config naming a helper not
+    /// on `PATH` (Docker Desktop's `credsStore: desktop`, say) fails `cosign sign` before it
+    /// reaches a loopback fake registry, making the result depend on whose machine runs it
+    /// (eieio-6c7.13).
     #[arg(skip)]
-    pub cosign_password: Option<String>,
+    pub cosign_env: Vec<(String, OsString)>,
 }
 
 /// Builds the block, packages it as an OCI artifact, pushes it to `args.registry`, and signs
@@ -196,7 +203,7 @@ pub fn run(args: &PublishArgs) -> anyhow::Result<()> {
             &digest,
             key,
             credentials.as_ref(),
-            args.cosign_password.as_deref(),
+            &args.cosign_env,
         )?;
         println!("    signed   cosign, key {}", key.display());
     }
@@ -289,6 +296,24 @@ fn json_escape(text: &str) -> String {
     escaped
 }
 
+/// The [`PublishArgs::cosign_env`] for signing with a throwaway key whose passphrase is
+/// empty, against a loopback registry: `COSIGN_PASSWORD` empty, and `DOCKER_CONFIG` an empty
+/// directory created under `scratch` so no credential helper of this machine's is consulted.
+///
+/// For callers that drive [`run`] in-process — this module's tests and `eio-daemon`'s
+/// `registry::roundtrip` — so the isolation is written once (eieio-6c7.13).
+pub fn throwaway_key_cosign_env(scratch: &Path) -> Vec<(String, OsString)> {
+    let docker_config = scratch.join("docker");
+    std::fs::create_dir_all(&docker_config).expect("an empty DOCKER_CONFIG directory");
+    vec![
+        (String::from("COSIGN_PASSWORD"), OsString::new()),
+        (
+            String::from("DOCKER_CONFIG"),
+            docker_config.into_os_string(),
+        ),
+    ]
+}
+
 /// Signs the pushed manifest at `digest` with cosign, at cosign 3.1.3's own default *shape* —
 /// the Sigstore bundle format `crates/daemon/src/registry.rs` now verifies alongside legacy
 /// simple signing (DAEMON §4.2, eieio-8yq.18) — kept offline by two flags this module's own
@@ -308,15 +333,12 @@ fn sign(
     digest: &str,
     key: &Path,
     credentials: Option<&oci::Credentials>,
-    password: Option<&str>,
+    env: &[(String, OsString)],
 ) -> anyhow::Result<()> {
     let mut command = Command::new("cosign");
-    // Only when a caller supplied one. Without it the child inherits this process's
-    // environment and reads `COSIGN_PASSWORD` from there, which is what every real invocation
-    // does and what this line must not disturb (see `PublishArgs::cosign_password`).
-    if let Some(password) = password {
-        command.env("COSIGN_PASSWORD", password);
-    }
+    // Empty for every real invocation, so the child inherits this process's environment
+    // unchanged (see `PublishArgs::cosign_env`).
+    command.envs(env.iter().map(|(name, value)| (name, value)));
     command.args([
         "sign",
         "--yes",
@@ -371,16 +393,20 @@ mod tests {
     fn args(fake: &Fake, key: Option<PathBuf>) -> PublishArgs {
         // The throwaway key `generate_key` mints has an empty passphrase, handed to `cosign`
         // on its own child environment rather than set on this process's (see
-        // `PublishArgs::cosign_password`). That is what lets these tests hold no lock and use
+        // `PublishArgs::cosign_env`). That is what lets these tests hold no lock and use
         // no `unsafe`: `run` still only *reads* the environment, and reads race with nothing.
-        let signing = key.is_some();
+        let cosign_env = key
+            .as_deref()
+            .and_then(Path::parent)
+            .map(throwaway_key_cosign_env)
+            .unwrap_or_default();
         PublishArgs {
             registry: format!("{}/tlugger", fake.host()),
             key,
             username: None,
             password: None,
             manifest_path: Some(filter_manifest_path()),
-            cosign_password: signing.then(String::new),
+            cosign_env,
         }
     }
 
