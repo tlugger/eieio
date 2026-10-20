@@ -382,6 +382,14 @@ Synchronous by design: I2C transactions are microseconds-to-milliseconds and fal
 
 Request is a CBOR map: `{method, url, headers?, body?, timeout_ms?}`. Completion fires `eio_on_http(req_id, status, ptr, len)` where `(ptr, len)` is a host-allocated (via `eio_alloc`) CBOR map `{headers, body}` the guest MUST free. `status` < 0 = transport error; ≥ 0 = HTTP status. Async request-id pattern; the same shape applies to any future async capability.
 
+The fields have one shape in both directions:
+
+- `method`, `url`: text. `timeout_ms`: int.
+- `headers`: an **array of `[name, value]` pairs**, each a two-element array of text, in the order sent or received. Not a map: HTTP lets a header repeat (`Set-Cookie`), a map would collapse repeats to one, and §6.3.1 orders map keys, so a map could not carry the order either. Names are passed as written; comparing them case-insensitively is the reader's business.
+- `body`: bytes.
+
+The response map MUST carry both `headers` and `body`, even on a transport error, where they are `[]` and empty bytes: a guest decodes one shape and never a zero-length payload. In a request both are OPTIONAL and absent means empty.
+
 ---
 
 ## 8. Status and size return convention

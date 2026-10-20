@@ -78,11 +78,10 @@ impl HttpRequest {
         map.insert(String::from("method"), Value::Str(self.method.clone()));
         map.insert(String::from("url"), Value::Str(self.url.clone()));
         if !self.headers.is_empty() {
-            let mut headers = Map::new();
-            for (name, value) in &self.headers {
-                headers.insert(name.clone(), Value::Str(value.clone()));
-            }
-            map.insert(String::from("headers"), Value::Map(headers));
+            // An array of `[name, value]` pairs, not a map: a header may repeat and its order
+            // is the order sent (ABI §7.6), and a map would collapse the one and sort away the
+            // other.
+            map.insert(String::from("headers"), header_pairs(&self.headers));
         }
         if !self.body.is_empty() {
             map.insert(String::from("body"), Value::Bytes(self.body.clone()));
@@ -113,50 +112,60 @@ pub struct HttpResponse {
 impl HttpResponse {
     /// Decodes what `eio_on_http` was handed (ABI §7.6).
     ///
-    /// An empty payload is a response with no headers and no body, which is what a
-    /// transport error arrives as — there was nothing to report but the status.
+    /// The payload is always a `{headers, body}` map, a transport error included — there the
+    /// two are `[]` and empty bytes. Anything else, a zero-length payload among it, is a host
+    /// that broke §7.6, and it is reported rather than read as an empty response: silently
+    /// dropping a header a block was looking for would turn a host bug into a missing-header
+    /// branch taken for the wrong reason — the "missing data is an error, not null" posture
+    /// the platform holds everywhere else (EXPR §6).
     pub fn decode(status: i32, bytes: &[u8]) -> Result<HttpResponse, BlockError> {
-        let mut response = HttpResponse {
-            status,
-            ..HttpResponse::default()
-        };
-        if bytes.is_empty() {
-            return Ok(response);
-        }
         let Value::Map(map) = Value::from_cbor(bytes)? else {
-            return Err(BlockError::Decode(String::from(
-                "http response is not a map (ABI §7.6)",
-            )));
+            return Err(malformed("http response is not a map"));
         };
-        if let Some(headers) = map.get("headers") {
-            let Value::Map(headers) = headers else {
-                return Err(BlockError::Decode(String::from(
-                    "http response `headers` is not a map (ABI §7.6)",
+        let Some(Value::Array(pairs)) = map.get("headers") else {
+            return Err(malformed(
+                "http response `headers` is not an array of pairs",
+            ));
+        };
+        let mut headers = Vec::with_capacity(pairs.len());
+        for pair in pairs {
+            let Value::Array(pair) = pair else {
+                return Err(malformed(
+                    "http response header is not a [name, value] pair",
+                ));
+            };
+            let [Value::Str(name), value] = pair.as_slice() else {
+                return Err(malformed(
+                    "http response header is not a [name, value] pair",
+                ));
+            };
+            let Value::Str(value) = value else {
+                return Err(malformed(&alloc::format!(
+                    "http response header {name:?} is not a text string"
                 )));
             };
-            for (name, value) in headers.iter() {
-                // Reported, not skipped. Silently dropping a header a block was looking
-                // for would turn a host bug into a missing-header branch taken for the
-                // wrong reason — the "missing data is an error, not null" posture the
-                // platform holds everywhere else (EXPR §6).
-                let Value::Str(value) = value else {
-                    return Err(BlockError::Decode(alloc::format!(
-                        "http response header {name:?} is not a text string (ABI §7.6)"
-                    )));
-                };
-                response.headers.push((name.clone(), value.clone()));
-            }
+            headers.push((name.clone(), value.clone()));
         }
-        match map.get("body") {
-            Some(Value::Bytes(body)) => response.body = body.clone(),
-            None => {}
-            Some(_) => {
-                return Err(BlockError::Decode(String::from(
-                    "http response `body` is not a byte string (ABI §7.6)",
-                )));
-            }
-        }
-        Ok(response)
+        let Some(Value::Bytes(body)) = map.get("body") else {
+            return Err(malformed("http response `body` is not a byte string"));
+        };
+        Ok(HttpResponse {
+            status,
+            headers,
+            body: body.clone(),
+        })
+    }
+
+    /// The `{headers, body}` payload a host hands `eio_on_http` for this response (ABI §7.6).
+    ///
+    /// `status` travels beside it as its own argument, so it is not in the map. For a host
+    /// written in Rust — `eio-test-host` is one — so the shape a block decodes is the shape
+    /// the fast layer sends, and no hand-written payload can drift from it.
+    pub fn to_cbor(&self) -> Vec<u8> {
+        let mut map = Map::new();
+        map.insert(String::from("headers"), header_pairs(&self.headers));
+        map.insert(String::from("body"), Value::Bytes(self.body.clone()));
+        Value::Map(map).to_cbor()
     }
 
     /// Whether the request reached a server at all (ABI §7.6).
@@ -168,6 +177,26 @@ impl HttpResponse {
     pub const fn is_success(&self) -> bool {
         self.status >= 200 && self.status < 300
     }
+}
+
+/// `headers` as ABI §7.6 carries them in both directions: `[name, value]` pairs, in order.
+fn header_pairs(headers: &[(String, String)]) -> Value {
+    Value::Array(
+        headers
+            .iter()
+            .map(|(name, value)| {
+                Value::Array(alloc::vec![
+                    Value::Str(name.clone()),
+                    Value::Str(value.clone())
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// A response that does not have ABI §7.6's shape.
+fn malformed(what: &str) -> BlockError {
+    BlockError::Decode(alloc::format!("{what} (ABI §7.6)"))
 }
 
 super::handle! {

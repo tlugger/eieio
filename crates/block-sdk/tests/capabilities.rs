@@ -271,13 +271,55 @@ fn a_request_carries_headers_body_and_timeout_when_given() {
     assert_eq!(map.get("method"), Some(&Value::Str("POST".into())));
     assert_eq!(map.get("body"), Some(&Value::Bytes(b"hello".to_vec())));
     assert_eq!(map.get("timeout_ms"), Some(&Value::Int(2_500)));
-    let Some(Value::Map(headers)) = map.get("headers") else {
-        panic!("no headers");
-    };
     assert_eq!(
-        headers.get("content-type"),
-        Some(&Value::Str("text/plain".into()))
+        map.get("headers"),
+        Some(&pairs(&[("content-type", "text/plain")])),
+        "an array of [name, value] pairs (ABI §7.6)"
     );
+}
+
+#[test]
+fn a_repeated_header_survives_in_order() {
+    // ABI §7.6 makes `headers` pairs rather than a map for exactly this: a map would keep
+    // one `cookie` and sort the rest away.
+    let recorder = Recorder::new();
+    recorder.queue_id(1);
+    let request = HttpRequest::get("https://example.invalid/")
+        .header("cookie", "b=2")
+        .header("accept", "*/*")
+        .header("cookie", "a=1");
+    ctx().http().request(&request).expect("sent");
+    assert_eq!(
+        only_request(&recorder).get("headers"),
+        Some(&pairs(&[
+            ("cookie", "b=2"),
+            ("accept", "*/*"),
+            ("cookie", "a=1")
+        ]))
+    );
+}
+
+/// ABI §7.6's `headers`: `[name, value]` pairs, in order.
+fn pairs(headers: &[(&str, &str)]) -> Value {
+    Value::Array(
+        headers
+            .iter()
+            .map(|(name, value)| {
+                Value::Array(vec![
+                    Value::Str((*name).into()),
+                    Value::Str((*value).into()),
+                ])
+            })
+            .collect(),
+    )
+}
+
+/// A §7.6 response payload with `headers` and `body` as given.
+fn response_payload(headers: Value, body: &[u8]) -> Vec<u8> {
+    let mut map = eio_sdk::signal::Map::new();
+    map.insert("headers".into(), headers);
+    map.insert("body".into(), Value::Bytes(body.to_vec()));
+    Value::Map(map).to_cbor()
 }
 
 #[test]
@@ -285,32 +327,37 @@ fn a_transport_error_and_an_http_status_are_different_failures() {
     // ABI §7.6: status below zero is a transport error, at or above zero is the HTTP
     // status. A 404 is an answer and a DNS failure is not, so flattening them would lose
     // the distinction a block retries on.
-    let transport = HttpResponse::decode(-1, &[]).expect("decodes");
+    let empty = response_payload(pairs(&[]), b"");
+    let transport = HttpResponse::decode(-1, &empty).expect("decodes");
     assert!(!transport.reached_a_server());
     assert!(!transport.is_success());
 
-    let not_found = HttpResponse::decode(404, &[]).expect("decodes");
+    let not_found = HttpResponse::decode(404, &empty).expect("decodes");
     assert!(not_found.reached_a_server());
     assert!(!not_found.is_success());
 
-    let ok = HttpResponse::decode(200, &[]).expect("decodes");
+    let ok = HttpResponse::decode(200, &empty).expect("decodes");
     assert!(ok.reached_a_server() && ok.is_success());
 }
 
 #[test]
 fn a_response_decodes_headers_and_body() {
-    let mut headers = eio_sdk::signal::Map::new();
-    headers.insert("etag".into(), Value::Str("\"abc\"".into()));
-    let mut map = eio_sdk::signal::Map::new();
-    map.insert("headers".into(), Value::Map(headers));
-    map.insert("body".into(), Value::Bytes(b"{}".to_vec()));
-
-    let response = HttpResponse::decode(200, &Value::Map(map).to_cbor()).expect("decodes");
+    let payload = response_payload(
+        pairs(&[("etag", "\"abc\""), ("vary", "a"), ("vary", "b")]),
+        b"{}",
+    );
+    let response = HttpResponse::decode(200, &payload).expect("decodes");
     assert_eq!(
         response.headers,
-        [("etag".to_string(), "\"abc\"".to_string())]
+        [
+            ("etag".to_string(), "\"abc\"".to_string()),
+            ("vary".to_string(), "a".to_string()),
+            ("vary".to_string(), "b".to_string()),
+        ]
     );
     assert_eq!(response.body, b"{}");
+    // And the encoding a Rust host sends is the one this reads (`HttpResponse::to_cbor`).
+    assert_eq!(response.to_cbor(), payload);
 }
 
 // ── the manifest, and the ABI §4.2 pairing this issue exists to close ────────
@@ -333,15 +380,30 @@ fn a_malformed_response_is_reported_rather_than_partly_ignored() {
     // "Missing data is an error, not null" (EXPR §6) applies to what a host sends back
     // too. Dropping a header whose value is not a string would turn a host bug into a
     // missing-header branch a block takes for the wrong reason.
-    let mut headers = eio_sdk::signal::Map::new();
-    headers.insert("retry-after".into(), Value::Int(30));
-    let mut map = eio_sdk::signal::Map::new();
-    map.insert("headers".into(), Value::Map(headers));
-
-    let error = HttpResponse::decode(503, &Value::Map(map).to_cbor())
+    let retry_after = Value::Array(vec![Value::Array(vec![
+        Value::Str("retry-after".into()),
+        Value::Int(30),
+    ])]);
+    let error = HttpResponse::decode(503, &response_payload(retry_after, b""))
         .expect_err("a non-string header value");
     assert!(
         matches!(&error, BlockError::Decode(message) if message.contains("retry-after")),
         "{error:?}"
     );
+
+    // §7.6: the payload is always the map, a transport error included. A zero-length one,
+    // or a pre-§7.6 map of headers, is a host bug, not an empty response.
+    for bad in [Vec::new(), {
+        let mut headers = eio_sdk::signal::Map::new();
+        headers.insert("etag".into(), Value::Str("x".into()));
+        let mut map = eio_sdk::signal::Map::new();
+        map.insert("headers".into(), Value::Map(headers));
+        map.insert("body".into(), Value::Bytes(Vec::new()));
+        Value::Map(map).to_cbor()
+    }] {
+        assert!(
+            HttpResponse::decode(-1, &bad).is_err(),
+            "{bad:02x?} decoded"
+        );
+    }
 }

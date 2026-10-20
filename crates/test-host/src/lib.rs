@@ -383,18 +383,19 @@ impl<B: Block> TestHost<B> {
 
     /// Completes an HTTP request (ABI §4.2, §7.6).
     ///
-    /// `status` below zero is a transport error and at or above zero is the HTTP status,
-    /// exactly as the ABI defines it — so a test can script a DNS failure and a 404
-    /// separately, which is the distinction a block retries on.
+    /// `response.status` below zero is a transport error and at or above zero is the HTTP
+    /// status, exactly as the ABI defines it — so a test can script a DNS failure and a 404
+    /// separately, which is the distinction a block retries on. The payload the block
+    /// receives is [`HttpResponse::to_cbor`](eio_sdk::HttpResponse::to_cbor), the shape §7.6
+    /// fixes, so the fast layer cannot hand a block something a node never would.
     pub fn complete_http(
         &mut self,
         request: u32,
-        status: i32,
-        body: &[u8],
+        response: &eio_sdk::HttpResponse,
     ) -> Result<(), BlockError> {
-        let body = body.to_vec();
+        let (status, payload) = (response.status, response.to_cbor());
         self.callback(None, move |block, ctx| {
-            block.on_http(ctx, request, status, &body)
+            block.on_http(ctx, request, status, &payload)
         })
     }
 

@@ -12,14 +12,14 @@
       "expect": { "status": 0, "calls": [ "http_request" ], "emissions": [] }
     },
     {
-      "action": { "http": { "req": 7, "status": 200, "body": "a264626f647945deadbeef126768656164657273a0" } },
+      "action": { "http": { "req": 7, "status": 200, "body": "a264626f647945deadbeef12676865616465727380" } },
       "expect": {
         "status": 0,
         "calls": [ "emit" ],
         "emissions": [
           {
             "port": "out",
-            "batch": "81a164626f647955a264626f647945deadbeef126768656164657273a0"
+            "batch": "81a164626f647955a264626f647945deadbeef12676865616465727380"
           }
         ]
       }

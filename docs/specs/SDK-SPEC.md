@@ -195,7 +195,7 @@ keys exactly.
 |---|---|---|
 |`method: String`|`method`|never — required|
 |`url: String`|`url`|never — required|
-|`headers: Vec<(String, String)>`|`headers`|empty|
+|`headers: Vec<(String, String)>`|`headers`, as `[name, value]` pairs in order (ABI §7.6)|empty|
 |`body: Vec<u8>`|`body`|empty|
 |`timeout_ms: Option<i64>`|`timeout_ms`|`None` — the host's default applies|
 
@@ -203,7 +203,9 @@ Empty collections are **omitted** rather than encoded, which is ABI §11.1's pos
 throughout: absent and empty say the same thing, and one way to say it is better than two.
 
 `HttpResponse` carries the `status` the callback was given plus the decoded `{headers, body}`
-map. **`status` is not normalized.** Below zero is a transport error and at or above zero is
+map. Decoding is strict: a payload that is not §7.6's map with both keys — a zero-length one
+included — is `BlockError::Decode`, not an empty response. `HttpResponse::to_cbor` is the
+inverse, for a host written in Rust, and is what `TestHost::complete_http` sends. **`status` is not normalized.** Below zero is a transport error and at or above zero is
 the HTTP status (ABI §7.6); a 404 is an answer and a DNS failure is not, and a block retries
 differently for each. `reached_a_server()` and `is_success()` name the two questions rather
 than collapsing them.
@@ -550,7 +552,7 @@ divergence a conformance bug.
 |Driving|Meaning|
 |---|---|
 |`deliver(port, batch)` / `deliver_one(port, signal)`|ABI §6.1, by port *name*. A batch beyond `max_batch` is refused before the block is called, as §9.7 requires of a host|
-|`fire_timer(id)`, `fire_gpio(watch, level)`, `complete_http(req, status, body)`|ABI §4.2's callbacks. The host drives these because that is which side they happen on|
+|`fire_timer(id)`, `fire_gpio(watch, level)`, `complete_http(req, &HttpResponse)`|ABI §4.2's callbacks. The host drives these because that is which side they happen on|
 |`stop()`|ABI §5.1|
 
 |Asserting|Meaning|

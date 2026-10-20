@@ -112,10 +112,16 @@ fn an_http_completion_distinguishes_transport_from_status() {
     // half that logic untestable.
     let mut host = host();
 
-    host.complete_http(9, -1, &[]).expect("transport failure");
+    let response = |status| HttpResponse {
+        status,
+        ..HttpResponse::default()
+    };
+    host.complete_http(9, &response(-1))
+        .expect("transport failure");
     assert_eq!(host.block().last_status, Some(-1));
 
-    host.complete_http(9, 503, &[]).expect("a server answered");
+    host.complete_http(9, &response(503))
+        .expect("a server answered");
     assert_eq!(host.block().last_status, Some(503));
 }
 
