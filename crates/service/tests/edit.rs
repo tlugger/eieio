@@ -6,7 +6,7 @@
 //! provable by reading the implementation, because the property belongs to the parser
 //! underneath it.
 
-use eio_service::edit::{Document, EditError, WriteError};
+use eio_service::edit::{Document, EditError, WriteError, ui_entries};
 
 /// A file with every kind of trivia a preserving edit has to carry through.
 ///
@@ -630,4 +630,52 @@ fn a_rename_that_cannot_finish_leaves_the_original_in_place_and_cleans_up() {
         !temporary.exists(),
         "a failed rename must not leave its temporary behind"
     );
+}
+
+#[test]
+fn ui_entries_are_the_text_each_value_is_written_as() {
+    // SERVICE §6 / DESIGNER §4.1: a member the reader does not understand comes back as the
+    // text it was written as, so a caller can carry it into a later `set_ui` verbatim.
+    let entries = ui_entries(
+        r#"name = "kitchen"
+
+[blocks.b1]
+block = "filter:1.0.0"
+
+[ui]
+b1       = { x = 10.0, y = 20.0, locked = true,  note = "a, b" }
+viewport = { x = 0.0, y = 0.0, zoom = 1.5 }
+
+[ui.legend]
+title = "kitchen"
+"#,
+    )
+    .expect("declares [ui]");
+    assert_eq!(
+        entries,
+        [
+            (
+                String::from("b1"),
+                String::from(r#"{ x = 10.0, y = 20.0, locked = true,  note = "a, b" }"#)
+            ),
+            (
+                String::from("viewport"),
+                String::from("{ x = 0.0, y = 0.0, zoom = 1.5 }")
+            ),
+            (
+                String::from("legend"),
+                String::from(r#"{ title = "kitchen" }"#)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_file_with_no_ui_has_no_ui_entries() {
+    assert_eq!(
+        ui_entries("name = \"kitchen\"\n"),
+        None,
+        "absent, not empty"
+    );
+    assert_eq!(ui_entries("name = \"kitchen\"\n[ui]\n"), Some(Vec::new()));
 }

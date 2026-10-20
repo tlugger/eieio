@@ -166,7 +166,9 @@ The section is per node throughout, and that is DAEMON §9.8's reasoning rather 
 ### 3.2 Editing a service file is a stateless transform (normative)
 
 ```
-POST   /api/service-edit    { toml, operations: [ … ] } -> { toml } | 422 { errors }
+POST   /api/service-edit    { toml, operations: [ … ] } -> { toml, created? } | 422 { errors }
+POST   /api/service-parse   { toml } -> { name, autostart, overflow, blocks, connections,
+                                          ui? }                               | 422 { errors }
 ```
 
 The Designer holds no service file. The browser `GET`s the text from a node through §3.1's proxy, sends it here with what the operator just did, receives new text, and `PUT`s that back to the node. Nothing is stored between the two, and this endpoint has no notion of *which* service it is editing — it takes text and returns text.
@@ -190,7 +192,7 @@ The operations are `Document`'s own (SERVICE §9): `add_block`, `remove_block`, 
 
 This is not the Designer becoming a second reader of the service file format. It already links `eio-service` and drives `Document` for every edit, and §3.2's own reason applies unchanged: `eio-service` is this repository's one implementation of the format, and a second one — in Rust or in TypeScript — is what SERVICE §9's one-editor rule exists to prevent. **Compiling `eio-service` to wasm for the browser would honour that rule too**, since it is the same crate, and it was considered: it is rejected here for cost rather than correctness, because it adds a second wasm artifact to the bundle and a second build-pipeline step to do what one endpoint already can.
 
-**What the parsed view MUST NOT become is a second source of truth.** It is derived from the text on every request and never stored; the text remains what a `PUT` sends back, and the `[ui]` preservation rule of §4.1 applies to that text, not to any structure derived from it.
+**What the parsed view MUST NOT become is a second source of truth.** It is derived from the text on every request and never stored; the text remains what a `PUT` sends back, and the `[ui]` preservation rule of §4.1 applies to that text, not to any structure derived from it. That is also why the parsed view's `ui` is **text**: each top-level `[ui]` entry as the TOML value it is written as, read by `eio-service`'s own editor module (`eio_service::edit::ui_entries`), keyed by its `[ui]` key and absent when the file has no `[ui]` table. A value tree has already lost how a member was written, and §4.1 requires the member to come back verbatim.
 ## 4. Service editing model
 
 - **Read-modify-write of service files** through `GET/PUT /services/{s}`. The canvas is a _view of a TOML file_. Round-trip fidelity is a hard requirement: comments and formatting of hand-edited files SHOULD survive a Designer edit. The editor is not the Designer's own: SERVICE §9 makes a preserving edit the format's contract and `eio-service` implements it, so the backend reaches that crate rather than growing a second writer. Not by the WASM route §1 uses for `expr`: `eio-service` is a `std` crate and the backend is Rust, so it is an ordinary dependency. `expr` is compiled to WASM because the *browser* needs it on every keystroke, which is a different requirement with a different answer. A canvas whose idea of what a service file may say differed from the CLI's would be two formats.
@@ -219,7 +221,7 @@ Numbers are always emitted with a decimal point — a TOML float, never a bare i
 
 **The Designer MUST NOT interpret a preserved member, and MUST NOT normalise one.** It is opaque text; splitting it is quote- and depth-aware precisely so a comma inside a string or a nested inline table survives as itself.
 
-**Not yet reachable end to end, and stating so is the point** (eieio-m9s.26): nothing produces a *structured* `ui` from a real backend. `crates/daemon`'s `ServiceDetail` has no `ui` field, `crates/designer` has no handler that builds one, and `designer/src/lib/api/client.ts` still re-exports the whole service surface from the mock. So preservation is proven where it lives — the pure transform of DESIGNER §3.2 — and the wire representation of a preserved member is an open question for whoever wires the real path, not a settled part of this schema.
+**The wire representation of a preserved member is text** (eieio-m9s.47). §3.2's `/api/service-parse` answers each `[ui]` entry as the TOML value text it is written as; the browser reads `x`/`y`/`zoom` out of it by the rules above and carries every other member as opaque text into the next `set_ui` for that entry. So the member a canvas does not understand never passes through a structure at all — it leaves the file as text and goes back as the same text. An entry written as its own table (`[ui.b1]`) rather than a value has no value text, and comes back as the equivalent inline table: the one case where what the Designer re-splices is `eio-service`'s formatting rather than the author's, and the entry is still not lost.
 
 ## 5. Canvas and editing UX
 

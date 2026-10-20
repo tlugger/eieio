@@ -275,6 +275,41 @@ pub struct Document {
     doc: DocumentMut,
 }
 
+/// Every top-level `[ui]` entry of a service file, as the TOML value text it is written as
+/// (SERVICE §6, DESIGNER §4.1), or `None` when the file has no `[ui]` table — which is not the
+/// same thing as an empty one.
+///
+/// The read counterpart of [`Document::set_ui`], and the same deliberate refusal to have an
+/// opinion: each value comes back as source text — `{ x = 148.0, y = 234.0, locked = true }` —
+/// never as a structure this crate had to choose a type for. Text, and not a value tree, is what
+/// lets a caller carry a member it does not understand back into a later `set_ui` verbatim,
+/// which §6's "MUST survive a read-modify-write unchanged" requires of it.
+///
+/// An entry written as a value (`b1 = { … }`) is returned as written, surrounding whitespace
+/// aside. One written as its own table (`[ui.b1]`) has no value text to return, so it is
+/// rendered as the equivalent inline table — the one case where what comes back is
+/// `toml_edit`'s formatting rather than the author's.
+///
+/// Reads `text` as TOML only: it validates nothing about the service, so a caller that needs
+/// the file to be one runs [`crate::parse`] first. `None` too for text that is not TOML.
+pub fn ui_entries(text: &str) -> Option<Vec<(String, String)>> {
+    let doc = text.parse::<DocumentMut>().ok()?;
+    let ui = doc.get("ui")?.as_table_like()?;
+    Some(
+        ui.iter()
+            .filter_map(|(key, item)| {
+                let text = match item {
+                    Item::Value(value) => value.to_string(),
+                    Item::Table(table) => table.clone().into_inline_table().to_string(),
+                    Item::ArrayOfTables(array) => array.clone().into_array().to_string(),
+                    Item::None => return None,
+                };
+                Some((key.to_owned(), text.trim().to_owned()))
+            })
+            .collect(),
+    )
+}
+
 impl Document {
     /// Opens `text` for editing, if it is a valid service file.
     ///

@@ -74,8 +74,11 @@ pub struct In {
 }
 
 /// One `Document` mutation (SERVICE §9), named and shaped after the method it calls.
+///
+/// **An unknown field is refused, not ignored**: an ignored one is an edit the caller asked for
+/// and did not get, reported as success.
 #[derive(Debug, Deserialize, ToSchema)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     /// [`Document::add_block`]. `id` is minted when omitted — see the module doc.
     AddBlock {
@@ -514,6 +517,34 @@ b7k2 = { x = 10, y = 20 }
 
     fn ops(json: serde_json::Value) -> Vec<Operation> {
         serde_json::from_value(json).expect("valid operations JSON")
+    }
+
+    #[test]
+    fn an_operation_field_this_endpoint_does_not_know_is_refused() {
+        // What the SPA once sent (eieio-m9s.47). Each has to fail at the boundary: a field the
+        // server ignored would be an edit the operator asked for and did not get.
+        for json in [
+            r#"{"op":"add_block","id":"b1","block":"filter:1.0.0","props":{"t":"1"}}"#,
+            r#"{"op":"set_ui","key":"b1","value":"{ x = 1.0, y = 2.0 }"}"#,
+            r#"{"op":"set_autostart","value":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Operation>(json).is_err(),
+                "{json} was accepted"
+            );
+        }
+        // And the shapes it sends now are accepted.
+        for json in [
+            r#"{"op":"add_block","id":"b1","block":"filter:1.0.0"}"#,
+            r#"{"op":"set_ui","path":["b1"],"value":"{ x = 1.0, y = 2.0 }"}"#,
+            r#"{"op":"remove_ui","path":["viewport"]}"#,
+            r#"{"op":"set_autostart","autostart":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<Operation>(json).is_ok(),
+                "{json} was refused"
+            );
+        }
     }
 
     async fn run(toml: &str, operations: Vec<Operation>) -> Result<Json<Out>, Failure> {

@@ -20,13 +20,15 @@
 //! # `[ui]` is reshaped, never interpreted
 //!
 //! [`eio_service::schema::Service`] holds `[ui]` as an opaque `toml::Value` (SERVICE §6: it has
-//! no schema there and never will). [`Out::ui`] is that same value, converted to JSON member for
-//! member and nothing more — not the `{x, y, zoom}` shape DESIGNER §4.1 gives the *write* path,
-//! which is this shell's own convention for a value it is about to send back through
-//! `Document::set_ui`, not a fact about what `[ui]` universally contains. Interpreting known
-//! keys for the canvas to draw with is `designer/src/lib/service/toml-values.ts`'s job on the
-//! frontend, the same file that already owns writing them; duplicating that convention here
-//! would be two implementations of DESIGNER §4.1 finding new ways to disagree.
+//! no schema there and never will). [`Out::ui`] is each top-level entry as the TOML value
+//! **text** it is written as, read by `eio-service`'s own editor
+//! ([`eio_service::edit::ui_entries`]) — not a value tree, and not the `{x, y, zoom}`
+//! shape DESIGNER §4.1 gives the *write* path. Text because §4.1 requires a member the canvas
+//! does not understand to be carried into a later `set_ui` verbatim, and a value tree has
+//! already lost how it was written. Interpreting known keys for the canvas to draw with is
+//! `designer/src/lib/service/toml-values.ts`'s job on the frontend, the same file that already
+//! owns writing them; duplicating that convention here would be two implementations of DESIGNER
+//! §4.1 finding new ways to disagree.
 //!
 //! **This is a read, and only a read.** DESIGNER §3.2's amendment is explicit that the parsed
 //! view this endpoint answers is derived fresh on every request and is never a second source of
@@ -85,11 +87,12 @@ pub struct Out {
     pub blocks: BTreeMap<String, BlockOut>,
     /// The wiring, parsed (SERVICE §5), in file order.
     pub connections: Vec<ConnectionOut>,
-    /// `[ui]`, reshaped to JSON member for member and never interpreted — see the module doc.
+    /// `[ui]`'s top-level entries, each as the TOML value **text** it is written as
+    /// ([`eio_service::edit::ui_entries`]) — never interpreted, see the module doc.
     /// Absent when the file has no `[ui]` table at all, which is not the same thing as an empty
     /// one (SERVICE §6 makes both legal, and a canvas may care which).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ui: Option<serde_json::Value>,
+    pub ui: Option<BTreeMap<String, String>>,
 }
 
 /// One block instance (SERVICE §4), `id` folded in from the map key it was found under.
@@ -161,14 +164,11 @@ pub async fn parse(Json(body): Json<In>) -> Result<Json<Out>, Failure> {
         })
         .collect();
 
-    // `toml::Value: Serialize` for any serializer, `[ui]`'s own included — this is a reshaping
-    // of a value `eio_service::parse` already produced, not a second reading of the file
-    // (`eio-designer` never spells `toml::Value` itself; the type is inferred from
-    // `parsed.service.ui`'s own field, matching the module doc's "reshaped, never interpreted").
-    let ui = parsed.service.ui.map(|value| {
-        serde_json::to_value(value)
-            .expect("a toml::Value's Serialize impl cannot fail into serde_json::Value")
-    });
+    // Text, from the one editor (SERVICE §9), rather than a value tree: DESIGNER §4.1 requires a
+    // member the canvas does not understand to survive a later `set_ui` verbatim, and only the
+    // text it was written as can be handed back that way. `eio_service::parse` has already
+    // validated the file, so this reads it as TOML and nothing more.
+    let ui = eio_service::edit::ui_entries(&body.toml).map(|entries| entries.into_iter().collect());
 
     Ok(Json(Out {
         name: parsed.service.name,
@@ -263,11 +263,23 @@ b7k2 = { x = 10, y = 20 }
             .expect("the fixture is a valid service")
             .0;
 
-        // Reshaped to JSON, not reduced to `{x, y}`: a hand-written third member would still be
-        // here, because nothing in this handler looks for `x`/`y`/`zoom` specifically.
+        // The entry's own text, not a value tree and not reduced to `{x, y}`: nothing in this
+        // handler looks for `x`/`y`/`zoom` (DESIGNER §4.1).
         let ui = out.ui.expect("the fixture declares [ui]");
-        assert_eq!(ui["b7k2"]["x"], serde_json::json!(10));
-        assert_eq!(ui["b7k2"]["y"], serde_json::json!(20));
+        assert_eq!(ui["b7k2"], "{ x = 10, y = 20 }");
+    }
+
+    #[tokio::test]
+    async fn a_member_nobody_understands_comes_back_verbatim() {
+        // DESIGNER §4.1's second scope: an extra member inside a known entry is carried
+        // forward exactly as written — quoting, a comma inside a string, odd spacing and all.
+        let toml =
+            "name = \"k\"\n\n[ui]\nb1 = { x = 1.0, y = 2.0, note = 'a, b',  locked = true }\n";
+        let ui = run(toml).await.expect("valid").0.ui.expect("declares [ui]");
+        assert_eq!(
+            ui["b1"],
+            "{ x = 1.0, y = 2.0, note = 'a, b',  locked = true }"
+        );
     }
 
     #[tokio::test]
