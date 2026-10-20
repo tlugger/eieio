@@ -1,0 +1,25 @@
+{
+  "name": "timer-refuses-a-non-delay-and-an-unknown-id",
+  "spec": "§7.3, §8, §13.1",
+  "note": "ABI §7.3, settled by eieio-6c7.9: a delay_ms that is zero or negative is ERR_INVALID_ARG, and timer_cancel of an id this instance has no live timer for is ERR_NOT_FOUND. The daemon, the leaf and host-core's shared decode half already answered both; the reference harness handed out an id for any delay, so before this scenario the reference host and both production hosts disagreed and no suite noticed. Each status is the host's answer unmodified, and both refusals are status codes, never deaths (§8): the instance answers all three calls and stops balanced.",
+  "module": "blocks/timer_refusals.wat",
+  "limits": { "max_payload": 1024, "max_batch": 16, "max_emission_bytes": null },
+  "steps": [
+    { "action": "configure", "expect": { "status": 0 } },
+    { "action": "start", "expect": { "status": 0 } },
+    {
+      "action": { "deliver": { "port": "zero", "batch": "81a1616e01" } },
+      "expect": { "status": -1, "calls": [ "timer_set" ], "emissions": [] }
+    },
+    {
+      "action": { "deliver": { "port": "negative", "batch": "81a1616e01" } },
+      "expect": { "status": -1, "calls": [ "timer_set" ], "emissions": [] }
+    },
+    {
+      "action": { "deliver": { "port": "cancel", "batch": "81a1616e01" } },
+      "expect": { "status": -7, "calls": [ "timer_cancel" ], "emissions": [] }
+    },
+    { "action": "stop", "expect": { "status": 0 } }
+  ],
+  "expect": { "errors": 3 }
+}

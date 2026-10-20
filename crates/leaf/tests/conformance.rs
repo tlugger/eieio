@@ -30,7 +30,7 @@ use eio_manifest::Capability;
 /// A floor to raise as skips are closed, never a number to adjust downwards. The four that do
 /// not reach it are the leaf's, not an engine's — see [`LeafHost::capabilities`] and
 /// [`LeafHost::enforces_budgets`] — which is exactly why both engines answer it.
-const SCENARIOS_REACHED: usize = 31;
+const SCENARIOS_REACHED: usize = 32;
 
 /// One of `eio_leaf`'s engine bindings, as a conformance [`Host`].
 ///
@@ -56,8 +56,8 @@ impl<E: Engine> Host for LeafHost<E> {
     ///
     /// **This is the leaf's answer, not an engine's**, which is why it does not vary below
     /// even though `crates/conformance/tests/wamr.rs` — the same engine, wrapped by the
-    /// reference suite rather than by the leaf — declares all five and reaches 31 scenarios.
-    /// The difference between 28 and 31 is three capability namespaces `crates/leaf` has no
+    /// reference suite rather than by the leaf — declares all five and reaches 35 scenarios.
+    /// The difference between 32 and 35 is three capability namespaces `crates/leaf` has no
     /// host functions for (eieio-x7g.4 records why writing them here would be a fourth copy
     /// of code that belongs in one place); it is not a difference between the engines.
     ///
@@ -136,7 +136,7 @@ fn the_conformance_suite_runs_on_the_leafs_wasm3_binding() {
 /// (eieio-x7g.2.5).
 ///
 /// LEAF §3 names WAMR as *the* leaf engine, so this is the run that matters most for a real
-/// leaf, and its equality with the wasm3 run above is the finding: 28 either way, with the
+/// leaf, and its equality with the wasm3 run above is the finding: 32 either way, with the
 /// same four scenarios skipped by the same four names.
 #[test]
 fn the_conformance_suite_runs_on_the_leafs_wamr_binding() {

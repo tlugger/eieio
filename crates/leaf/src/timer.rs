@@ -76,6 +76,9 @@ impl Scheduled {
 
     /// Arms a new timer due `delay_ms` after `now_ms` (ABI §7.3).
     fn set(&mut self, now_ms: i64, delay_ms: i64, repeat: bool) -> Result<u32, TimerError> {
+        // ABI §7.3's refusal is `eio_host_core::timer::set`'s, made before a guest's call gets
+        // here; this is a backstop for a direct caller, since a non-positive period would make
+        // a repeating timer due forever.
         if delay_ms <= 0 {
             return Err(TimerError::InvalidArg);
         }

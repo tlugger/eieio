@@ -69,9 +69,9 @@ pub trait Timers {
 /// fatal — a non-zero return is logged and counted, never a death (§8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimerError {
-    /// `delay_ms` is not a delay a clock can honor — negative, or zero (ABI §7.3 sets no
-    /// floor, so this host's is the smallest interval it is willing to schedule at all: more
-    /// than zero).
+    /// `delay_ms` is not a delay a clock can honor. ABI §7.3 makes zero and negative delays
+    /// this on every host, and [`set`] refuses those before a `Timers` is asked; an
+    /// implementation returns it for anything else it cannot schedule.
     InvalidArg,
     /// `timer_cancel` named an id this host has no timer for — never armed, already
     /// cancelled, or a one-shot that already fired.
@@ -124,6 +124,12 @@ pub fn set(call: HostCall<'_>, timers: &mut dyn Timers) -> Ret {
     let [Arg::I64(delay_ms), Arg::I32(repeat)] = *call.args else {
         return invalid();
     };
+    // ABI §7.3: a delay that is zero or negative is not a delay, and is ERR_INVALID_ARG on
+    // every host. Refused here, in the half every host shares, so no `Timers` can disagree —
+    // the reference harness once handed out an id for any delay (eieio-6c7.9).
+    if delay_ms <= 0 {
+        return invalid();
+    }
     match timers.set(delay_ms, repeat != 0) {
         Ok(timer_id) => Ret::I32(timer_id as i32),
         Err(error) => Ret::I32(error.as_code().as_i32()),

@@ -116,9 +116,9 @@ impl Scheduler {
 
 impl Timers for Scheduler {
     fn set(&mut self, delay_ms: i64, repeat: bool) -> Result<u32, TimerError> {
-        // `0` is refused rather than treated as "fire on the next poll": `tokio::time::interval`
-        // panics on a zero period, and a one-shot of delay `0` is not a case ABI §7.3 asks a
-        // host to make instant rather than merely soon (§7.3: "not real-time guarantees").
+        // ABI §7.3's refusal of a zero or negative delay is `eio_host_core::timer::set`'s, made
+        // before this runs. Kept here only as a backstop for a direct caller, because
+        // `tokio::time::interval` panics on a zero period.
         let millis = u64::try_from(delay_ms).map_err(|_| TimerError::InvalidArg)?;
         if millis == 0 {
             return Err(TimerError::InvalidArg);

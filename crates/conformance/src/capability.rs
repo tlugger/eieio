@@ -24,6 +24,7 @@ use std::rc::Rc;
 
 use eio_host_core::{
     Arg, Engine, EngineError, ErrorCode, HostCall, OutBuffer, Ret, StateError, StateStore,
+    TimerError, Timers,
 };
 use eio_manifest::Capability;
 
@@ -165,12 +166,18 @@ impl Capabilities {
             "state_get" => eio_host_core::state::get(call, &mut *self.shared.borrow_mut()),
             "state_put" => eio_host_core::state::put(call, &mut *self.shared.borrow_mut()),
             "state_del" => eio_host_core::state::del(call, &mut *self.shared.borrow_mut()),
-            "timer_set" | "gpio_watch" | "http_request" => Ret::I32(self.next_id()),
-            // ABI §8's `ERR_NOT_FOUND` is "key/id does not exist", so an unknown id is one.
-            // Nothing here tracks which ids are live, because a scenario that cancels an id
-            // it was handed is the only shape worth supporting and this host handed out
-            // every id below `next_id`.
-            "timer_cancel" | "gpio_unwatch" => Ret::I32(self.known_id(call)),
+            // `eio:timer`'s two are `eio_host_core`'s too, over this harness's id counter, for
+            // the reason `eio:state`'s are: ABI §7.3's refusals are decided there, and a
+            // reference host with its own reading of them once handed out an id for a delay
+            // of zero that both production hosts refused (eieio-6c7.9).
+            "timer_set" => eio_host_core::timer::set(call, &mut Ids(self)),
+            "timer_cancel" => eio_host_core::timer::cancel(call, &mut Ids(self)),
+            "gpio_watch" | "http_request" => Ret::I32(self.next_id()),
+            "gpio_unwatch" => Ret::I32(match *call.args {
+                [Arg::I32(id)] if self.known_id(id) => 0,
+                [Arg::I32(_)] => ErrorCode::NotFound.as_i32(),
+                _ => ErrorCode::InvalidArg.as_i32(),
+            }),
             // Nothing to answer with beyond "done": ABI §7.4's writes and mode changes have
             // no result, and this host has no pins.
             "gpio_mode" | "gpio_write" | "i2c_write" => Ret::I32(0),
@@ -209,16 +216,30 @@ impl Capabilities {
         id
     }
 
-    /// `0` if this host handed out that id, `ERR_NOT_FOUND` otherwise.
-    fn known_id(&self, call: HostCall<'_>) -> i32 {
-        let [Arg::I32(id)] = *call.args else {
-            return ErrorCode::InvalidArg.as_i32();
-        };
-        if (0..self.shared.borrow().next_id).contains(&id) {
-            0
-        } else {
-            ErrorCode::NotFound.as_i32()
-        }
+    /// Whether this host handed out `id`.
+    ///
+    /// ABI §8's `ERR_NOT_FOUND` is "key/id does not exist", so an unknown id is one. Nothing
+    /// here tracks which ids are live, because a scenario that cancels an id it was handed is
+    /// the only shape worth supporting and this host handed out every id below `next_id`.
+    fn known_id(&self, id: i32) -> bool {
+        (0..self.shared.borrow().next_id).contains(&id)
+    }
+}
+
+/// This harness's [`Timers`]: ids from the shared counter, and no
+/// clock, because a scenario fires timers itself.
+struct Ids<'a>(&'a Capabilities);
+
+impl Timers for Ids<'_> {
+    fn set(&mut self, _delay_ms: i64, _repeat: bool) -> Result<u32, TimerError> {
+        Ok(self.0.next_id() as u32)
+    }
+
+    fn cancel(&mut self, timer_id: u32) -> Result<(), TimerError> {
+        self.0
+            .known_id(timer_id as i32)
+            .then_some(())
+            .ok_or(TimerError::NotFound)
     }
 }
 

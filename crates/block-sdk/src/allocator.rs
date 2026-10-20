@@ -186,10 +186,9 @@ unsafe impl core::alloc::GlobalAlloc for Heap {
 /// overflows when rounded up to [`ALLOC_ALIGN`].
 fn layout(size: i32) -> Option<Layout> {
     if size <= 0 {
-        // Zero is not an allocation: §9.6 calls a "zero-but-nonzero-length" pointer one of
-        // the things that makes an instance untrustworthy, and handing out a pointer to a
-        // zero-sized block invites exactly that. Negative is a host that got its own
-        // arithmetic wrong.
+        // Zero is not an allocation, and answering it with `0` is §9.5's refusal, which an
+        // instance survives; a pointer to a zero-sized block would be a real address the host
+        // might write through. Negative is a host that got its own arithmetic wrong.
         return None;
     }
     Layout::from_size_align(size as usize, ALLOC_ALIGN as usize).ok()
@@ -312,8 +311,8 @@ mod tests {
 
     #[test]
     fn a_non_positive_size_refuses_rather_than_handing_out_a_pointer() {
-        // ABI §9.6 calls a zero-but-nonzero-length pointer grounds for discarding the
-        // instance, so the one thing this must not do is hand out a real pointer.
+        // `0` is ABI §9.5's survivable refusal; a real pointer to nothing is what this must
+        // not hand out.
         for size in [0, -1, i32::MIN] {
             assert!(allocate(size).is_null(), "size {size} should refuse");
         }
